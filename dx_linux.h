@@ -829,6 +829,9 @@ extern bool  gFogEnabled;		// toggled with G
 extern float gFogDensity;		// 'a' in the IQ formula
 extern float gFogHeightScale;	// 'b' = density * this; larger = thinner with altitude
 extern float gFogSkyColor[3];
+extern float gFogMaxAmount;		// upper clamp on the fog blend, 1.0 = no limit.
+								// Lowered around a draw call to keep something readable at
+								// any distance - see the opponent's car in OnFrameRender().
 #endif
 
 /*	--------------------------------------------------------------------------------------- */
@@ -885,6 +888,7 @@ private:
   GLint  mFogU_ModelView = -1, mFogU_ColorMode = -1, mFogU_Texture = -1;
   GLint  mFogU_Density = -1, mFogU_HeightScale = -1, mFogU_SkyColor = -1;
   GLint  mFogU_SunDirView = -1, mFogU_CameraPos = -1, mFogU_WorldUpView = -1;
+  GLint  mFogU_MaxAmount = -1;
 #endif
 #ifdef SCR_SHARP_PIXEL
   bool  EnsureSharpProgram();							// lazily compiles, once

@@ -153,6 +153,12 @@ extern double gDbgXAngle, gDbgZAngle, gDbgXRotSpeed, gDbgZRotSpeed;
 // PosPlayersZSpeed that decides whether the blend is bypassed at all.
 extern double gDbgRawRoadFL, gDbgPosZSpeed, gDbgSurfZ;
 extern int    gDbgBlendUsed;
+// The surface coordinates the front-left lookup actually used, so they can be
+// compared against the ones legacy's CalculateWorldRoadHeight derived
+// geometrically for the same wheel. Corner Y data and the two interpolators
+// have both been proven to agree, so any residual road-height difference on
+// straights has to show up here as a fraction/segment mismatch.
+extern int    gDbgFV2Section, gDbgFV2Seg, gDbgFV2ZFrac, gDbgFV2XFrac;
 
 // Adapters between legacy fixed-point globals (player_x, etc. in
 // Car_Behaviour.cpp) and PhysicsStateF. Implemented in Car_Behaviour.cpp,

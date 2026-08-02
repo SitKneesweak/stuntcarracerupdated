@@ -273,6 +273,10 @@ static void CalculateIfCarOffRoad (long *height);
 static void CalculateWorldRoadHeight (long wheel, long x, long z, long *y_out);
 
 static void GetSurfaceCoords (long piece, long segment);
+
+// Front-left surface position as legacy computes it, for the FloatV2 dump
+// (written in CalculateWorldRoadHeight).
+static long gDbgLegacyPiece = 0, gDbgLegacySeg = 0, gDbgLegacyZFrac = 0, gDbgLegacyXFrac = 0;
 static long CalcDistanceOffRoad (long x, long z,
 								 long ox, long oz,
 								 long ux, long uz,
@@ -1016,6 +1020,14 @@ static void CarMovement (void)
 				   scr::gDbgRawRoadFL, scr::gDbgRoadFL, scr::gDbgSurfZ,
 				   scr::gDbgPosZSpeed, scr::gDbgBlendUsed,
 				   players_distance_into_section);
+			printf("    surfFL: legacy sec/seg/zF/xF %ld/%ld/%ld/%ld | fv2 %d/%d/%d/%d"
+				   "  (dz %ld  dx %ld)\n",
+				   gDbgLegacyPiece, gDbgLegacySeg, gDbgLegacyZFrac, gDbgLegacyXFrac,
+				   scr::gDbgFV2Section, scr::gDbgFV2Seg,
+				   scr::gDbgFV2ZFrac, scr::gDbgFV2XFrac,
+				   (long)((scr::gDbgFV2Seg*256 + scr::gDbgFV2ZFrac)
+						  - (gDbgLegacySeg*256 + gDbgLegacyZFrac)),
+				   (long)(scr::gDbgFV2XFrac - gDbgLegacyXFrac));
 			printf("    tilt: xAng %.0f (spd %.1f)  zAng %.0f (spd %.1f)\n",
 				   scr::gDbgXAngle, scr::gDbgXRotSpeed,
 				   scr::gDbgZAngle, scr::gDbgZRotSpeed);
@@ -1776,6 +1788,20 @@ static void CalculateWorldRoadHeight (long wheel, long x, long z, long *y_out)
 	fprintf(out, "interpolate sx4, sy4, sz4: 0x%x, 0x%x, 0x%x\n", sx4, sy4, sz4);
 	}
 #endif
+
+	// Diagnostic for the residual straight-line road-height difference against
+	// FloatV2. The corner Y data and the two interpolators have both been shown
+	// to agree exactly, so the only place a difference can come from is the
+	// surface position itself — which legacy derives geometrically here and
+	// FloatV2 reconstructs from players_distance_into_section plus a scaled
+	// wheel offset. Reported in FloatV2's 0-255 fractions for direct comparison.
+	if (wheel == FRONT_LEFT)
+		{
+		gDbgLegacyPiece = piece;
+		gDbgLegacySeg   = calculated_segment;
+		gDbgLegacyZFrac = sz >> (LOG_SURFACE_SIZE-8);
+		gDbgLegacyXFrac = sx >> (LOG_SURFACE_SIZE-8);
+		}
 
 	// first do x interpolation
 	sya = sy1 + ((sx * (sy4-sy1)) >> LOG_SURFACE_SIZE);

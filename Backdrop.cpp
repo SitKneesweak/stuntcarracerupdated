@@ -33,7 +33,17 @@ extern FILE *out;
 /*	=========== */
 /*	Static data */
 /*	=========== */
-static long current_scenery_type = MAX_SCENERY_TYPE;
+// Default to the standard mountains, which is what the Amiga actually draws: its
+// positions.and.numbers table only ever references scenery IDs 0-13, and
+// initialise.mountains forces table 0 for every track (see "Reference only/
+// StuntCarRacer.s" around draw.mountains).  The taller/snowcapped/building/mixed sets
+// are PC-port additions and remain available on F4.
+static long current_scenery_type = MIN_SCENERY_TYPE;
+
+// Unclipped screen-space horizon line, stored by DrawHorizon for DrawScenery's use.
+// The two points come straight out of the projection loop, before ClipLine touches them.
+static COORD_2D horizon_line[2];
+static long horizon_line_valid = FALSE;
 
 /*	===================== */
 /*	Function declarations */
@@ -190,6 +200,12 @@ static void DrawHorizon( long viewpoint_y,
 		screen_coords[i].y = y;
 		}
 
+	// remember the unclipped horizon line so that DrawScenery can rest the
+	// scenery silhouettes exactly on it (see SnapSceneryBaseToHorizon)
+	horizon_line[0] = screen_coords[0];
+	horizon_line[1] = screen_coords[1];
+	horizon_line_valid = TRUE;
+
 	x1 = screen_coords[0].x; y1 = screen_coords[0].y;
 	x2 = screen_coords[1].x; y2 = screen_coords[1].y;
 
@@ -201,6 +217,16 @@ static void DrawHorizon( long viewpoint_y,
 	long max_x = screen_width - 1;
 	long max_y = screen_height - 1;
 	long on_screen, draw, ytop = 0, ybottom = 0, colour_index = 0;
+
+	// The sections below tile the screen from a clipped line, and their +/-1 edge cases
+	// do not quite meet in every configuration, leaving a seam a few pixels tall near the
+	// horizon.  The original D3D path never showed it because it clears only the Z buffer
+	// (D3DCLEAR_ZBUFFER) and lets the backdrop own every pixel, but the SDL/GL path clears
+	// the colour buffer to black each frame, so the seam appears as a black bar.
+	// Lay down the ground colour first so every pixel is covered no matter which branch
+	// runs; the sky section then paints over it, and any residual seam sits on the horizon
+	// where the ground colour is what belongs there anyway.
+	DrawFilledRectangle(min_x, min_y, max_x, max_y, SCRGB(GROUND_COLOUR));
 
 	if ((x1 > x2) || ((x1 == x2) && (y1 > y2)))
 		upside_down = (! upside_down);
@@ -424,6 +450,63 @@ static void DrawHorizon( long viewpoint_y,
 	}
 
 /*	======================================================================================= */
+/*	Function:		SnapSceneryBaseToHorizon												*/
+/*																							*/
+/*	Description:	Slide a projected scenery base vertex down onto the horizon line		*/
+/*	======================================================================================= */
+
+// DrawHorizon approximates the horizon with a single line through two points at
+// z = 0x00010000, whereas DrawScenery places every object on a circle of that same
+// radius.  The two only agree near the centre of the screen, so as the viewpoint
+// pitches and rolls a scenery object's base can end up above the horizon line, leaving
+// a band of sky between the silhouette and the ground.  The original code hid this with
+// a fixed downward fudge (the +2 * SCENERY_X_Y_SCALE_FACTOR below), which is worth about
+// a pixel and is not enough at this resolution.
+//
+// Distant scenery stands *at* the horizon by definition, so rather than guess at a fudge
+// we rest each base vertex directly on the horizon line, and only ever push a vertex
+// down - a vertex already below the line is left where the original code put it.
+
+#define	HORIZON_OVERLAP	1.0		// pixels to sink the base below the line, to close the seam
+
+static void SnapSceneryBaseToHorizon( COORD_2D *point,
+									  short sin_z,
+									  short cos_z,
+									  short cos_x )
+	{
+	if (! horizon_line_valid)
+		return;
+
+	// Screen-space direction of "world down" for scenery, i.e. the direction the fudge
+	// nudges a vertex in.  The z rotation maps world down to (-sin_z, cos_z); the x
+	// rotation then scales it by cos_x, whose sign flips once the viewpoint pitches
+	// past vertical (which is exactly when the ground is drawn above the horizon).
+	double nx = -(double)sin_z / PRECISION;
+	double ny =  (double)cos_z / PRECISION;
+
+	if (cos_x < 0)
+		{
+		nx = -nx;
+		ny = -ny;
+		}
+
+	// The horizon line is perpendicular to that direction, so this can never be parallel
+	// to the line and the signed distance is always well defined.
+	double d = ((double)(point->x - horizon_line[0].x) * nx) +
+			   ((double)(point->y - horizon_line[0].y) * ny);
+
+	if (d < HORIZON_OVERLAP)
+		{
+		double t = HORIZON_OVERLAP - d;
+		double dx = nx * t;
+		double dy = ny * t;
+
+		point->x += (long)(dx + ((dx >= 0.0) ? 0.5 : -0.5));
+		point->y += (long)(dy + ((dy >= 0.0) ? 0.5 : -0.5));
+		}
+	}
+
+/*	======================================================================================= */
 /*	Function:		DrawScenery																*/
 /*																							*/
 /*	Description:	Draw the current scenery using the supplied viewpoint					*/
@@ -441,6 +524,13 @@ typedef struct
 	long	coordsSize;		// memory size for coords
 	long	numPolygons;
 	long	*polygons;
+
+	// Most scenery is a silhouette standing on the ground, so its y == 0 vertices are a
+	// footing that belongs on the horizon (see SnapSceneryBaseToHorizon).  The lake is
+	// not - the Amiga treats a vertex's y as height above the horizon baseline, and the
+	// lake deliberately straddles that line, so snapping would lift it into the sky.
+	// Left zero (FALSE) by the initialisers of every object except the lake.
+	long	spansHorizon;
 	} SCENERY;
 
 static void DrawScenery( long viewpoint_y,
@@ -736,7 +826,7 @@ static void DrawScenery( long viewpoint_y,
 	static SCENERY building3 = {building3_c, sizeof(building3_c), 2, building_p};
 	static SCENERY building4 = {building4_c, sizeof(building4_c), 2, building_p};
 
-	static SCENERY lake = {lake_c, sizeof(lake_c), 1, lake_p};
+	static SCENERY lake = {lake_c, sizeof(lake_c), 1, lake_p, TRUE};
 
 	static SCENERY *scenery_objects[NUM_SCENERY_OBJECTS] =
 		{
@@ -873,6 +963,10 @@ static void DrawScenery( long viewpoint_y,
 			// store screen x and screen y
 			screen_coords[i].x = x;
 			screen_coords[i].y = y;
+
+			// a vertex sitting on the object's base belongs on the horizon
+			if ((scenery_coords[i].y == 0) && (! scenery->spansHorizon))
+				SnapSceneryBaseToHorizon(&screen_coords[i], sin_z, cos_z, cos_x);
 			}
 
 		if (! visible)

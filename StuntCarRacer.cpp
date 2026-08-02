@@ -51,6 +51,9 @@
 
 #define	FURTHEST_Z (131072.0f)
 
+// Most the fog is allowed to wash out the opponent's car - see DrawOpponentsCar()
+#define	OPPONENT_MAX_FOG (0.45f)
+
 GameModeType GameMode = TRACK_MENU;
 
 // Both the following are used for keyboard input
@@ -1039,6 +1042,26 @@ D3DXMATRIX matRot, matTemp, matTrans;
 }
 
 
+/*	The opponent is the one thing you always want to be able to pick out, however far ahead	*/
+/*	(or behind) it is. The renderer never culls it by distance, but the volumetric fog will	*/
+/*	blend it fully into the haze long before then, which reads as a draw distance. So cap	*/
+/*	the fog just for its draw call - the car keeps enough of its own colour to stay visible	*/
+/*	all the way down the track, while the track around it still fades away as before.		*/
+static void DrawOpponentsCar( IDirect3DDevice9 *pd3dDevice )
+{
+#ifdef SCR_FOG_SHADER
+	const float savedFogMax = gFogMaxAmount;
+	gFogMaxAmount = OPPONENT_MAX_FOG;
+#endif
+
+	DrawCar(pd3dDevice);
+
+#ifdef SCR_FOG_SHADER
+	gFogMaxAmount = savedFogMax;
+#endif
+}
+
+
 static void SetOpponentsCarWorldTransform( void )
 {
 D3DXMATRIX matRot, matTemp, matTrans;
@@ -1081,6 +1104,7 @@ static long frameCount = 0;
 // Set by OnFrameMove's accumulators, consumed by the physics/draw body below.
 static long PlayerPhysicsSteps = 0;
 static bool bOpponentStepDue = false;
+static bool bDrawBridgeStepDue = true;	// track menu / preview keep the old per-frame rate
 DWORD input = lastInput;	// take copy of user input
 D3DXMATRIX matRot, matTemp, matTrans, matView;
 
@@ -1183,6 +1207,14 @@ static float lastFrame = 0.0f;
 
 		bOpponentStepDue = ranLegacyStep;
 
+		// The drawbridge advances one animation frame per *world* step, not per
+		// render frame: on the Amiga move.draw.bridge is called once per race.loop
+		// iteration, right alongside car.movement (StuntCarRacer.s:10310), and the
+		// pre-FloatV2 code got the same effect by returning early on non-frameGap
+		// frames. Now that we fall through every render frame the bridge would
+		// animate ~7x too fast, so gate it on the legacy clock explicitly.
+		bDrawBridgeStepDue = ranLegacyStep;
+
 		// Nothing to do at all this render frame?
 		if ((PlayerPhysicsSteps == 0) && !ranLegacyStep)
 			return;
@@ -1191,6 +1223,7 @@ static float lastFrame = 0.0f;
 	{
 		// Stop engine sound if at track menu or if game has finished
 		StopEngineSound();
+		bDrawBridgeStepDue = true;
 	}
 
 	if ((GameMode == GAME_IN_PROGRESS) && (keyPress == 'R'))
@@ -1202,7 +1235,7 @@ static float lastFrame = 0.0f;
 		keyPress = '\0';
 	}
 
-	if (!bPaused)
+	if (!bPaused && bDrawBridgeStepDue)
 		MoveDrawBridge();
 
 	// Car behaviour
@@ -1787,14 +1820,14 @@ HRESULT hr;
 			case TRACK_PREVIEW:
 				// Draw Opponent's Car
 				pd3dDevice->SetTransform( D3DTS_WORLD, &matWorldOpponentsCar );
-				DrawCar(pd3dDevice);
+				DrawOpponentsCar(pd3dDevice);
 				break;
 
 			case GAME_IN_PROGRESS:
 			case GAME_OVER:
 				// Draw Opponent's Car
 				pd3dDevice->SetTransform( D3DTS_WORLD, &matWorldOpponentsCar );
-				DrawCar(pd3dDevice);
+				DrawOpponentsCar(pd3dDevice);
 
 				if (bOutsideView)
 				{

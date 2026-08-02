@@ -455,6 +455,7 @@ bool  gFogEnabled     = true;
 float gFogDensity     = 0.000008f;
 float gFogHeightScale = 8.0f;
 float gFogSkyColor[3] = { 0.7f, 0.6f, 0.5f };		// warm and dusty, not blue
+float gFogMaxAmount   = 1.0f;						// see dx_linux.h
 
 // The sun sits fixed above and behind; looking towards it warms the haze.
 static const float FOG_SUN_WORLD_DIR[3] = { 0.0f, 0.70710678f, 0.70710678f };
@@ -479,6 +480,7 @@ static const char* kFogFragmentShader =
 	"uniform float uFogDensity;\n"
 	"uniform float uFogHeightScale;\n"
 	"uniform vec3  uFogSkyColor;\n"
+	"uniform float uFogMaxAmount;\n"
 	"uniform vec3  uSunDirView;\n"
 	"uniform vec3  uCameraPos;\n"					// world space
 	"uniform vec3  uWorldUpView;\n"				// world +Y pushed into view space
@@ -494,7 +496,7 @@ static const char* kFogFragmentShader =
 	"  float rdY = dot(rd, normalize(uWorldUpView));\n"
 	"  float safeRdY = (abs(rdY) < 0.0001) ? ((rdY < 0.0) ? -0.0001 : 0.0001) : rdY;\n"
 	"  float fogAmount = (a / b) * exp(-ro.y * b) * (1.0 - exp(-t * safeRdY * b)) / safeRdY;\n"
-	"  fogAmount = clamp(fogAmount, 0.0, 1.0);\n"
+	"  fogAmount = clamp(fogAmount, 0.0, uFogMaxAmount);\n"
 	"  float sunAmount = max(dot(rd, lig), 0.0);\n"
 	"  vec3  fogColor = mix(uFogSkyColor, vec3(1.0, 0.9, 0.7), pow(sunAmount, 8.0));\n"
 	"  return mix(col, fogColor, fogAmount);\n"
@@ -555,6 +557,7 @@ bool IDirect3DDevice9::EnsureFogProgram()
 	mFogU_Density      = glGetUniformLocation(prog, "uFogDensity");
 	mFogU_HeightScale  = glGetUniformLocation(prog, "uFogHeightScale");
 	mFogU_SkyColor     = glGetUniformLocation(prog, "uFogSkyColor");
+	mFogU_MaxAmount    = glGetUniformLocation(prog, "uFogMaxAmount");
 	mFogU_SunDirView   = glGetUniformLocation(prog, "uSunDirView");
 	mFogU_CameraPos    = glGetUniformLocation(prog, "uCameraPos");
 	mFogU_WorldUpView  = glGetUniformLocation(prog, "uWorldUpView");
@@ -954,6 +957,7 @@ HRESULT IDirect3DDevice9::DrawPrimitive(D3DPRIMITIVETYPE PrimitiveType,UINT Star
 		glUniform1f(mFogU_Density, gFogDensity);
 		glUniform1f(mFogU_HeightScale, gFogHeightScale);
 		glUniform3f(mFogU_SkyColor, gFogSkyColor[0], gFogSkyColor[1], gFogSkyColor[2]);
+		glUniform1f(mFogU_MaxAmount, gFogMaxAmount);
 		glUniform3f(mFogU_SunDirView, sunView.x, sunView.y, sunView.z);
 		glUniform3f(mFogU_CameraPos, cameraWorld.x, cameraWorld.y, cameraWorld.z);
 		glUniform3f(mFogU_WorldUpView, worldUpView.x, worldUpView.y, worldUpView.z);

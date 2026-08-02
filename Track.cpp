@@ -2700,13 +2700,28 @@ static void UpdateDrawBridgeYCoords( long piece,
 									 long firstYIndex,
 									 long direction )		// 1 or -1
 	{
-	long i, j, leftOverallShift, rightOverallShift, y;
+	long i, j, leftID, rightID, leftOverallShift, rightOverallShift, y;
+
+	leftID = static_cast<long>(Left_Y_Coordinate_ID[piece]) & 0x7f;
+	rightID = static_cast<long>(Right_Y_Coordinate_ID[piece]) & 0x7f;
 
 	leftOverallShift = static_cast<long>(Left_Overall_Y_Shift[piece]);
 	rightOverallShift = static_cast<long>(Right_Overall_Y_Shift[piece]);
 
 	for (i = firstCoord, j = firstYIndex; i <= lastCoord; i++, j += direction)
 		{
+		// The legacy road-height lookup reads Track[].coords, but the FloatV2
+		// physics goes back to the undecorated Piece_Y blocks (FV2_GetRawYCoord),
+		// which nothing here used to touch - so FloatV2 saw the bridge frozen in
+		// its loaded pose while the drawn bridge moved. Write both. This is the
+		// same pre-shift value ConvertAmigaTrack() stores at load time, so the
+		// two paths stay in step; the four Y blocks used by the bridge pieces
+		// (IDs 95-98) belong to the DrawBridge track alone, so mutating them
+		// cannot disturb any other track.
+		y = draw_bridge_y_list[j];
+		Piece_Y[leftID][i].y = y;
+		Piece_Y[rightID][i].y = y;
+
 		// top left y
 		y = draw_bridge_y_list[j];
 		y += leftOverallShift;

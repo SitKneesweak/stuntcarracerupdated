@@ -346,6 +346,10 @@ double ProcessOneWheel(PhysicsStateF& s, const FV2Track& t, int& currentSection,
         gDbgPosZSpeed = s.PosPlayersZSpeed;
         gDbgSurfZ     = static_cast<double>(static_cast<uint16_t>(surfaceZ));
         gDbgBlendUsed = 0;
+        gDbgFV2Section = currentSection;
+        gDbgFV2Seg     = (static_cast<uint16_t>(surfaceZ) >> 8) & 0xff;
+        gDbgFV2ZFrac   = static_cast<uint16_t>(surfaceZ) & 0xff;
+        gDbgFV2XFrac   = surfaceX & 0xff;
     }
     if (s.PosPlayersZSpeed >= 2560.0) {
         storedHeight = height;
@@ -1002,6 +1006,7 @@ int    gDbgAlignFired = 0, gDbgAtSideByte = 0, gDbgLeftRight = 0;
 double gDbgXAngle = 0, gDbgZAngle = 0, gDbgXRotSpeed = 0, gDbgZRotSpeed = 0;
 double gDbgRawRoadFL = 0, gDbgPosZSpeed = 0, gDbgSurfZ = 0;
 int    gDbgBlendUsed = 0;
+int    gDbgFV2Section = 0, gDbgFV2Seg = 0, gDbgFV2ZFrac = 0, gDbgFV2XFrac = 0;
 
 bool   gUseFloatV2Physics = true;        // now the default path; V toggles back to legacy
 double gFloatV2Dt         = 1.0 / 60.0;  // 60Hz; B cycles 10 -> 25 -> 60
