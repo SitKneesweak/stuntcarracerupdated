@@ -28,6 +28,9 @@
 #else
 #define STRING L"%s"
 #endif
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #endif
@@ -2136,10 +2139,15 @@ int main(int argc, const char** argv)
 	char maintitle[50] = {0};
 	sprintf(maintitle, "StuntCarRemake v%d.%02d.%02d", V_MAJOR, V_MINOR, V_PATCH);
 	printf("%s\n", maintitle);
-	// get executable folder and cd into it...
-	// this is linux only, will not work on BSD or macOS
+	// get executable folder and cd into it, so relative asset paths work
 	char buf[500];
+#ifdef __APPLE__
+	uint32_t bufsize = sizeof(buf);
+	int rc = _NSGetExecutablePath(buf, &bufsize);
+	ssize_t bufsized = (rc == 0) ? (ssize_t)strlen(buf) : -1;
+#else
 	ssize_t bufsized = readlink("/proc/self/exe", buf, sizeof(buf));
+#endif
 	if(bufsized>0) {
 		char* p = strrchr(buf, '/');
 		if(*p) {

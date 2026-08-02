@@ -2,6 +2,8 @@
 #define _DX_LINUX_H_
 #ifdef HAVE_GLES
 #include <GLES/gl.h>
+#elif defined(__APPLE__)
+#include <OpenGL/gl.h>
 #else
 #include <GL/gl.h>
 #endif

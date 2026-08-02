@@ -44,6 +44,15 @@ ifeq ($(CHIP),1)
         LDFLAGS= -mcpu=cortex-a8 -mfpu=neon -mfloat-abi=hard
         #HAVE_GLES=1
 endif
+ifeq ($(MACOS),1)
+        # macOS build. Uses Homebrew for SDL2, SDL2_ttf, openal-soft, glm.
+        # -Dlinux activates the POSIX code paths (dx_linux.cpp, etc).
+        FLAGS+= -Dlinux -DUSE_SDL2 -DMACOS -DGL_SILENCE_DEPRECATION
+        BREW_PREFIX ?= $(shell brew --prefix)
+        export PKG_CONFIG_PATH := $(BREW_PREFIX)/opt/openal-soft/lib/pkgconfig:$(BREW_PREFIX)/opt/sdl2-compat/lib/pkgconfig:$(BREW_PREFIX)/opt/sdl2_ttf/lib/pkgconfig:$(PKG_CONFIG_PATH)
+        FLAGS+= -I$(BREW_PREFIX)/include
+        SDL=2
+endif
 ifeq ($(EMSCRIPTEN),1)
         FLAGS= -s FULL_ES2=1 -I../gl4es/include -s USE_SDL_TTF=2 -s USE_SDL=2
         FLAGS+= -I/usr/include/glm
@@ -72,7 +81,9 @@ ifeq ($(DEBUG),1)
 	CFLAGS+=-Og
 else
 	CFLAGS+=-O3 -Winit-self
+ifneq ($(MACOS),1)
 	LDFLAGS+=-s
+endif
 endif
 
 ifeq ($(PROFILE),1)
@@ -119,6 +130,10 @@ ifeq ($(MINGW),1)
 	LIB += -lglu32 -lopengl32
 	LIB += -lsocket -lws2_32 -lwsock32 -lwinmm -lOpenAL32
 else
+ifeq ($(MACOS),1)
+	LIB += -framework OpenGL
+	LIB += `pkg-config --libs openal`
+else
 	ifeq ($(HAVE_GLES),1)
 		LIB += -lGLES_CM -lEGL
 		CFLAGS += -DHAVE_GLES
@@ -127,10 +142,13 @@ else
 	endif
 	LIB += -lopenal
 endif
+endif
 ifneq ($(MINGW),1)
+ifneq ($(MACOS),1)
 	# apparently on some systems -ldl is explicitly required
 	# perhaps this is part of the default libs on others...?
 	LIB+= -ldl
+endif
 endif
 endif
 
