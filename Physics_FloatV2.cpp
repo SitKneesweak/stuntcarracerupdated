@@ -475,9 +475,490 @@ void ComputeEngineAcceleration(PhysicsStateF& s, const PhysicsInput& input, doub
     BoostPower(s, input, boostFlag, dtRatio);
 }
 
+// Fix.Mul — TrackData.cs:24. 68k muls.w with the 1.15 fixed-point shift.
+inline int16_t FixMul(int16_t a, int16_t b) {
+    return static_cast<int16_t>((static_cast<int32_t>(a) * b << 1) >> 16);
+}
+
+// --- Sub-step 9: car/road collision --------------------------------------
+
+// ProcessWheel — PhysicsFloatV2.cs:1264
+// One wheel's penetration into the road, plus the damage it takes for it.
+// The returned "amount below road" is what the suspension pushes back against.
+double ProcessWheel(PhysicsStateF& s, double heightDiff, double& oldDiff,
+                    double& amountBelowRoad, uint8_t& damage, double& damageRemainder,
+                    double& damageValue, uint8_t& groundedCount, double dtRatio) {
+    double d = heightDiff;
+    if (d < 0.0) { if (d < -768.0) d = -768.0; }
+    else if (d >= 5120.0) d = 5120.0;
+
+    // Predictive term: extrapolate the approach rate so a fast-closing wheel
+    // registers contact this step. The 1.078125 is per-10Hz-step, hence /dtRatio.
+    double rate = (d - oldDiff) * (1.078125 / dtRatio);
+    double below = rate + d;
+    oldDiff = d;
+
+    if (below < 0.0) {
+        amountBelowRoad = 0.0;
+        s.DamagedCount = 0;
+        return 0.0;
+    }
+
+    double previous = amountBelowRoad;
+    amountBelowRoad = below;
+    if (below >= 1024.0 && previous < 512.0) groundedCount++;
+
+    // Impacts beyond the road "cushion" do damage.
+    double impact = below - static_cast<double>(s.RoadCushionValue << 8);
+    if (impact >= 0.0 && impact >= 1792.0) {
+        if (impact > damageValue) damageValue = impact;
+        double excess = impact - 1536.0;
+        if (static_cast<int8_t>(s.FourteenFramesElapsed) >= 0) {
+            s.DamagedCount++;
+            // DamagedLimit counts steps, so it scales with the tick rate.
+            if (s.DamagedCount < static_cast<int>(static_cast<double>(s.DamagedLimit) / dtRatio)) {
+                double clamped = std::round(excess);
+                if (clamped > 65535.0) clamped = 65535.0;
+                if (clamped < 0.0) clamped = 0.0;
+                int hi = (static_cast<int>(clamped) >> 8) & 0xFF;
+                int scaled = (hi + (hi >> 1)) & 0xFF;   // x1.5
+                // Fractional damage carries between steps so the total dealt
+                // per second is rate-independent.
+                double amount = static_cast<double>(scaled) * dtRatio + damageRemainder;
+                int whole = static_cast<int>(amount);
+                damageRemainder = amount - static_cast<double>(whole);
+                int total = whole + damage;
+                if (total > 255) total = 255;
+                damage = static_cast<uint8_t>(total);
+                s.Damaged = 128;
+            }
+        }
+    } else {
+        s.DamagedCount = 0;
+    }
+
+    if (amountBelowRoad >= 4608.0) amountBelowRoad = 4607.0;
+    return amountBelowRoad;
+}
+
+// CarCollisionDetection — PhysicsFloatV2.cs:1204
+struct CollisionResult {
+    double flBelow, frBelow, rBelow;
+    double overallBelow;    // pitch term: front pair vs rear
+    double frontBelow;      // roll term: front left vs front right
+    uint8_t groundedCount;
+};
+
+CollisionResult CarCollisionDetection(PhysicsStateF& s, const WheelRoadH& road,
+                                      const WheelActualH& actual, double dtRatio) {
+    CollisionResult r{};
+    double damageValue = 0.0;
+    r.groundedCount = 0;
+
+    double flDiff = road.fl - actual.fl - static_cast<double>(s.WreckWheelHeightReduction);
+    r.flBelow = ProcessWheel(s, flDiff, s.OldFrontLeftDiff, s.FrontLeftAmountBelowRoad,
+                             s.FrontLeftDamage, s.FrontLeftDamageRemainder,
+                             damageValue, r.groundedCount, dtRatio);
+    double frDiff = road.fr - actual.fr - static_cast<double>(s.WreckWheelHeightReduction);
+    r.frBelow = ProcessWheel(s, frDiff, s.OldFrontRightDiff, s.FrontRightAmountBelowRoad,
+                             s.FrontRightDamage, s.FrontRightDamageRemainder,
+                             damageValue, r.groundedCount, dtRatio);
+    double rDiff = road.r - actual.r - static_cast<double>(s.WreckWheelHeightReduction);
+    r.rBelow = ProcessWheel(s, rDiff, s.OldRearDiff, s.RearAmountBelowRoad,
+                            s.RearDamage, s.RearDamageRemainder,
+                            damageValue, r.groundedCount, dtRatio);
+
+    s.DamageValue = SaturateToShort(damageValue);
+    s.GroundedCount = r.groundedCount;
+
+    double frontAvg = (r.flBelow + r.frBelow) / 2.0;
+    double allAvg   = (frontAvg + r.rBelow) / 2.0;
+
+    double roll = r.flBelow - r.frBelow;
+    double rollMag = std::fabs(roll * 3.0);
+    if (rollMag > 4096.0) rollMag = 4096.0;
+    r.frontBelow = (roll < 0.0) ? -rollMag : rollMag;
+
+    r.overallBelow = frontAvg - r.rBelow;
+
+    int16_t avg = SaturateToShort(allAvg);
+    s.TouchingRoad = static_cast<uint8_t>(
+        static_cast<uint8_t>(avg >> 8) | static_cast<uint8_t>(avg & 0xFF));
+
+    if (s.TouchingRoad == 0 && s.CarOnChainsCountdown == 0) {
+        // Airborne: apply a nose-down bias so the car pitches forward in
+        // flight. Ski Jump (4) and Roller Coaster (7) use gentler values.
+        double bias = -128.0;
+        bool apply = true;
+        if (s.XAngle >= 0.0) {
+            if (s.XAngle >= 4096.0) bias = -256.0;
+        } else if (s.RoadID != 7) {
+            if (s.RoadID != 4) apply = false;
+            else bias = -8.0;
+        }
+        if (apply) {
+            bias -= r.overallBelow;
+            if (bias < 0.0) {
+                double spin = s.XRotationSpeed / 256.0;
+                if (spin >= 0.0 || static_cast<int>(std::floor(spin)) == -1)
+                    r.overallBelow = bias;
+            }
+        }
+    }
+
+    s.FrontLeftHeightDifference  = flDiff;
+    s.FrontRightHeightDifference = frDiff;
+    s.RearHeightDifference       = rDiff;
+    return r;
+}
+
+// --- Sub-step 10: collision acceleration ----------------------------------
+
+// CalculateInclinationSinCosF — PhysicsFloatV2.cs:1360
+// Cheap sin/cos of a road gradient: the Amiga treated 255 as "45 degrees" and
+// took sin directly from the gradient, deriving cos from it.
+void CalculateInclinationSinCosF(double gradient, double& sinVal, double& cosVal) {
+    double mag = std::fabs(gradient);
+    sinVal = std::min(mag, 255.0) / 255.0;
+    cosVal = std::sqrt(1.0 - sinVal * sinVal);
+}
+
+// CalculateCarCollisionAcceleration — PhysicsFloatV2.cs:1335
+// Turns suspension compression into a force along the road's local normal,
+// so a car on a slope is pushed along it rather than straight up.
+struct CollAccel { double x, y, z; };
+CollAccel CalculateCarCollisionAcceleration(const PhysicsStateF& s, const CollisionResult& c) {
+    double force = ((c.flBelow + c.frBelow) / 2.0 + c.rBelow) / 2.0;
+
+    double pitch = ((s.FrontLeftHeightDifference + s.FrontRightHeightDifference) / 2.0
+                    - s.RearHeightDifference) / 16.0;
+    double roll  = (s.FrontLeftHeightDifference - s.FrontRightHeightDifference) / 8.0;
+
+    double sinPitch, cosPitch, sinRoll, cosRoll;
+    CalculateInclinationSinCosF(pitch, sinPitch, cosPitch);
+    CalculateInclinationSinCosF(roll,  sinRoll,  cosRoll);
+
+    double normalY = cosPitch * cosRoll;
+    double normalX = cosPitch * sinRoll;
+
+    double rollSign  = (roll < 0.0) ? -1.0 : 1.0;      // zero -> +1
+    double pitchSign = (pitch >= 0.0) ? -1.0 : 1.0;    // zero -> -1
+
+    return CollAccel{ force * normalX * rollSign, force * normalY, force * sinPitch * pitchSign };
+}
+
+// --- Sub-step 11: total local acceleration --------------------------------
+
+// CalculateTotalAcceleration — PhysicsFloatV2.cs:1367
+// Sums gravity, collision and engine in car-local space, with grip limiting:
+// engine and lateral forces cannot exceed roughly twice the normal load.
+struct TotalAccel { double x, y, z; };
+TotalAccel CalculateTotalAcceleration(PhysicsStateF& s, const GravityXYZ& grav,
+                                      const CollAccel& coll, double xSpeed, double zSpeed) {
+    TotalAccel t{};
+    t.y = grav.y + coll.y;
+
+    double engine = s.EngineZAcceleration;
+    // Rolling resistance, only when engine force and travel agree in sign.
+    uint8_t signs = static_cast<uint8_t>(
+        static_cast<uint8_t>(static_cast<int16_t>(engine) >> 8) |
+        static_cast<uint8_t>(static_cast<int16_t>(zSpeed) >> 8));
+    if (static_cast<int8_t>(signs) >= 0 &&
+        static_cast<uint8_t>(static_cast<int16_t>(engine) & 0xFF) != 0) {
+        engine -= static_cast<double>(signs);
+    }
+
+    double grip = (s.TouchingRoad != 0) ? (coll.y * 2.0) : 0.0;
+    if (!(std::fabs(engine) < grip)) {
+        engine = (engine < 0.0) ? -grip : grip;
+    }
+    s.EngineZAcceleration = engine;
+    t.z = engine + coll.z + grav.z;
+
+    double lateral = grav.x + coll.x;
+    if (std::fabs(lateral - xSpeed) < grip) {
+        // Within grip: sideways speed is cancelled outright (the car "bites").
+        t.x = coll.x - xSpeed;
+        s.CollisionInAir = 0;
+    } else {
+        t.x = lateral - ((xSpeed < 0.0) ? -grip : grip);
+        s.CollisionInAir = 128;
+    }
+    return t;
+}
+
+// --- Sub-step 12: steering ------------------------------------------------
+
+// ComputeSteeringAcceleration — PhysicsFloatV2.cs:1520
+// Steering authority scales with forward speed.
+int16_t ComputeSteeringAcceleration(uint8_t factor, int16_t playerZSpeed, int8_t leftRight) {
+    int16_t v = FixMul(static_cast<int16_t>(((factor & 0xFF) << 7) & 0x7FFF), playerZSpeed);
+    if (leftRight < 0) v = static_cast<int16_t>(-v);
+    return static_cast<int16_t>(v >> 3);
+}
+
+// ComputeAlignmentAdjustment — PhysicsFloatV2.cs:1553
+int16_t ComputeAlignmentAdjustment(uint8_t factor, int16_t playerZSpeed) {
+    int16_t speed = playerZSpeed;
+    if (speed < 0) speed = static_cast<int16_t>(-speed);
+    speed = static_cast<int16_t>(speed + 2560);
+    if (speed < 0) speed = 32512;               // overflowed -> clamp
+    int16_t v = FixMul(static_cast<int16_t>(((factor & 0xFF) << 7) & 0x7FFF), speed);
+    v = static_cast<int16_t>(static_cast<uint16_t>(v) >> 7);
+    if (static_cast<uint8_t>(v) == 0) v = 1;
+    return v;
+}
+
+// AlignCarWithRoad — PhysicsFloatV2.cs:1530
+// Steers the car back towards the section's heading when badly misaligned.
+void AlignCarWithRoad(PhysicsStateF& s, int16_t posDiffAngle, int16_t differenceAngle,
+                      int16_t playerZSpeed, double dtRatio) {
+    int16_t adjust = posDiffAngle;
+    uint8_t factor = static_cast<uint8_t>(posDiffAngle & 0xFF);
+    bool computed = false;
+
+    if (static_cast<uint8_t>(posDiffAngle >> 8) != 0) {
+        adjust = static_cast<int16_t>(adjust - 7680);
+        if (adjust >= 0) computed = true;       // large error: use it directly
+        else factor = 255;
+    }
+    if (!computed) adjust = ComputeAlignmentAdjustment(factor, playerZSpeed);
+
+    if (static_cast<int8_t>(static_cast<uint8_t>(differenceAngle >> 8)) < 0)
+        adjust = static_cast<int16_t>(-adjust);
+
+    s.YAngle = WrapAngle(s.YAngle + static_cast<double>(adjust) * dtRatio);
+}
+
+// CalculateSteering — PhysicsFloatV2.cs:1405
+// Sets YRotationAcceleration from player input, the section's own curvature,
+// and how far the car's heading has drifted from the road's.
+void CalculateSteering(PhysicsStateF& s, const FV2Track& t, double playerZSpeed,
+                       int8_t leftRightValue, double dtRatio) {
+    int roadSection = s.RoadSection;
+    const FV2RoadSection* sec   = &t.Sections[roadSection];
+    const FV2RoadPiece*   piece = &FV2_GetPiece(sec->PieceIndex);
+
+    int16_t reversed = static_cast<int16_t>((sec->Angle & 0x10) ? -32768 : 0);
+    int16_t diffAngle = static_cast<int16_t>(
+        static_cast<int16_t>(static_cast<int16_t>(static_cast<int>(s.SectionYAngle)) -
+                             static_cast<int16_t>(static_cast<int>(s.YAngle))) ^ reversed);
+
+    uint8_t sectionByte = piece->SectionByte1;
+    uint8_t curveBit = (piece->CurveDirection & 1) ? 128u : 0u;
+    int16_t curveSign = static_cast<int16_t>(curveBit << 8);
+
+    // Curved sections carry a fixed heading offset (217 units) either way.
+    int bendIdx = 0;
+    if (static_cast<int8_t>(sectionByte) < 0) {
+        bendIdx = 1;
+        if (static_cast<int16_t>(curveSign ^ reversed) < 0) bendIdx = 2;
+    }
+    static const int16_t kBend[3] = { 0, 217, -217 };
+    diffAngle = static_cast<int16_t>(diffAngle + kBend[bendIdx]);
+
+    int16_t absDiff = (diffAngle >= 0) ? diffAngle : static_cast<int16_t>(-diffAngle);
+    int16_t signedDiff = diffAngle;
+    int16_t scaledDiff = (static_cast<uint16_t>(absDiff) < 2048)
+                       ? static_cast<int16_t>(absDiff << 4) : 32767;
+
+    // Near the end of a section, steer for the *next* one.
+    if (static_cast<uint8_t>(static_cast<uint8_t>(piece->CoordCount - 1) -
+        static_cast<uint8_t>(static_cast<int16_t>(static_cast<int>(s.DistanceIntoSection)) >> 8)) < 2) {
+        if (++roadSection >= t.SectionCount) roadSection = 0;
+        sec   = &t.Sections[roadSection];
+        piece = &FV2_GetPiece(sec->PieceIndex);
+        reversed    = static_cast<int16_t>((sec->Angle & 0x10) ? -32768 : 0);
+        sectionByte = piece->SectionByte1;
+        curveBit    = (piece->CurveDirection & 1) ? 128u : 0u;
+    }
+
+    uint8_t reversedHi = static_cast<uint8_t>((reversed >> 8) & 0xFF);
+    int8_t  curveDir = static_cast<int8_t>(static_cast<uint8_t>(curveBit ^ reversedHi));
+    uint8_t steeringAmount = piece->SteeringAmount;
+
+    int16_t yAccel = 0;
+    int16_t zSpeedS = SaturateToShort(playerZSpeed);
+    bool align;
+
+    if (leftRightValue == 0) {
+        if (static_cast<int8_t>(sectionByte) >= 0) {
+            // Straight, no input: nothing to do but re-align.
+            yAccel = 0;
+            align = true;
+        } else {
+            // Curve, no input: the road steers for you.
+            leftRightValue = curveDir;
+            yAccel = ComputeSteeringAcceleration(steeringAmount, zSpeedS, leftRightValue);
+            align = static_cast<uint8_t>(absDiff >> 8) >= 30;
+        }
+    } else {
+        uint8_t agrees = static_cast<uint8_t>(static_cast<uint8_t>(leftRightValue) ^
+                                              static_cast<uint8_t>(signedDiff >> 8));
+        uint8_t amount;
+        if (static_cast<int8_t>(sectionByte) >= 0) {
+            amount = steeringAmount;
+            if (static_cast<int8_t>(agrees) >= 0)
+                amount = static_cast<uint8_t>(amount + static_cast<uint8_t>(scaledDiff >> 8));
+        } else if (static_cast<int8_t>(static_cast<uint8_t>(
+                       static_cast<uint8_t>(leftRightValue) ^ static_cast<uint8_t>(curveDir))) < 0) {
+            // Steering against the bend: reduced authority.
+            leftRightValue = curveDir;
+            amount = static_cast<uint8_t>(steeringAmount - 35);
+        } else {
+            // Steering into the bend: extra authority.
+            amount = static_cast<uint8_t>(steeringAmount + 45);
+            if (static_cast<int8_t>(agrees) >= 0)
+                amount = static_cast<uint8_t>(amount + static_cast<uint8_t>(scaledDiff >> 8));
+        }
+        yAccel = ComputeSteeringAcceleration(amount, zSpeedS, leftRightValue);
+        align = static_cast<uint8_t>(absDiff >> 8) >= 30;
+    }
+
+    if (align) AlignCarWithRoad(s, absDiff, signedDiff, zSpeedS, dtRatio);
+
+    yAccel = static_cast<int16_t>(yAccel - SaturateToShort(s.YRotationSpeed));
+    if (s.TouchingRoad == 0) yAccel = 0;
+    s.YRotationAcceleration = yAccel;
+}
+
+// --- Sub-steps 13-15: to world space, drag, rotation ----------------------
+
+// CalculateWorldAcceleration — PhysicsFloatV2.cs:1574
+TotalAccel CalculateWorldAcceleration(const ScArray& sc, const TotalAccel& l) {
+    return TotalAccel{
+        l.x * sc[22] + l.y * sc[20] + l.z * sc[2],
+        l.x * sc[24] + l.y * sc[15] + l.z * sc[4],
+        l.x * sc[23] + l.y * sc[21] + l.z * sc[3],
+    };
+}
+
+// ReduceWorldAcceleration — PhysicsFloatV2.cs:1581
+// Speed-proportional drag. The strength depends on what the car is doing:
+// hard road contact, off-map, wrecked and chained cars all drag differently.
+void ReduceWorldAcceleration(const PhysicsStateF& s, double carToRoadCollisionZAccel,
+                             double xSpeed, double zSpeed, TotalAccel& t) {
+    int shift = 1;
+    bool freeRolling = false;
+    double drag = 0.0;
+
+    if (s.TouchingRoad != 0) {
+        uint8_t impact = static_cast<uint8_t>(SaturateToShort(carToRoadCollisionZAccel) >> 8);
+        int magnitude = (impact & 0x80) ? (impact ^ 0xFF) : impact;
+        if (magnitude >= 3) {
+            drag = 24576.0;                     // heavy landing
+        } else if (static_cast<int8_t>(s.OffMapStatus) < 0) {
+            drag = 24576.0;
+        } else if (((s.WreckWheelHeightReduction >> 8) & 0xFF) != 0) {
+            shift = 3;
+            drag = 24576.0;                     // wrecked
+        } else {
+            freeRolling = true;
+        }
+    } else {
+        freeRolling = true;
+    }
+
+    if (freeRolling) {
+        if (s.CarOnChainsCountdown != 0) {
+            shift = 3;
+            drag = 24576.0;
+        } else {
+            double speed = std::max(std::fabs(xSpeed), std::fabs(zSpeed));
+            shift = 5;
+            // Slipstream: less drag when tucked in behind the opponent.
+            if (static_cast<int8_t>(s.PlayerCloseToOpponent) < 0 &&
+                static_cast<int8_t>(s.OpponentBehindPlayer) >= 0) {
+                speed -= 2560.0;
+                if (speed < 0.0) speed = 0.0;
+            }
+            drag = speed;
+        }
+    }
+
+    const double scale = drag / 65536.0 / static_cast<double>(1 << shift);
+    t.x -= scale * s.WorldXSpeed;
+    t.y -= scale * s.WorldYSpeed;
+    t.z -= scale * s.WorldZSpeed;
+}
+
+// CalculateXZRotationAcceleration — PhysicsFloatV2.cs:1645
+// Suspension imbalance becomes pitch (X) and roll (Z) acceleration, damped by
+// the current rotation speed.
+struct RotAccel { double x, z; };
+RotAccel CalculateXZRotationAcceleration(const PhysicsStateF& s, double overallBelow,
+                                         double frontBelow, double localZAccel) {
+    double pitch = overallBelow - s.XRotationSpeed / 16.0;
+    if (s.TouchingRoad != 0) pitch += localZAccel / 4.0;   // squat under power
+    return RotAccel{ pitch, frontBelow - s.ZRotationSpeed / 16.0 };
+}
+
+// UpdateRotationSpeeds — PhysicsFloatV2.cs:1659
+void UpdateRotationSpeeds(PhysicsStateF& s, double rx, double ry, double rz, double dtRatio) {
+    s.XRotationSpeed += ReduceValue(rx) * dtRatio;
+    s.YRotationSpeed += ReduceValue(ry) * dtRatio;
+    s.ZRotationSpeed += ReduceValue(rz) * dtRatio;
+}
+
+// CalculateFinalRotationSpeeds — PhysicsFloatV2.cs:1666
+struct FinalRot { double x, y, z; };
+FinalRot CalculateFinalRotationSpeeds(const PhysicsStateF& s, const ScArray& sc) {
+    FinalRot f{};
+    f.y = s.XRotationSpeed * sc[16] + s.YRotationSpeed * sc[17];
+    f.x = s.XRotationSpeed * sc[17] + s.YRotationSpeed * sc[18];
+    f.z = f.y * sc[4] + s.ZRotationSpeed;
+    return f;
+}
+
+// --- Sub-steps 16-17: integration ----------------------------------------
+
+// UpdateWorldSpeeds — PhysicsFloatV2.cs:1673
+void UpdateWorldSpeeds(PhysicsStateF& s, const TotalAccel& t, double dtRatio) {
+    s.WorldXSpeed += ReduceValue(t.x) * dtRatio;
+    s.WorldYSpeed += ReduceValue(t.y) * dtRatio;
+    s.WorldZSpeed += ReduceValue(t.z) * dtRatio;
+}
+
+// UpdatePosition — PhysicsFloatV2.cs:1680
+// Integrate position and angles, then clamp pitch/roll. The limits tighten
+// when the car is at the side of the road (AtSideByte == 224) so it can't
+// lean absurdly far over a verge.
+void UpdatePosition(PhysicsStateF& s, const FinalRot& f, double dtRatio) {
+    s.WorldX += ReduceValue(s.WorldXSpeed) *  64.0 * dtRatio;
+    s.WorldY += ReduceValue(s.WorldYSpeed) * 128.0 * dtRatio;
+    s.WorldZ += ReduceValue(s.WorldZSpeed) *  64.0 * dtRatio;
+    if (s.WorldY >= 65536000.0) s.WorldY = 65536000.0;
+
+    s.XAngle += ReduceValue(f.x) * dtRatio;
+    s.YAngle  = WrapAngle(s.YAngle + ReduceValue(f.y) * dtRatio);
+    s.ZAngle += ReduceValue(f.z) * dtRatio;
+
+    bool atSide = (static_cast<int8_t>(s.B1bb75) < 0) && (s.AtSideByte == 224);
+    double maxAngle = atSide ?  2560.0 : 11264.0;
+    double minAngle = atSide ? -2816.0 : -11520.0;
+
+    if (s.XAngle > maxAngle) {
+        s.XAngle = maxAngle;
+        if (s.XRotationSpeed >= 0.0) s.XRotationSpeed = 0.0;
+    } else if (s.XAngle < minAngle) {
+        s.XAngle = minAngle;
+        if (s.XRotationSpeed < 0.0) s.XRotationSpeed = 0.0;
+    }
+
+    if (s.ZAngle > maxAngle) {
+        s.ZAngle = maxAngle;
+        if (s.ZRotationSpeed >= 0.0) s.ZRotationSpeed = 0.0;
+    } else if (s.ZAngle < minAngle) {
+        s.ZAngle = minAngle;
+        if (s.ZRotationSpeed < 0.0) s.ZRotationSpeed = 0.0;
+    }
+}
+
 } // anonymous namespace
 
-bool gUseFloatV2Physics = false;   // flipped by F-key toggle once port is landable
+bool   gUseFloatV2Physics = false;   // F11 toggles at runtime
+double gFloatV2Dt         = 0.1;     // 10Hz to start; see header
+bool   gFloatV2NeedsSeed  = true;    // set whenever the legacy path has run
 
 // --- Tuning constants (from PhysicsStepF in PhysicsFloatV2.cs) --------------
 namespace {
@@ -513,34 +994,88 @@ void PhysicsStepF_Tick(PhysicsStateF& state, const PhysicsInput& input, double d
     ScArray sc{};
     MakeRotationMatrix(state, sc);
     WheelXZ wheels = CalculateWheelXZOffsets(sc);
+    const FV2Track* track = FV2_GetTrack();
     WheelRoadH roadH{};
-    if (const FV2Track* track = FV2_GetTrack())
-        roadH = CalculateRoadWheelHeights(state, *track, wheels, dtRatio);
+    if (track) roadH = CalculateRoadWheelHeights(state, *track, wheels, dtRatio);
     WheelActualH actualH = CalculateActualWheelHeights(state, sc);
     LocalSpeed   local   = CalculateXZSpeeds(state, sc);
     state.PlayersZSpeed  = local.z;
+    state.PlayersXSpeed  = local.x;
     SetWheelRotationSpeed(state, local.z, dtRatio);
     GravityXYZ grav = CalculateGravityAcceleration(sc);
-    (void)actualH; (void)grav; (void)roadH;   // consumers land with sub-steps 9-11
-    // TODO: port remaining sub-steps 9-17 (see plan above). Until then,
-    // callers should keep gUseFloatV2Physics == false so the legacy
-    // CarBehaviour() path stays authoritative.
+    // Steering input, or the chain-drag value if the car is being towed.
+    int8_t leftRightValue = 0;
+    if (state.TouchingRoad != 0) {
+        if (state.CarOnChainsCountdown != 0)
+            leftRightValue = static_cast<int8_t>(state.CarOnChainsCountdown);
+        else if (input.Left && !input.Right) leftRightValue = -15;
+        else if (input.Right)                leftRightValue =  15;
+    }
+
+    CollisionResult coll = CarCollisionDetection(state, roadH, actualH, dtRatio);
+
+    TotalAccel total{};
+    FinalRot   finalRot{};
+
+    // Off the map entirely: no forces at all, the car just coasts and falls.
+    if (state.CarOnTrack != 0) {
+        CollAccel collAccel = CalculateCarCollisionAcceleration(state, coll);
+        double carToRoadCollisionZAccel = collAccel.z;
+
+        // Car-to-car impulses were accumulated in 10Hz units by the collision
+        // code, so divide by dtRatio to spread them over the faster steps.
+        collAccel.x += static_cast<double>(state.CarToCarXAcceleration) / dtRatio;
+        collAccel.y += static_cast<double>(state.CarToCarYAcceleration) / dtRatio;
+        collAccel.z += static_cast<double>(state.CarToCarZAcceleration) / dtRatio;
+        state.CarToCarXAcceleration = 0;
+        state.CarToCarYAcceleration = 0;
+        state.CarToCarZAcceleration = 0;
+
+        total = CalculateTotalAcceleration(state, grav, collAccel, local.x, local.z);
+
+        if (track) CalculateSteering(state, *track, local.z, leftRightValue, dtRatio);
+        double yRotationAcceleration = state.YRotationAcceleration;
+        double localZAcceleration    = total.z;
+
+        total = CalculateWorldAcceleration(sc, total);
+        ReduceWorldAcceleration(state, carToRoadCollisionZAccel, local.x, local.z, total);
+
+        RotAccel rot = CalculateXZRotationAcceleration(state, coll.overallBelow,
+                                                       coll.frontBelow, localZAcceleration);
+        UpdateRotationSpeeds(state, rot.x, yRotationAcceleration, rot.z, dtRatio);
+        finalRot = CalculateFinalRotationSpeeds(state, sc);
+    }
+
+    UpdateWorldSpeeds(state, total, dtRatio);
+    UpdatePosition(state, finalRot, dtRatio);
 }
 
-// --- Legacy <-> FloatV2 adapters -------------------------------------------
-// player_x, player_y, ... are extern longs in Car_Behaviour.cpp using the
-// Amiga fixed-point convention (Y is negated relative to render Y; positions
-// scaled by 1 << LOG_PRECISION). We convert to plain metres-ish doubles here.
+// --- Persistent state / step entry point -----------------------------------
+// CopyLegacyToFloatV2 / CopyFloatV2ToLegacy live in Car_Behaviour.cpp (see
+// header) because the legacy globals they touch are file-static there.
 
-void CopyLegacyToFloatV2(PhysicsStateF& /*out*/)
+PhysicsStateF& FloatV2_State()
 {
-    // TODO: mirror ResetPlayer() + current per-tick state into FloatV2 struct.
+    static PhysicsStateF state{};
+    return state;
 }
 
-void CopyFloatV2ToLegacy(const PhysicsStateF& /*in*/)
+void FloatV2_RunStep(const PhysicsInput& input, double dt)
 {
-    // TODO: write FloatV2 state back into player_x/y/z, angles, wheel data,
-    // damage counters, etc. so the renderer and HUD keep working unchanged.
+    PhysicsStateF& s = FloatV2_State();
+
+    if (gFloatV2NeedsSeed) {
+        // First step after the toggle flips (or after the car was repositioned):
+        // take the legacy car state wholesale so the swap is seamless mid-drive.
+        CopyLegacyToFloatV2(s);
+        gFloatV2NeedsSeed = false;
+    } else {
+        CopyLegacyRoadStateToFloatV2(s);
+    }
+
+    PhysicsStepF_Tick(s, input, dt);
+    CopyFloatV2ToLegacy(s);
 }
+
 
 } // namespace scr

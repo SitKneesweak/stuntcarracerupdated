@@ -17,6 +17,7 @@
 #include "Track.h"
 #include "Car.h"
 #include "Car_Behaviour.h"
+#include "Physics_FloatV2.h"
 #include "Opponent_Behaviour.h"
 #include "wavefunctions.h"
 #include "Atlas.h"
@@ -1743,6 +1744,20 @@ void CALLBACK KeyboardProc( UINT nChar, bool bKeyDown, bool bAltDown, void *pUse
 			frameGap++;
 			break;
 
+		case VK_F11:
+			// Toggle the FloatV2 physics port (see Physics_FloatV2.h).
+			scr::gUseFloatV2Physics = !scr::gUseFloatV2Physics;
+			break;
+
+		case VK_F12:
+			// Cycle the FloatV2 timestep: 10Hz (Amiga rate) -> 25Hz -> 60Hz.
+			// At 10Hz this should behave like the legacy path; the higher
+			// rates are the point of the port.
+			if      (scr::gFloatV2Dt > 0.05)  scr::gFloatV2Dt = 1.0 / 25.0;
+			else if (scr::gFloatV2Dt > 0.025) scr::gFloatV2Dt = 1.0 / 60.0;
+			else                              scr::gFloatV2Dt = 0.1;
+			break;
+
 #if defined(DEBUG) || defined(_DEBUG)
 		case VK_BACK:
 			bOutsideView = !bOutsideView;
@@ -1999,6 +2014,18 @@ bool process_events()
 
 				case SDLK_F10:
 					frameGap++;
+					break;
+
+				case SDLK_F11:
+					// Toggle the FloatV2 physics port (see Physics_FloatV2.h).
+					scr::gUseFloatV2Physics = !scr::gUseFloatV2Physics;
+					break;
+
+				case SDLK_F12:
+					// Cycle the FloatV2 timestep: 10Hz (Amiga rate) -> 25Hz -> 60Hz.
+					if      (scr::gFloatV2Dt > 0.05)  scr::gFloatV2Dt = 1.0 / 25.0;
+					else if (scr::gFloatV2Dt > 0.025) scr::gFloatV2Dt = 1.0 / 60.0;
+					else                              scr::gFloatV2Dt = 0.1;
 					break;
 
 #if defined(DEBUG) || defined(_DEBUG)

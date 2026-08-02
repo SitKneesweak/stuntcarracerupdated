@@ -53,6 +53,7 @@
 #include "Track.h"
 #include "3D_Engine.h"
 #include "XBOXController.h"
+#include "Physics_FloatV2.h"
 
 /*	===== */
 /*	Debug */
@@ -921,6 +922,27 @@ static void CarMovement (void)
 
 	CalculateWheelXZOffsets();
 	CalculateRoadWheelHeights();
+
+	// FloatV2 physics: replaces everything below, but *after* the road-position
+	// tracking above has run — Tick treats road section / distance / road-x as
+	// inputs. Toggle with F11; see Physics_FloatV2.h.
+	if (scr::gUseFloatV2Physics)
+		{
+		scr::PhysicsInput in;
+		in.Left       = (left_right_value < 0);
+		in.Right      = (left_right_value > 0);
+		in.Accelerate = (accelerate != 0);
+		in.Brake      = (brake != 0);
+		in.Boost      = (boost_activated != 0);
+
+		scr::FloatV2_RunStep(in, scr::gFloatV2Dt);
+		return;
+		}
+
+	// Legacy path is authoritative this step, so FloatV2 must re-seed from
+	// these globals if the toggle is flipped on later.
+	scr::gFloatV2NeedsSeed = true;
+
 	CalculateActualWheelHeights();
 
 	CalculateXZSpeeds();
@@ -2434,6 +2456,200 @@ static void LiftCarOntoTrack (void)
 	{
 	return;
 	}
+
+
+/*	======================================================================================= */
+/*	Function:		CopyLegacyToFloatV2 / CopyFloatV2ToLegacy								*/
+/*																							*/
+/*	Description:	Boundary between the legacy fixed-point globals and the FloatV2 port.	*/
+/*					See Physics_FloatV2.h for the unit mapping.								*/
+/*	======================================================================================= */
+
+#define	FV2_XZ_SCALE	(PC_FACTOR * 4)		// player_x/z are 8x the Amiga world units
+
+namespace scr {
+
+// Per-step: only the values the legacy code still owns. Everything else is
+// FloatV2's own state and must NOT be round-tripped through the legacy longs
+// each step — the fractional parts (BoostUnit, damage remainders, sub-unit
+// positions) are exactly what makes the physics rate-independent, and a trip
+// through `long` would truncate them away every tick.
+void CopyLegacyRoadStateToFloatV2 (PhysicsStateF& s)
+	{
+	// Road-position tracking: inputs to Tick, not outputs of it. The .NET
+	// build maintains these outside the physics assembly; here the legacy
+	// CalculateRoadWheelHeights() has just recomputed them for us.
+	s.RoadSection               = static_cast<uint8_t>(player_current_piece);
+	s.DistanceIntoSection       = static_cast<double>(players_distance_into_section);
+	s.NormalDistanceIntoSection = static_cast<double>(players_distance_into_section);
+	s.PlayersRoadXPosition      = static_cast<double>(players_road_x_position);
+
+		{
+		long rx = 0, rz = 0;
+		CalcXZRelativeToPiece(player_x, player_z, player_current_piece, &rx, &rz);
+		long angle = CalcSectionYAngle(player_current_piece, rx, rz);
+		angle = (-angle & (MAX_ANGLE - 1));
+		if (angle >= _180_DEGREES) angle -= MAX_ANGLE;
+		s.SectionYAngle = static_cast<double>(angle);
+		}
+
+	// Car-to-car impulses are produced by the (still legacy) collision code.
+	s.CarToCarXAcceleration = static_cast<int16_t>(car_collision_x_acceleration);
+	s.CarToCarYAcceleration = static_cast<int16_t>(car_collision_y_acceleration);
+	s.CarToCarZAcceleration = static_cast<int16_t>(car_collision_z_acceleration);
+
+	// League / track state that can change between steps.
+	s.RoadCushionValue      = static_cast<uint8_t>(road_cushion_value);
+	s.FourteenFramesElapsed = static_cast<uint8_t>(fourteen_frames_elapsed);
+	s.OffMapStatus          = static_cast<uint8_t>(off_map_status);
+	s.CarOnChainsCountdown  = static_cast<uint8_t>(on_chains);
+	s.RoadID                = static_cast<uint8_t>(TrackID);
+	s.EnginePower           = static_cast<int16_t>(engine_power);
+	s.BoostUnitValue        = static_cast<uint8_t>(boost_unit_value);
+	}
+
+// Full seed: on enabling the toggle, or after ResetPlayer/PositionCarAbovePiece
+// has moved the car outside the physics.
+void CopyLegacyToFloatV2 (PhysicsStateF& s)
+	{
+	CopyLegacyRoadStateToFloatV2(s);
+
+	s.RoadSection             = static_cast<uint8_t>(player_current_piece);
+	s.DistanceIntoSection     = static_cast<double>(players_distance_into_section);
+	s.NormalDistanceIntoSection = static_cast<double>(players_distance_into_section);
+	s.PlayersRoadXPosition    = static_cast<double>(players_road_x_position);
+
+	// SectionYAngle: the legacy code computes this inside its own
+	// CalculateSteering, which we are replacing, so derive it here the same
+	// way (including the 22/05/1998 reversal).
+		{
+		long rx = 0, rz = 0;
+		CalcXZRelativeToPiece(player_x, player_z, player_current_piece, &rx, &rz);
+		long angle = CalcSectionYAngle(player_current_piece, rx, rz);
+		angle = (-angle & (MAX_ANGLE - 1));
+		// Tick wants a signed 16-bit angle, not the 0..65535 legacy form.
+		if (angle >= _180_DEGREES) angle -= MAX_ANGLE;
+		s.SectionYAngle = static_cast<double>(angle);
+		}
+
+	// --- Position / orientation --------------------------------------------
+	s.WorldX = static_cast<double>(player_x) / FV2_XZ_SCALE;
+	s.WorldY = static_cast<double>(player_y);
+	s.WorldZ = static_cast<double>(player_z) / FV2_XZ_SCALE;
+
+	s.XAngle = static_cast<double>(player_x_angle);
+	s.YAngle = static_cast<double>(player_y_angle);
+	s.ZAngle = static_cast<double>(player_z_angle);
+
+	s.WorldXSpeed = static_cast<double>(player_world_x_speed);
+	s.WorldYSpeed = static_cast<double>(player_world_y_speed);
+	s.WorldZSpeed = static_cast<double>(player_world_z_speed);
+
+	s.XRotationSpeed = static_cast<double>(player_x_rotation_speed);
+	s.YRotationSpeed = static_cast<double>(player_y_rotation_speed);
+	s.ZRotationSpeed = static_cast<double>(player_z_rotation_speed);
+
+	// --- Car / league state -------------------------------------------------
+	s.EnginePower     = static_cast<int16_t>(engine_power);
+	s.BoostUnitValue  = static_cast<uint8_t>(boost_unit_value);
+	s.BoostReserve    = static_cast<uint8_t>(boostReserve);
+	s.BoostUnit       = static_cast<double>(boostUnit);
+	s.BoostActivated  = static_cast<uint8_t>(boost_activated);
+	s.Accelerating    = static_cast<uint8_t>(accelerating ? 128 : 0);
+	s.WreckWheelHeightReduction = static_cast<int32_t>(wreck_wheel_height_reduction);
+	s.SmashedCountdown = static_cast<uint8_t>(smashed_countdown);
+	s.TouchingRoad     = static_cast<uint8_t>(touching_road ? 1 : 0);
+	s.RoadCushionValue = static_cast<uint8_t>(road_cushion_value);
+	s.OffMapStatus     = static_cast<uint8_t>(off_map_status);
+	s.DamagedCount     = static_cast<uint8_t>(damaged_count);
+	s.DamagedLimit     = static_cast<uint8_t>(damaged_limit);
+	s.Damaged          = static_cast<uint8_t>(damaged);
+	s.GroundedCount    = static_cast<uint8_t>(grounded_count);
+	s.FourteenFramesElapsed = static_cast<uint8_t>(fourteen_frames_elapsed);
+	s.CarOnChainsCountdown  = static_cast<uint8_t>(on_chains);
+	s.RoadID           = static_cast<uint8_t>(TrackID);
+	s.IsSuperLeague    = bSuperLeague;
+
+	// Legacy has no equivalent of B1bb72 ("always set", per CarMovement), so
+	// forces are always applied.
+	s.CarOnTrack = 1;
+
+	s.FrontLeftDamage  = static_cast<uint8_t>(front_left_damage);
+	s.FrontRightDamage = static_cast<uint8_t>(front_right_damage);
+	s.RearDamage       = static_cast<uint8_t>(rear_damage);
+
+	s.FrontLeftRoadHeight  = static_cast<double>(front_left_road_height);
+	s.FrontRightRoadHeight = static_cast<double>(front_right_road_height);
+	s.RearRoadHeight       = static_cast<double>(rear_road_height);
+
+	s.CarToCarXAcceleration = static_cast<int16_t>(car_collision_x_acceleration);
+	s.CarToCarYAcceleration = static_cast<int16_t>(car_collision_y_acceleration);
+	s.CarToCarZAcceleration = static_cast<int16_t>(car_collision_z_acceleration);
+
+	s.AtSideByte    = static_cast<uint8_t>(at_side_byte);
+	s.WhichSideByte = static_cast<uint8_t>(which_side_byte);
+	}
+
+void CopyFloatV2ToLegacy (const PhysicsStateF& s)
+	{
+	player_x = static_cast<long>(s.WorldX * FV2_XZ_SCALE);
+	player_y = static_cast<long>(s.WorldY);
+	player_z = static_cast<long>(s.WorldZ * FV2_XZ_SCALE);
+
+	player_x_angle = static_cast<long>(s.XAngle);
+	player_y_angle = static_cast<long>(s.YAngle);
+	player_z_angle = static_cast<long>(s.ZAngle);
+
+	player_world_x_speed = static_cast<long>(s.WorldXSpeed);
+	player_world_y_speed = static_cast<long>(s.WorldYSpeed);
+	player_world_z_speed = static_cast<long>(s.WorldZSpeed);
+
+	player_x_rotation_speed = static_cast<long>(s.XRotationSpeed);
+	player_y_rotation_speed = static_cast<long>(s.YRotationSpeed);
+	player_z_rotation_speed = static_cast<long>(s.ZRotationSpeed);
+
+	player_z_speed = static_cast<long>(s.PlayersZSpeed);
+	player_x_speed = static_cast<long>(s.PlayersXSpeed);
+
+	// Wheel/collision state the renderer and HUD read.
+	touching_road = (s.TouchingRoad != 0) ? TRUE : FALSE;
+	front_left_amount_below_road  = static_cast<long>(s.FrontLeftAmountBelowRoad);
+	front_right_amount_below_road = static_cast<long>(s.FrontRightAmountBelowRoad);
+	rear_amount_below_road        = static_cast<long>(s.RearAmountBelowRoad);
+
+	front_left_road_height  = static_cast<long>(s.FrontLeftRoadHeight);
+	front_right_road_height = static_cast<long>(s.FrontRightRoadHeight);
+	rear_road_height        = static_cast<long>(s.RearRoadHeight);
+
+	front_left_damage  = static_cast<long>(s.FrontLeftDamage);
+	front_right_damage = static_cast<long>(s.FrontRightDamage);
+	rear_damage        = static_cast<long>(s.RearDamage);
+	damaged            = static_cast<long>(s.Damaged);
+	damaged_count      = static_cast<long>(s.DamagedCount);
+	damage_value       = static_cast<long>(s.DamageValue);
+	grounded_count     = static_cast<long>(s.GroundedCount);
+
+	boostReserve    = static_cast<long>(s.BoostReserve);
+	boostUnit       = static_cast<long>(s.BoostUnit);
+	boost_activated = static_cast<long>(s.BoostActivated);
+	accelerating    = (static_cast<int8_t>(s.Accelerating) < 0) ? TRUE : FALSE;
+
+	at_side_byte    = static_cast<long>(s.AtSideByte);
+	which_side_byte = static_cast<long>(s.WhichSideByte);
+	rear_wheel_surface_x_position = static_cast<long>(s.RearWheelSurfaceXPosition);
+
+	// Car-to-car impulses were consumed by the tick.
+	car_collision_x_acceleration = 0;
+	car_collision_y_acceleration = 0;
+	car_collision_z_acceleration = 0;
+
+	// Wheel spin animation: legacy tracks the two front wheels separately,
+	// FloatV2 keeps a single value.
+	front_left_wheel_speed  = static_cast<long>(s.WheelRotationSpeed);
+	front_right_wheel_speed = static_cast<long>(s.WheelRotationSpeed);
+	}
+
+} // namespace scr
 
 
 /*	======================================================================================= */

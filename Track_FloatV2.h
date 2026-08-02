@@ -42,6 +42,7 @@ struct FV2RoadPiece
 {
     uint8_t SectionByte1;       // 0x00 straight, 0x40 diagonal, 0x80/0xc0 curve
     uint8_t CoordCount;
+    uint8_t CurveDirection;     // 3 == curves left, 0 otherwise (bit 0 is what's read)
     uint8_t WidthReduction;
     uint8_t LengthReduction;
     uint8_t SteeringAmount;

@@ -25,14 +25,14 @@ constexpr int kPieceDataMap[16] = {
 // for every piece (TrackConstants.WidthReduction) and has no C++ counterpart,
 // so it comes from the reference.
 constexpr FV2RoadPiece kPieces[7] = {
-    //  byte1  coords  width  length  steering
-    { 0x00,  9, 171, 128, 0x20 },   // template 0  — straight
-    { 0x80,  9, 171, 135, 0x3e },   // template 1  — curve right
-    { 0xc0,  9, 171, 135, 0x3e },   // template 3  — curve left
-    { 0x40, 14, 171, 128, 0x20 },   // template 4  — diagonal
-    { 0x80, 10, 171, 122, 0x32 },   // template 6  — curve right (tight)
-    { 0xc0, 10, 171, 122, 0x32 },   // template 7  — curve left (tight)
-    { 0x40, 12, 171, 124, 0x20 },   // template 10 — diagonal (long)
+    //  byte1  coords  curve  width  length  steering
+    { 0x00,  9, 0, 171, 128, 0x20 },   // template 0  — straight
+    { 0x80,  9, 0, 171, 135, 0x3e },   // template 1  — curve right
+    { 0xc0,  9, 3, 171, 135, 0x3e },   // template 3  — curve left
+    { 0x40, 14, 0, 171, 128, 0x20 },   // template 4  — diagonal
+    { 0x80, 10, 0, 171, 122, 0x32 },   // template 6  — curve right (tight)
+    { 0xc0, 10, 3, 171, 122, 0x32 },   // template 7  — curve left (tight)
+    { 0x40, 12, 0, 171, 124, 0x20 },   // template 10 — diagonal (long)
 };
 
 FV2RoadSection gSections[100];      // MAX_PIECES_PER_TRACK
