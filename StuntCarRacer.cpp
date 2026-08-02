@@ -46,7 +46,7 @@
 #define DEFAULT_FRAME_GAP	(4)
 #endif
 
-#define	HEIGHT_ABOVE_ROAD	(100)
+#define	HEIGHT_ABOVE_ROAD	(60)	// TODO: lower once FloatV2 port lands accurate per-wheel road-height clamping in LimitViewpointY
 
 #define	FURTHEST_Z (131072.0f)
 
@@ -1010,28 +1010,45 @@ static float lastFrame = 0.0f;
 	if (TrackID == NO_TRACK)
 		return;
 
-	// Track preview and game mode run at reduced frame rate
+	// Track preview and game mode run at reduced frame rate.
+	// Original Amiga: vsync-locked at 50Hz PAL, physics every frameGap frames
+	// (default 6 -> ~8.3Hz). Here we decouple from render rate using a wall-clock
+	// accumulator so behaviour matches the Amiga on any display refresh.
 	if ((GameMode == TRACK_PREVIEW) || (GameMode == GAME_IN_PROGRESS))
 	{
-		if (GameMode == GAME_IN_PROGRESS)
+		static double physicsAccum = 0.0;
+		static double lastPhysicsT = DXUTGetTime();
+		const double STEP_50HZ = 1.0 / 50.0;
+
+		double nowT = DXUTGetTime();
+		physicsAccum += (nowT - lastPhysicsT);
+		lastPhysicsT = nowT;
+		// Clamp to avoid spiral-of-death after pauses / stalls
+		if (physicsAccum > 0.25) physicsAccum = 0.25;
+
+		bool ranPhysicsStep = false;
+		while (physicsAccum >= STEP_50HZ)
 		{
-			// Following function should run at 50Hz
-			if (!bPaused) FramesWheelsEngine(EngineSoundBuffers);
+			physicsAccum -= STEP_50HZ;
+
+			if (GameMode == GAME_IN_PROGRESS)
+			{
+				// Should run at 50Hz
+				if (!bPaused) FramesWheelsEngine(EngineSoundBuffers);
+			}
+
+			if (frameCount > 0)
+				--frameCount;
+			if (frameCount == 0)
+			{
+				frameCount = frameGap;
+				ranPhysicsStep = true;
+			}
 		}
 
-		if (frameCount > 0)
-			--frameCount;
-
-		if (frameCount == 0)
-		{
-			frameCount = frameGap;
-			//DXUTPause( false, false );	//pausing doesn't work properly
-		}
-		else
-		{
-			//if (frameCount == frameGap-1) DXUTPause( true, true );	//pausing doesn't work properly
+		// If no physics tick was due this render frame, skip the physics/draw-update body
+		if (!ranPhysicsStep)
 			return;
-		}
 	}
 	else if (GameMode == TRACK_MENU)
 	{
@@ -2333,6 +2350,10 @@ int main(int argc, const char** argv)
 	}
 	SDL_GetWindowSize(window, &screenW, &screenH);
 	SDL_SetWindowTitle(window, maintitle);
+	// Disable vsync so the main loop's wall-clock cap governs frame rate.
+	// Without this, high-refresh displays (e.g. 120Hz on macOS) drive OnFrameMove
+	// faster than 50Hz and the physics (gated per-frame) runs too fast.
+	SDL_GL_SetSwapInterval(0);
 #endif
 	{
 		// icon...

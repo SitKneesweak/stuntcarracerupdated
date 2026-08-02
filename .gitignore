@@ -18,3 +18,7 @@ StuntCarRacer_2008.VC.VC.opendb
 .vs/
 .vscode/
 SCRlog.txt
+
+# Third-party reference material (decompiled from stuntcarracer.net for study)
+# Do NOT commit — see reference/README.md
+/reference/
