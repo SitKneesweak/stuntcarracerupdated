@@ -1775,7 +1775,7 @@ typedef enum
 	NUM_TRACK_FACES
 	} TrackFaceType;
 
-static IDirect3DVertexBuffer9 *pTrackVB = NULL, *pShadowVB = NULL;
+static IDirect3DVertexBuffer9 *pTrackVB = NULL, *pShadowVB = NULL, *pStartLineVB = NULL;
 static long trackVertices, trackSegments;
 static long numShadowVertices;
 static long PieceFirstVertex[NUM_TRACK_FACES][MAX_PIECES_PER_TRACK];
@@ -1796,11 +1796,9 @@ BYTE roadColourIndex;
 		for (s = 0; s < numSegments; s++)
 		{
 			roadColourIndex = Track[piece].roadColour[s];
-			if ((piece == StartLinePiece) && (s == numSegments-1))
-			{
-				t = 5;	// set colour to white for start line
-			}
-			else if (roadColourIndex == SCR_BASE_COLOUR + 1)	// darker
+			// (The start line itself is not a whole white segment - it is drawn
+			//  separately as a thin white band, see DrawStartLine())
+			if (roadColourIndex == SCR_BASE_COLOUR + 1)	// darker
 			{
 				if (rlc == 0)
 					t = 0;
@@ -2036,8 +2034,6 @@ static void CreateUpdatePieceInVBMode1( long piece, long face, UTVERTEX *pVertic
 		{
 			offset = s * 4;
 			roadColourIndex = Track[piece].roadColour[s];
-			if ((piece == StartLinePiece) && (s == numSegments-1))
-				roadColourIndex = SCR_BASE_COLOUR + 15;	// set colour to white for start line
 
 			colour = SCRGB(roadColourIndex);
 			// triangle 1 (offsets 0,4,5)
@@ -2139,10 +2135,7 @@ static void CreateUpdatePieceInVBMode2( long piece, long face, UTVERTEX *pVertic
 			offset = s * 4;
 			if (s < numSegments-1)
 			{
-				if ((piece == StartLinePiece) && (s == numSegments-1-1))
-					roadColourIndex = SCR_BASE_COLOUR + 15;	// set colour to white for start line
-				else
-					roadColourIndex = Track[piece].roadColour[s+1];
+				roadColourIndex = Track[piece].roadColour[s+1];
 			}
 			else
 			{
@@ -2245,6 +2238,91 @@ void FreeShadowVertexBuffer (void)
 	if (pShadowVB) pShadowVB->Release(), pShadowVB = NULL;
 }
 
+/*
+ * The start/finish line.
+ *
+ * On the Amiga this is a single plotted line across the road at the end of the
+ * start line section (draw.start.line), i.e. one pixel thick.  Colouring the
+ * whole last road segment white (as this port used to do) makes it look far too
+ * fat, so instead we build a thin white band sitting on the road surface at the
+ * section boundary.
+ */
+/* ---- Tweakables (rebuild with "make MACOS=1" after changing) ---- */
+#define	START_LINE_WIDTH	(0.06f)		// thickness, as a fraction of the segment's length (smaller = thinner)
+#define	START_LINE_LIFT		(0.004f)	// raise off the road, as a fraction of segment length, to avoid z-fighting
+										// (smaller = flatter on the road; too small and it will shimmer)
+
+static HRESULT CreateStartLineVertexBuffer (IDirect3DDevice9 *pd3dDevice)
+{
+	if (pStartLineVB == NULL)
+	{
+		if( FAILED( pd3dDevice->CreateVertexBuffer( 6*sizeof(UTVERTEX),
+				D3DUSAGE_WRITEONLY, D3DFVF_UTVERTEX, D3DPOOL_DEFAULT, &pStartLineVB, NULL ) ) )
+		{
+			OutputDebugStringW(L"ERROR: Failed to create start line vertex buffer\n");
+			return E_FAIL;
+		}
+	}
+
+	UTVERTEX *pVertices;
+	if( FAILED( pStartLineVB->Lock( 0, 0, (void**)&pVertices, 0 ) ) )
+	{
+		OutputDebugStringW(L"ERROR: Failed to lock start line vertex buffer\n");
+		return E_FAIL;
+	}
+
+	long piece = StartLinePiece;
+	long offset = (Track[piece].numSegments - 1) * 4;	// last segment of the start line piece
+	long piece_x = Track[piece].x << (LOG_CUBE_SIZE-LOG_PRECISION);
+	long piece_y = Track[piece].y << (LOG_CUBE_SIZE-LOG_PRECISION);
+	long piece_z = Track[piece].z << (LOG_CUBE_SIZE-LOG_PRECISION);
+
+	// The segment's road quad: offsets 0/1 are the near edge, 4/5 the far edge
+	D3DXVECTOR3 nearL = GetPieceVertex( piece, piece_x, piece_y, piece_z, offset+0 );
+	D3DXVECTOR3 nearR = GetPieceVertex( piece, piece_x, piece_y, piece_z, offset+1 );
+	D3DXVECTOR3 farL  = GetPieceVertex( piece, piece_x, piece_y, piece_z, offset+4 );
+	D3DXVECTOR3 farR  = GetPieceVertex( piece, piece_x, piece_y, piece_z, offset+5 );
+
+	// Band runs back from the far edge (i.e. the section boundary the Amiga draws its line at)
+	D3DXVECTOR3 backL = D3DXVECTOR3( farL.x + (nearL.x - farL.x) * START_LINE_WIDTH,
+									 farL.y + (nearL.y - farL.y) * START_LINE_WIDTH,
+									 farL.z + (nearL.z - farL.z) * START_LINE_WIDTH );
+	D3DXVECTOR3 backR = D3DXVECTOR3( farR.x + (nearR.x - farR.x) * START_LINE_WIDTH,
+									 farR.y + (nearR.y - farR.y) * START_LINE_WIDTH,
+									 farR.z + (nearR.z - farR.z) * START_LINE_WIDTH );
+
+	float dx = farL.x - nearL.x, dy = farL.y - nearL.y, dz = farL.z - nearL.z;
+	float lift = sqrtf(dx*dx + dy*dy + dz*dz) * START_LINE_LIFT;
+	farL.y += lift; farR.y += lift; backL.y += lift; backR.y += lift;
+
+	DWORD colour = SCRGB(SCR_BASE_COLOUR + 15);		// white
+
+	// Same winding as the road quad it sits on: (0,4,5) and (0,5,1)
+	const D3DXVECTOR3 v[6] = { backL, farL, farR, backL, farR, backR };
+	for (int i = 0; i < 6; i++)
+	{
+		pVertices[i].pos = v[i];
+		pVertices[i].color = colour;
+		pVertices[i].tu = pVertices[i].tv = 0.0f;
+	}
+
+	pStartLineVB->Unlock();
+	return S_OK;
+}
+
+
+static void DrawStartLine (IDirect3DDevice9 *pd3dDevice)
+{
+	if (pStartLineVB == NULL)
+		return;
+
+	pd3dDevice->SetTextureStageState( 0, D3DTSS_COLOROP, D3DTOP_DISABLE );
+	pd3dDevice->SetStreamSource( 0, pStartLineVB, 0, sizeof(UTVERTEX) );
+	pd3dDevice->SetFVF( D3DFVF_UTVERTEX );
+	pd3dDevice->DrawPrimitive( D3DPT_TRIANGLELIST, 0, 2 );
+}
+
+
 HRESULT CreateTrackVertexBuffer (IDirect3DDevice9 *pd3dDevice)
 {
 	if (pTrackVB == NULL)
@@ -2287,6 +2365,9 @@ HRESULT CreateTrackVertexBuffer (IDirect3DDevice9 *pd3dDevice)
 */
 
 	pTrackVB->Unlock();
+
+	CreateStartLineVertexBuffer(pd3dDevice);
+
 	return S_OK;
 }
 
@@ -2294,6 +2375,7 @@ HRESULT CreateTrackVertexBuffer (IDirect3DDevice9 *pd3dDevice)
 void FreeTrackVertexBuffer (void)
 {
 	if (pTrackVB) pTrackVB->Release(), pTrackVB = NULL;
+	if (pStartLineVB) pStartLineVB->Release(), pStartLineVB = NULL;
 }
 
 
@@ -2486,6 +2568,9 @@ void DrawTrack (IDirect3DDevice9 *pd3dDevice)
 			pd3dDevice->DrawPrimitive( primitiveType, v, s*2 );	// 2 road triangles per segment
 		}
 	}
+
+	/* Draw the start/finish line on top of the road */
+	DrawStartLine(pd3dDevice);
 
 	/* Finally draw the opponent's car shadow */
 	if ((GameMode != TRACK_MENU) && (numShadowVertices > 0))

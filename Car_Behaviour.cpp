@@ -291,6 +291,7 @@ static void CalculateActualWheelHeights (void);
 static void CalculateXZSpeeds (void);
 static void CalculateGravityAcceleration (void);
 static void CarCollisionDetection (void);
+static void PlayGroundedSound (void);
 static void CalculateWheelCollision (long road_height,
 									 long actual_height,
 									 long *height_difference_out,
@@ -957,6 +958,11 @@ static void CarMovement (void)
 		long dbg_ar = rear_actual_height;
 
 		scr::FloatV2_RunStep(in, scr::gFloatV2Dt);
+
+		// FloatV2 replaces CarCollisionDetection, so the landing thump that
+		// hangs off the end of it has to be driven from here. The step's
+		// grounded_count / damage_value have already been copied back out.
+		PlayGroundedSound();
 
 		// K arms a dump for as long as the car is on a curved piece, so a
 		// corner can be captured without having to time the N key.
@@ -2294,12 +2300,33 @@ static void CarCollisionDetection (void)
 
 	car_to_road_collision_z_acceleration = car_collision_z_acceleration;
 
-	CarToCarCollision();
+	// With the FloatV2 opponent running, the collision response belongs to the
+	// opponent step, which applies it once per Amiga frame (PhysicsFloatV2.cs:137)
+	// rather than once per player physics step.
+	if (!(scr::gUseFloatV2Physics && scr::gUseFloatV2Opponent))
+		CarToCarCollision();
 
 //****************************************
 
 //******** Play grounded sound if necessary ********
 
+	PlayGroundedSound();
+
+	return;
+	}
+
+
+/*	======================================================================================= */
+/*	Function:		PlayGroundedSound														*/
+/*																							*/
+/*	Description:	Landing thump, played once per physics step in which a wheel newly		*/
+/*					touched down. Called from the tail of the legacy CarCollisionDetection	*/
+/*					and, since FloatV2 replaces that function wholesale, directly from the	*/
+/*					FloatV2 step as well.													*/
+/*	======================================================================================= */
+
+static void PlayGroundedSound (void)
+	{
 	if (grounded_delay > 0) --grounded_delay;
 
 	if (grounded_count == 0)
@@ -2316,10 +2343,18 @@ static void CarCollisionDetection (void)
 		{
 		//GroundedSoundBuffer->SetCurrentPosition(0);
 		GroundedSoundBuffer->Play(NULL,NULL,NULL);	// not looping
-		grounded_delay = 5;
-		}
 
-	return;
+		// The Amiga's 5-frame retrigger guard is half a second at its 10Hz
+		// step rate. grounded_delay counts steps, so scale it when FloatV2 is
+		// running faster, otherwise the thump machine-guns on a bumpy landing.
+		long reload = 5;
+		if (scr::gUseFloatV2Physics && scr::gFloatV2Dt > 0.0)
+			{
+			reload = lround(5.0 * (0.1 / scr::gFloatV2Dt));
+			if (reload < 1) reload = 1;
+			}
+		grounded_delay = reload;
+		}
 	}
 
 
@@ -2622,27 +2657,37 @@ static long FV2_NormalDistanceIntoSection (long dist)
 
 // SectionYAngle for FloatV2.
 //
-// CalcSectionYAngle's curve path applies its half-turn on oppositeDirection
-// alone (Car_Behaviour.cpp:3657). The reference carries a curve-direction term
-// as well — Physics.cs:3988 builds it as
+// The same plus180 story as the Z and X mirrors above: FloatV2 wants the
+// piece's own frame and applies the travel-direction reversal itself.
 //
-//     num3 = num + 16384 - curveToLeftWord      // curveToLeftWord == -32768 for left curves
+// CalcSectionYAngle's curve path adds a half-turn for oppositeDirection
+// (Car_Behaviour.cpp:3823). The reference's equivalent — Physics.cs:3988,
 //
-// so the half-turn belongs on (oppositeDirection XOR curveToLeft). Legacy can
-// live with the discrepancy because the value only ever feeds its own steering,
-// which was tuned against it; FloatV2 cannot, because SectionYAngle sets the
-// frame the wheel XZ offsets are built in (MakeRotationMatrix's sectionRelAngle
-// = YAngle - SectionYAngle). Half a turn there negates sinSec/cosSec, which
-// swaps front/rear and left/right wheels, so all three sample the road in the
-// wrong place and the car is thrown into the air.
+//     num3 = num + 16384 - curveToLeftWord    // curveToLeftWord == -32768 for left
 //
-// Diagnosed from a K dump crossing section 25 (curveLeft 0, oppDir 0 — fine,
-// heading error ~0) into section 26 (curveLeft 1, oppDir 1 — heading error
-// 32641, i.e. exactly 180 degrees, road heights diverging from legacy by 3000+
-// and amount-below-road saturating at 4607 on all three wheels).
+// — has no plus180 term at all: CalculatePlayersRoadPositionCurve returns
+// plus180 separately (outPlus180) for the lookup to apply. So the half-turn has
+// to come back off again here, on curves, whichever way they bend.
 //
-// Adding 180 for curveToLeft turns the existing "if oppositeDirection" into the
-// XOR, since 180*a + 180*b == 180*(a XOR b) modulo a full turn.
+// The curveToLeftWord term is *not* a second half-turn on top of a correct
+// angle: it is the ±90 that turns the radius vector into the tangent, i.e. the
+// curve-direction term, and legacy already carries it in the other algebraic
+// form — CalcCurveMeasurements returns a magnitude and line 3817 negates it for
+// right curves. Treating it as an extra 180 (the previous version of this
+// function, XOR-ing oppositeDirection with curveToLeft) happens to give the
+// right answer on oppDir/left pieces, because there the spurious 180 cancels
+// legacy's, but fabricates one on every plain left curve — which is what threw
+// the car into the air on left corners.
+//
+// This matters because SectionYAngle sets the frame the wheel XZ offsets are
+// built in (MakeRotationMatrix's sectionRelAngle = YAngle - SectionYAngle).
+// Half a turn there negates sinSec/cosSec, which swaps front/rear and
+// left/right wheels, so all three sample the road in the wrong place.
+//
+// Diagnosed originally from a K dump crossing section 25 (curveLeft 0, oppDir 0
+// — fine, heading error ~0) into section 26 (curveLeft 1, oppDir 1 — heading
+// error 32641, i.e. exactly 180 degrees, road heights diverging from legacy by
+// 3000+ and amount-below-road saturating at 4607 on all three wheels).
 static double FV2_SectionYAngle (void)
 	{
 	const long piece = player_current_piece;
@@ -2651,8 +2696,10 @@ static double FV2_SectionYAngle (void)
 	CalcXZRelativeToPiece(player_x, player_z, piece, &rx, &rz);
 	long angle = CalcSectionYAngle(piece, rx, rz);
 
-	if ((Track[piece].type & 0x80) && Track[piece].curveToLeft)
-		angle += _180_DEGREES;
+	// Curves only: straights and diagonals return before CalcSectionYAngle's
+	// oppositeDirection adjustment, so there is nothing to undo on those.
+	if ((Track[piece].type & 0x80) && Track[piece].oppositeDirection)
+		angle -= _180_DEGREES;
 
 	// Legacy holds unsigned 0..65535; FloatV2 wants the signed form (and the
 	// 22/05/1998 reversal, so the sense matches the car's own YAngle).

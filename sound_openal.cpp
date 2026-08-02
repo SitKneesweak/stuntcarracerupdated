@@ -262,15 +262,42 @@ void sound_pan( sound_source_t * source, long _pan )
 //  play / stop
 //
 
-void sound_play( sound_source_t * source )
+// DirectSound semantics: calling Play() on a buffer that is already playing
+// simply lets it carry on (the game relies on this - e.g. UpdateDamage() calls
+// Play() on the creak buffer every frame while damage accumulates).  OpenAL's
+// alSourcePlay() would rewind instead, so the sample would restart forever and
+// never reach its end.  Check the real source state before (re)starting it.
+static bool source_is_active( sound_source_t * source )
+{
+	ALint state = 0;
+	alGetSourcei( source->id, AL_SOURCE_STATE, &state );
+	return (state == AL_PLAYING);
+}
+
+static void sound_play_internal( sound_source_t * source, bool looping )
 {
 	if(!sound_initialized)
 		return;
+
+	if(source_is_active(source))
+	{
+		// already sounding - do not retrigger, just keep the loop flag current
+		alSourcei( source->id, AL_LOOPING, looping ? AL_TRUE : AL_FALSE );
+		source->playing = true;
+		return;
+	}
+
 	if(!source->playing)
 		stats.playing++;
 	source->playing = true;
 	//
+	alSourcei( source->id, AL_LOOPING, looping ? AL_TRUE : AL_FALSE );
 	alSourcePlay( source->id );
+}
+
+void sound_play( sound_source_t * source )
+{
+	sound_play_internal( source, false );
 	//
 	//printf("sound_play: playing sound='%s' count=%d source=%d\n",
 	//	source->path, stats.playing, source);
@@ -278,14 +305,7 @@ void sound_play( sound_source_t * source )
 
 void sound_play_looping( sound_source_t * source )
 {
-	if(!sound_initialized)
-		return;
-	if(!source->playing)
-		stats.playing++;
-	source->playing = true;
-	//
-	alSourcei( source->id, AL_LOOPING, AL_TRUE );
-	sound_play( source );
+	sound_play_internal( source, true );
 	//
 	//printf("sound_play_looping: playing %d\n",stats.playing);
 }

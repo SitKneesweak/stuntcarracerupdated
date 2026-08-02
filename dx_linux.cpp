@@ -403,6 +403,260 @@ D3DXMATRIX* D3DXMatrixPerspectiveFovLH(D3DXMATRIX *pOut, FLOAT fovy, FLOAT Aspec
 	return pOut;
 }
 
+#if defined(SCR_FOG_SHADER) || defined(SCR_SHARP_PIXEL)
+/*	======================================================================================= */
+/*	Shared shader plumbing (used by the fog and the sharp-bilinear 2D filter below).			*/
+/*	======================================================================================= */
+
+static GLuint CompileGLShader(GLenum type, const char* source, const char* what)
+{
+	GLuint shader = glCreateShader(type);
+	if (!shader)
+		return 0;
+	glShaderSource(shader, 1, &source, NULL);
+	glCompileShader(shader);
+
+	GLint ok = GL_FALSE;
+	glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+	if (ok == GL_TRUE)
+		return shader;
+
+	char log[2048] = {0};
+	glGetShaderInfoLog(shader, (GLsizei)sizeof(log), NULL, log);
+	printf("%s shader compile failed:\n%s\n", what, log);
+	glDeleteShader(shader);
+	return 0;
+}
+
+// Mirror of the fixed-function colour arg handling further down DrawPrimitive().
+int IDirect3DDevice9::ResolveColorMode(bool hasTexture, bool hasColor) const
+{
+	if (!hasTexture)
+		return hasColor ? 1 : 0;
+
+	const UINT op = colorop[0];
+	if (op == D3DTOP_MODULATE)
+		return hasColor ? 3 : 2;
+	if (op == D3DTOP_SELECTARG1)
+		return ((colorarg1[0] == D3DTA_DIFFUSE) && hasColor) ? 1 : 2;
+	if (op == D3DTOP_SELECTARG2)
+		return ((colorarg2[0] == D3DTA_DIFFUSE) && hasColor) ? 1 : 2;
+
+	return hasColor ? 3 : 2;
+}
+#endif
+
+#ifdef SCR_FOG_SHADER
+/*	======================================================================================= */
+/*	Volumetric fog - see the block comment in dx_linux.h.									*/
+/*	======================================================================================= */
+
+bool  gFogEnabled     = true;
+float gFogDensity     = 0.000008f;
+float gFogHeightScale = 8.0f;
+float gFogSkyColor[3] = { 0.7f, 0.6f, 0.5f };		// warm and dusty, not blue
+
+// The sun sits fixed above and behind; looking towards it warms the haze.
+static const float FOG_SUN_WORLD_DIR[3] = { 0.0f, 0.70710678f, 0.70710678f };
+
+static const char* kFogVertexShader =
+	"#version 120\n"
+	"uniform mat4 uModelView;\n"					// mView*mWorld: gl_ModelViewMatrix holds the
+	"varying vec4 vColor;\n"						// full MVP (see ActivateWorldMatrix), so the
+	"varying vec2 vTexCoord;\n"					// view-space position has to come in separately
+	"varying vec3 vViewPos;\n"
+	"void main() {\n"
+	"  gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;\n"
+	"  vViewPos    = (uModelView * gl_Vertex).xyz;\n"
+	"  vColor      = gl_Color;\n"
+	"  vTexCoord   = (gl_TextureMatrix[0] * gl_MultiTexCoord0).xy;\n"
+	"}\n";
+
+static const char* kFogFragmentShader =
+	"#version 120\n"
+	"uniform sampler2D uTexture;\n"
+	"uniform int   uColorMode;\n"
+	"uniform float uFogDensity;\n"
+	"uniform float uFogHeightScale;\n"
+	"uniform vec3  uFogSkyColor;\n"
+	"uniform vec3  uSunDirView;\n"
+	"uniform vec3  uCameraPos;\n"					// world space
+	"uniform vec3  uWorldUpView;\n"				// world +Y pushed into view space
+	"varying vec4 vColor;\n"
+	"varying vec2 vTexCoord;\n"
+	"varying vec3 vViewPos;\n"
+	"vec3 applyFog(in vec3 col, in float t, in vec3 rd, in vec3 lig) {\n"
+	"  float a = uFogDensity;\n"
+	"  float b = uFogDensity * uFogHeightScale;\n"
+	"  vec3  ro = uCameraPos;\n"
+	// rd is view space and uWorldUpView is world-up in view space, so this dot recovers the
+	// ray's true world-vertical component without an inverse-view per fragment.
+	"  float rdY = dot(rd, normalize(uWorldUpView));\n"
+	"  float safeRdY = (abs(rdY) < 0.0001) ? ((rdY < 0.0) ? -0.0001 : 0.0001) : rdY;\n"
+	"  float fogAmount = (a / b) * exp(-ro.y * b) * (1.0 - exp(-t * safeRdY * b)) / safeRdY;\n"
+	"  fogAmount = clamp(fogAmount, 0.0, 1.0);\n"
+	"  float sunAmount = max(dot(rd, lig), 0.0);\n"
+	"  vec3  fogColor = mix(uFogSkyColor, vec3(1.0, 0.9, 0.7), pow(sunAmount, 8.0));\n"
+	"  return mix(col, fogColor, fogAmount);\n"
+	"}\n"
+	"void main() {\n"
+	"  vec4 outColor = vec4(1.0);\n"
+	"  if (uColorMode == 1) {\n"
+	"    outColor = vColor;\n"
+	"  } else if (uColorMode == 2) {\n"
+	"    outColor = texture2D(uTexture, vTexCoord);\n"
+	"  } else if (uColorMode == 3) {\n"
+	"    outColor = texture2D(uTexture, vTexCoord) * vColor;\n"
+	"  }\n"
+	"  float t  = length(vViewPos);\n"
+	"  vec3  rd = (t > 0.0001) ? (vViewPos / t) : vec3(0.0, 0.0, 1.0);\n"
+	"  outColor.rgb = applyFog(outColor.rgb, t, rd, normalize(uSunDirView));\n"
+	"  gl_FragColor = outColor;\n"
+	"}\n";
+
+bool IDirect3DDevice9::EnsureFogProgram()
+{
+	if (mFogProgram)
+		return true;
+	if (mFogTried)
+		return false;
+	mFogTried = true;
+
+	GLuint vs = CompileGLShader(GL_VERTEX_SHADER, kFogVertexShader, "Fog");
+	if (!vs)
+		return false;
+	GLuint fs = CompileGLShader(GL_FRAGMENT_SHADER, kFogFragmentShader, "Fog");
+	if (!fs) {
+		glDeleteShader(vs);
+		return false;
+	}
+
+	GLuint prog = glCreateProgram();
+	glAttachShader(prog, vs);
+	glAttachShader(prog, fs);
+	glLinkProgram(prog);
+	glDeleteShader(vs);
+	glDeleteShader(fs);
+
+	GLint linked = GL_FALSE;
+	glGetProgramiv(prog, GL_LINK_STATUS, &linked);
+	if (linked != GL_TRUE) {
+		char log[2048] = {0};
+		glGetProgramInfoLog(prog, (GLsizei)sizeof(log), NULL, log);
+		printf("Fog shader link failed:\n%s\n", log);
+		glDeleteProgram(prog);
+		return false;
+	}
+
+	mFogProgram        = prog;
+	mFogU_ModelView    = glGetUniformLocation(prog, "uModelView");
+	mFogU_ColorMode    = glGetUniformLocation(prog, "uColorMode");
+	mFogU_Texture      = glGetUniformLocation(prog, "uTexture");
+	mFogU_Density      = glGetUniformLocation(prog, "uFogDensity");
+	mFogU_HeightScale  = glGetUniformLocation(prog, "uFogHeightScale");
+	mFogU_SkyColor     = glGetUniformLocation(prog, "uFogSkyColor");
+	mFogU_SunDirView   = glGetUniformLocation(prog, "uSunDirView");
+	mFogU_CameraPos    = glGetUniformLocation(prog, "uCameraPos");
+	mFogU_WorldUpView  = glGetUniformLocation(prog, "uWorldUpView");
+
+	printf("Fog shader ready (press G to toggle)\n");
+	fflush(stdout);
+	return true;
+}
+#endif	// SCR_FOG_SHADER
+
+#ifdef SCR_SHARP_PIXEL
+/*	======================================================================================= */
+/*	Sharp-bilinear filtering for the 2D art - see the block comment in dx_linux.h.			*/
+/*	======================================================================================= */
+
+bool gSharpPixelEnabled = true;
+
+static const char* kSharpVertexShader =
+	"#version 120\n"
+	"varying vec4 vColor;\n"
+	"varying vec2 vTexCoord;\n"
+	"void main() {\n"
+	"  gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;\n"
+	"  vColor      = gl_Color;\n"
+	"  vTexCoord   = (gl_TextureMatrix[0] * gl_MultiTexCoord0).xy;\n"
+	"}\n";
+
+static const char* kSharpFragmentShader =
+	"#version 120\n"
+	"uniform sampler2D uTexture;\n"
+	"uniform vec2  uTexSize;\n"
+	"uniform int   uColorMode;\n"
+	"varying vec4 vColor;\n"
+	"varying vec2 vTexCoord;\n"
+	"void main() {\n"
+	"  vec2 texel = vTexCoord * uTexSize;\n"
+	// fwidth() is texels covered per output pixel, so its reciprocal is the magnification.
+	// Clamped at 1 so minified art just falls back to ordinary bilinear.
+	"  vec2 scale = max(1.0 / max(fwidth(texel), vec2(1e-6)), vec2(1.0));\n"
+	// Push the sample towards the texel centre, leaving a one-output-pixel ramp across the
+	// boundary for the hardware's bilinear to smooth - that ramp is the whole trick.
+	"  vec2 base  = floor(texel);\n"
+	"  vec2 dist  = fract(texel) - 0.5;\n"
+	"  vec2 flat  = 0.5 - 0.5 / scale;\n"
+	"  vec2 f     = (dist - clamp(dist, -flat, flat)) * scale + 0.5;\n"
+	"  vec4 texel_color = texture2D(uTexture, (base + f) / uTexSize);\n"
+	"  vec4 outColor = vec4(1.0);\n"
+	"  if (uColorMode == 1) {\n"
+	"    outColor = vColor;\n"
+	"  } else if (uColorMode == 2) {\n"
+	"    outColor = texel_color;\n"
+	"  } else if (uColorMode == 3) {\n"
+	"    outColor = texel_color * vColor;\n"
+	"  }\n"
+	"  gl_FragColor = outColor;\n"
+	"}\n";
+
+bool IDirect3DDevice9::EnsureSharpProgram()
+{
+	if (mSharpProgram)
+		return true;
+	if (mSharpTried)
+		return false;
+	mSharpTried = true;
+
+	GLuint vs = CompileGLShader(GL_VERTEX_SHADER, kSharpVertexShader, "Sharp-pixel");
+	if (!vs)
+		return false;
+	GLuint fs = CompileGLShader(GL_FRAGMENT_SHADER, kSharpFragmentShader, "Sharp-pixel");
+	if (!fs) {
+		glDeleteShader(vs);
+		return false;
+	}
+
+	GLuint prog = glCreateProgram();
+	glAttachShader(prog, vs);
+	glAttachShader(prog, fs);
+	glLinkProgram(prog);
+	glDeleteShader(vs);
+	glDeleteShader(fs);
+
+	GLint linked = GL_FALSE;
+	glGetProgramiv(prog, GL_LINK_STATUS, &linked);
+	if (linked != GL_TRUE) {
+		char log[2048] = {0};
+		glGetProgramInfoLog(prog, (GLsizei)sizeof(log), NULL, log);
+		printf("Sharp-pixel shader link failed:\n%s\n", log);
+		glDeleteProgram(prog);
+		return false;
+	}
+
+	mSharpProgram      = prog;
+	mSharpU_Texture    = glGetUniformLocation(prog, "uTexture");
+	mSharpU_TexSize    = glGetUniformLocation(prog, "uTexSize");
+	mSharpU_ColorMode  = glGetUniformLocation(prog, "uColorMode");
+
+	printf("Sharp-pixel shader ready (press Y to toggle)\n");
+	fflush(stdout);
+	return true;
+}
+#endif	// SCR_SHARP_PIXEL
+
 void IDirect3DDevice9::ActivateWorldMatrix()
 {
 	glMatrixMode(GL_MODELVIEW);
@@ -673,8 +927,65 @@ HRESULT IDirect3DDevice9::DrawPrimitive(D3DPRIMITIVETYPE PrimitiveType,UINT Star
 	}
 
 	if(transf) ActivateWorldMatrix();
-	
+
+#ifdef SCR_FOG_SHADER
+	// Fog only applies to world-space geometry - transf is false for the pre-transformed
+	// (D3DFVF_XYZRHW) HUD/cockpit quads, and the text helper uses its own glBegin path,
+	// so both stay on the fixed-function pipeline untouched.
+	const bool useFog = transf && vtx && (fvf & D3DFVF_XYZ) && gFogEnabled && EnsureFogProgram();
+	if (useFog) {
+		const bool hasTexture = (tex0 || tex1) && (colorop[0] > D3DTOP_DISABLE);
+		const glm::mat4 modelView   = mView * mWorld;
+		const glm::vec3 cameraWorld = glm::vec3(glm::inverse(mView) * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
+
+		glm::vec3 worldUpView = glm::vec3(mView * glm::vec4(0.0f, 1.0f, 0.0f, 0.0f));
+		const float upLen = glm::length(worldUpView);
+		worldUpView = (upLen > 0.0001f) ? (worldUpView / upLen) : glm::vec3(0.0f, 1.0f, 0.0f);
+
+		const glm::vec3 sunWorld(FOG_SUN_WORLD_DIR[0], FOG_SUN_WORLD_DIR[1], FOG_SUN_WORLD_DIR[2]);
+		glm::vec3 sunView = glm::vec3(mView * glm::vec4(sunWorld, 0.0f));
+		const float sunLen = glm::length(sunView);
+		sunView = (sunLen > 0.0001f) ? (sunView / sunLen) : sunWorld;
+
+		glUseProgram(mFogProgram);
+		glUniformMatrix4fv(mFogU_ModelView, 1, GL_FALSE, glm::value_ptr(modelView));
+		glUniform1i(mFogU_ColorMode, ResolveColorMode(hasTexture, col));
+		glUniform1i(mFogU_Texture, 0);
+		glUniform1f(mFogU_Density, gFogDensity);
+		glUniform1f(mFogU_HeightScale, gFogHeightScale);
+		glUniform3f(mFogU_SkyColor, gFogSkyColor[0], gFogSkyColor[1], gFogSkyColor[2]);
+		glUniform3f(mFogU_SunDirView, sunView.x, sunView.y, sunView.z);
+		glUniform3f(mFogU_CameraPos, cameraWorld.x, cameraWorld.y, cameraWorld.z);
+		glUniform3f(mFogU_WorldUpView, worldUpView.x, worldUpView.y, worldUpView.z);
+	}
+#endif
+
+#ifdef SCR_SHARP_PIXEL
+	// The mirror image of the fog test: the pre-transformed (D3DFVF_XYZRHW) textured quads
+	// are exactly the 2D art - cockpit, menus, win/lose screens - blown up from 320x200-era
+	// texels, so they're the ones that need the sharpening.
+	const bool useSharp = !transf && vtx && gSharpPixelEnabled &&		// !transf, so never the fog's geometry
+						  (tex0 || tex1) && (colorop[0] > D3DTOP_DISABLE) &&
+						  mTexture0 && mTexture0->Width() > 0 && mTexture0->Height() > 0 &&
+						  EnsureSharpProgram();
+	if (useSharp) {
+		glUseProgram(mSharpProgram);
+		glUniform1i(mSharpU_Texture, 0);
+		glUniform2f(mSharpU_TexSize, (float)mTexture0->Width(), (float)mTexture0->Height());
+		glUniform1i(mSharpU_ColorMode, ResolveColorMode(true, col));
+	}
+#endif
+
 	glDrawArrays(mode, StartVertex, prim1[PrimitiveType-1]*PrimitiveCount+prim2[PrimitiveType-1]);
+
+#ifdef SCR_FOG_SHADER
+	if (useFog)
+		glUseProgram(0);
+#endif
+#ifdef SCR_SHARP_PIXEL
+	if (useSharp)
+		glUseProgram(0);
+#endif
 
 	if(transf) DeactivateWorldMatrix();
 	return S_OK;
@@ -745,6 +1056,11 @@ HRESULT IDirect3DDevice9::SetTexture(DWORD Sampler, IDirect3DTexture9 *pTexture)
 	}
 
 	pTexture->Bind();
+
+#ifdef SCR_SHARP_PIXEL
+	if(!Sampler)
+		mTexture0 = pTexture;		// the sharp-pixel shader needs its dimensions
+#endif
 
 	if(Sampler) {
 		glActiveTexture(GL_TEXTURE0);

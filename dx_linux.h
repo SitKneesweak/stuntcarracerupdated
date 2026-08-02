@@ -347,6 +347,8 @@ class IDirect3DTexture9 {
   void LoadTexture(const char* name);
   void Bind() {glBindTexture(GL_TEXTURE_2D, texID);}
   void UnBind() {glBindTexture(GL_TEXTURE_2D, 0);}
+  int  Width()  const {return w2;}	// what the sampler sees (== w, we never pad to POT)
+  int  Height() const {return h2;}
 };
 
 typedef struct IDirect3DTexture9 *LPDIRECT3DTEXTURE9, *PDIRECT3DTEXTURE9;
@@ -802,6 +804,57 @@ public:
   UTBuffer buffer;
 };
 
+/*	--------------------------------------------------------------------------------------- */
+/*	Volumetric fog (ported from retro-foundry/multistuntcar, src/platform_sdl_gl.cpp).		*/
+/*																							*/
+/*	Iñigo Quilez's "fog with height falloff and sun scattering":							*/
+/*	https://iquilezles.org/articles/fog										 				*/
+/*																							*/
+/*	Needs a programmable pipeline. Our shim is otherwise fixed-function, so the shader		*/
+/*	deliberately reads the built-in attributes (gl_Vertex, gl_Color, gl_MultiTexCoord0)		*/
+/*	and gl_ModelViewProjectionMatrix - that way the existing glVertexPointer/glColorPointer	*/
+/*	client-array setup in DrawPrimitive() keeps feeding it unchanged.						*/
+/*																							*/
+/*	macOS gives us a legacy 2.1 compatibility context (no profile is requested in			*/
+/*	StuntCarRacer.cpp), which has both GLSL 120 and the fixed-function state the rest of		*/
+/*	the shim relies on. GLES1 has no shaders, and plain <GL/gl.h> on Linux doesn't declare	*/
+/*	the GL2 entry points without a loader, so this is Apple-only for now.					*/
+/*	--------------------------------------------------------------------------------------- */
+#if defined(__APPLE__) && !defined(HAVE_GLES)
+#define SCR_FOG_SHADER 1
+#endif
+
+#ifdef SCR_FOG_SHADER
+extern bool  gFogEnabled;		// toggled with G
+extern float gFogDensity;		// 'a' in the IQ formula
+extern float gFogHeightScale;	// 'b' = density * this; larger = thinner with altitude
+extern float gFogSkyColor[3];
+#endif
+
+/*	--------------------------------------------------------------------------------------- */
+/*	Sharp-bilinear filtering for the 2D art (cockpit, menus, win/lose screens).				*/
+/*																							*/
+/*	Those cells in Bitmap/atlas.png are original 320x200-era pixels (Atlas.cpp), and			*/
+/*	DrawCockpit() stretches them across the whole window - 4x to 8x on a modern display.		*/
+/*	Plain GL_LINEAR turns every hard pixel edge into a multi-pixel gradient, which reads		*/
+/*	as "compressed". GL_NEAREST would be sharp but shimmers on the slanted pillar edges.		*/
+/*																							*/
+/*	Sharp bilinear (Themaister's, as used by RetroArch) snaps the sample point to the		*/
+/*	texel grid everywhere except a one-output-pixel ramp across each texel boundary, so		*/
+/*	you get nearest-neighbour crispness with a single pixel of anti-aliasing on the edges.	*/
+/*	The magnification factor comes from fwidth() rather than a uniform, so it stays right	*/
+/*	at any window size and for the differently-scaled cells in one draw call.				*/
+/*																							*/
+/*	Same programmable-pipeline requirement as the fog above, hence the same guard.			*/
+/*	--------------------------------------------------------------------------------------- */
+#if defined(__APPLE__) && !defined(HAVE_GLES)
+#define SCR_SHARP_PIXEL 1
+#endif
+
+#ifdef SCR_SHARP_PIXEL
+extern bool gSharpPixelEnabled;	// toggled with Y
+#endif
+
 class IDirect3DDevice9
 {
 public:
@@ -824,6 +877,25 @@ public:
   void ActivateWorldMatrix();
   void DeactivateWorldMatrix();
 private:
+#ifdef SCR_FOG_SHADER
+  bool  EnsureFogProgram();								// lazily compiles, once
+  int   ResolveColorMode(bool hasTexture, bool hasColor) const;
+  bool   mFogTried = false;								// don't retry a failed compile every frame
+  GLuint mFogProgram = 0;
+  GLint  mFogU_ModelView = -1, mFogU_ColorMode = -1, mFogU_Texture = -1;
+  GLint  mFogU_Density = -1, mFogU_HeightScale = -1, mFogU_SkyColor = -1;
+  GLint  mFogU_SunDirView = -1, mFogU_CameraPos = -1, mFogU_WorldUpView = -1;
+#endif
+#ifdef SCR_SHARP_PIXEL
+  bool  EnsureSharpProgram();							// lazily compiles, once
+  bool   mSharpTried = false;
+  GLuint mSharpProgram = 0;
+  GLint  mSharpU_Texture = -1, mSharpU_TexSize = -1, mSharpU_ColorMode = -1;
+  IDirect3DTexture9 *mTexture0 = NULL;					// last SetTexture(0, ...), for its size
+#endif
+#if defined(SCR_SHARP_PIXEL) && !defined(SCR_FOG_SHADER)
+  int   ResolveColorMode(bool hasTexture, bool hasColor) const;
+#endif
 	UINT colorop[8];
 	UINT alphaop[8];
 	UINT colorarg1[8];

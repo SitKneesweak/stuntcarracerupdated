@@ -497,7 +497,8 @@ inline int16_t FixMul(int16_t a, int16_t b) {
 // The returned "amount below road" is what the suspension pushes back against.
 double ProcessWheel(PhysicsStateF& s, double heightDiff, double& oldDiff,
                     double& amountBelowRoad, uint8_t& damage, double& damageRemainder,
-                    double& damageValue, uint8_t& groundedCount, double dtRatio) {
+                    double& damageValue, uint8_t& groundedCount, bool& grounded,
+                    double dtRatio) {
     double d = heightDiff;
     if (d < 0.0) { if (d < -768.0) d = -768.0; }
     else if (d >= 5120.0) d = 5120.0;
@@ -510,13 +511,22 @@ double ProcessWheel(PhysicsStateF& s, double heightDiff, double& oldDiff,
 
     if (below < 0.0) {
         amountBelowRoad = 0.0;
+        grounded = false;
         s.DamagedCount = 0;
         return 0.0;
     }
 
-    double previous = amountBelowRoad;
     amountBelowRoad = below;
-    if (below >= 1024.0 && previous < 512.0) groundedCount++;
+    // Touchdown edge, latched: arm below 0x200, fire at 0x400. Equivalent to
+    // the Amiga's previous-step test at its own rate, but it still fires when
+    // a finer time step walks the wheel through the band gradually - which is
+    // why hitting the foot of the big ramp made no sound at 60Hz.
+    if (below < 512.0) {
+        grounded = false;
+    } else if (below >= 1024.0 && !grounded) {
+        grounded = true;
+        groundedCount++;
+    }
 
     // Impacts beyond the road "cushion" do damage.
     double impact = below - static_cast<double>(s.RoadCushionValue << 8);
@@ -563,20 +573,25 @@ CollisionResult CarCollisionDetection(PhysicsStateF& s, const WheelRoadH& road,
                                       const WheelActualH& actual, double dtRatio) {
     CollisionResult r{};
     double damageValue = 0.0;
+    // Damaged is a per-step flag: the wheel passes below re-raise it if a wheel
+    // is taking damage this step. Clearing it here mirrors the legacy
+    // CarCollisionDetection (Car_Behaviour.cpp) - without it the creak sound
+    // keeps retriggering long after the impact.
+    s.Damaged = 0;
     r.groundedCount = 0;
 
     double flDiff = road.fl - actual.fl - static_cast<double>(s.WreckWheelHeightReduction);
     r.flBelow = ProcessWheel(s, flDiff, s.OldFrontLeftDiff, s.FrontLeftAmountBelowRoad,
                              s.FrontLeftDamage, s.FrontLeftDamageRemainder,
-                             damageValue, r.groundedCount, dtRatio);
+                             damageValue, r.groundedCount, s.FrontLeftGrounded, dtRatio);
     double frDiff = road.fr - actual.fr - static_cast<double>(s.WreckWheelHeightReduction);
     r.frBelow = ProcessWheel(s, frDiff, s.OldFrontRightDiff, s.FrontRightAmountBelowRoad,
                              s.FrontRightDamage, s.FrontRightDamageRemainder,
-                             damageValue, r.groundedCount, dtRatio);
+                             damageValue, r.groundedCount, s.FrontRightGrounded, dtRatio);
     double rDiff = road.r - actual.r - static_cast<double>(s.WreckWheelHeightReduction);
     r.rBelow = ProcessWheel(s, rDiff, s.OldRearDiff, s.RearAmountBelowRoad,
                             s.RearDamage, s.RearDamageRemainder,
-                            damageValue, r.groundedCount, dtRatio);
+                            damageValue, r.groundedCount, s.RearGrounded, dtRatio);
 
     s.DamageValue = SaturateToShort(damageValue);
     s.GroundedCount = r.groundedCount;
@@ -991,6 +1006,8 @@ int    gDbgBlendUsed = 0;
 bool   gUseFloatV2Physics = true;        // now the default path; V toggles back to legacy
 double gFloatV2Dt         = 1.0 / 60.0;  // 60Hz; B cycles 10 -> 25 -> 60
 bool   gFloatV2NeedsSeed  = true;    // set whenever the legacy path has run
+bool   gUseFloatV2Opponent        = true;   // O toggles back to the 8.3Hz opponent
+bool   gFloatV2OpponentNeedsSeed  = true;   // set whenever the legacy opponent has run
 bool   gFloatV2UnreverseCurveDist = true;    // ON by default; J toggles. See header.
 bool   gFloatV2DumpOnCurves       = false;   // K toggles; see header
 

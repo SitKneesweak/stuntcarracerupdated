@@ -1237,8 +1237,24 @@ static float lastFrame = 0.0f;
 				}
 			}
 
-			// Opponent AI has no timestep, so it stays on the legacy clock.
-			if (bOpponentStepDue)
+			// The FloatV2 opponent is timestep-parameterised too, so it rides
+			// the player's clock. Its once-per-Amiga-frame decisions (steering
+			// randomisation, player interaction, car-to-car collision) are
+			// gated internally by _framePhase, so stepping it faster makes it
+			// smoother without making it drive faster or react sooner.
+			// The legacy opponent has no timestep and stays on the 8.3Hz clock.
+			if (scr::gUseFloatV2Physics && scr::gUseFloatV2Opponent)
+			{
+				for (long step = 0; step < PlayerPhysicsSteps; ++step)
+					OpponentBehaviour(&opponent_x,
+								  &opponent_y,
+								  &opponent_z,
+								  &opponent_x_angle,
+								  &opponent_y_angle,
+								  &opponent_z_angle,
+								  bOpponentPaused);
+			}
+			else if (bOpponentStepDue)
 				OpponentBehaviour(&opponent_x,
 							  &opponent_y,
 							  &opponent_z,
@@ -1911,6 +1927,11 @@ void CALLBACK KeyboardProc( UINT nChar, bool bKeyDown, bool bAltDown, void *pUse
 			scr::gUseFloatV2Physics = !scr::gUseFloatV2Physics;
 			break;
 
+		case 'U':
+			// Toggle the FloatV2 opponent step (see Physics_FloatV2.h).
+			scr::gUseFloatV2Opponent = !scr::gUseFloatV2Opponent;
+			break;
+
 		case 'B':
 			// Cycle the FloatV2 timestep: 10Hz (Amiga rate) -> 25Hz -> 60Hz.
 			// At 10Hz this should behave like the legacy path; the higher
@@ -2202,6 +2223,44 @@ bool process_events()
 						   scr::gFloatV2Dt, 1.0 / scr::gFloatV2Dt);
 					fflush(stdout);
 					break;
+
+				case SDLK_u:
+					// Toggle the FloatV2 opponent step (see Physics_FloatV2.h).
+					// O is taken (unpause), hence U.
+					scr::gUseFloatV2Opponent = !scr::gUseFloatV2Opponent;
+					printf("FloatV2 opponent %s%s\n",
+						   scr::gUseFloatV2Opponent ? "ON" : "OFF (8.3Hz legacy)",
+						   scr::gUseFloatV2Physics ? "" : "  [physics still OFF - press V]");
+					fflush(stdout);
+					break;
+
+#ifdef SCR_FOG_SHADER
+				case SDLK_g:
+					// Toggle the volumetric fog (see dx_linux.h).
+					gFogEnabled = !gFogEnabled;
+					printf("Fog %s (density=%g, heightScale=%g)\n",
+						   gFogEnabled ? "ON" : "OFF", gFogDensity, gFogHeightScale);
+					fflush(stdout);
+					break;
+
+				case SDLK_h:
+					// Cycle fog density, so it can be eyeballed against our world scale.
+					gFogDensity *= 2.0f;
+					if (gFogDensity > 0.0001f) gFogDensity = 0.000001f;
+					printf("Fog density=%g%s\n", gFogDensity,
+						   gFogEnabled ? "" : "  [fog still OFF - press G]");
+					fflush(stdout);
+					break;
+#endif
+
+#ifdef SCR_SHARP_PIXEL
+				case SDLK_y:
+					// Toggle sharp-bilinear filtering of the 2D art (see dx_linux.h).
+					gSharpPixelEnabled = !gSharpPixelEnabled;
+					printf("Sharp-pixel 2D filtering %s\n", gSharpPixelEnabled ? "ON" : "OFF (plain bilinear)");
+					fflush(stdout);
+					break;
+#endif
 
 				case SDLK_b:
 					// Cycle the FloatV2 timestep: 10Hz (Amiga rate) -> 25Hz -> 60Hz.
@@ -2510,10 +2569,14 @@ int main(int argc, const char** argv)
 	}
 #endif
 	int flags = 0;
+	float dpiFactor = 1.0f;	// drawable pixels per logical point (>1 on HiDPI)
 	wideScreen = 0;
 	int screenH, screenW, screenX, screenY;
 #ifdef USE_SDL2
-	flags = SDL_WINDOW_OPENGL;
+	// ALLOW_HIGHDPI: render at native pixel density on Retina/HiDPI displays
+	// rather than letting the OS upscale a low-res drawable. Safe here because
+	// nothing in the game consumes mouse coordinates (which stay in points).
+	flags = SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI;
 #else
 	flags = SDL_OPENGL | SDL_DOUBLEBUF;
 #endif
@@ -2562,8 +2625,30 @@ int main(int argc, const char** argv)
 			screenH = customHeight > 0 ? customHeight : 480;
 		}
 	} else {
-		screenW = customWidth > 0 ? customWidth : 800;
-		screenH = customHeight > 0 ? customHeight : 480;
+		// Windowed. Pick a sensible default size instead of the old fixed 800x480,
+		// which is tiny on a modern display.
+		int defW = 800, defH = 480;
+		if(customScale > 0.0f) {
+			// An explicit scale needs a window big enough to hold the scaled
+			// viewport, otherwise the render gets clipped.
+			defW = static_cast<int>(800 * customScale);
+			defH = static_cast<int>(480 * customScale);
+		}
+#ifdef USE_SDL2
+		else {
+			// Largest half-step scale of the 800x480 base that still leaves
+			// room for the menu bar / dock / window chrome.
+			SDL_Rect usable;
+			if(SDL_GetDisplayUsableBounds(0, &usable)==0 && usable.w>0 && usable.h>0) {
+				double scale = floor(fmin(usable.w*0.9/800., usable.h*0.9/480.) * 2.0) / 2.0;
+				if(scale < 1.0) scale = 1.0;
+				defW = (int)(800 * scale);
+				defH = (int)(480 * scale);
+			}
+		}
+#endif
+		screenW = customWidth > 0 ? customWidth : defW;
+		screenH = customHeight > 0 ? customHeight : defH;
 	}
 #endif
 #ifdef USE_SDL2
@@ -2584,7 +2669,18 @@ int main(int argc, const char** argv)
 			printf("Couldn't create OpenGL Context: %s\n", SDL_GetError());
 			exit(-3);
 	}
-	SDL_GetWindowSize(window, &screenW, &screenH);
+	// Drawable size, not window size: on a HiDPI display these differ and the
+	// GL viewport is in pixels. dpiFactor rescales the point-based -s/-w/-h
+	// options so a requested size still means the same physical size.
+	{
+		int pointW = screenW, pointH = screenH;
+		SDL_GetWindowSize(window, &pointW, &pointH);
+		SDL_GL_GetDrawableSize(window, &screenW, &screenH);
+		if(pointW > 0)
+			dpiFactor = static_cast<float>(screenW) / static_cast<float>(pointW);
+		if(dpiFactor <= 0.0f)
+			dpiFactor = 1.0f;
+	}
 	SDL_SetWindowTitle(window, maintitle);
 	// Disable vsync so the main loop's wall-clock cap governs frame rate.
 	// Without this, high-refresh displays (e.g. 120Hz on macOS) drive OnFrameMove
@@ -2637,8 +2733,8 @@ int main(int argc, const char** argv)
 	// automatic guess the scale or use custom scale
 	float screenScale = 1.;
 	if(customScale > 0.0f) {
-		// Use custom scale factor
-		screenScale = customScale;
+		// Use custom scale factor, in points, so it matches the requested size
+		screenScale = customScale * dpiFactor;
 	} else {
 		// Automatic scaling based on window size
 		if(screenW/640. < screenH/480.)
@@ -2654,8 +2750,8 @@ int main(int argc, const char** argv)
 	screenY = (screenH-480.*screenScale)/2.;
 	screenW = (wideScreen?800:640)*screenScale;
 	screenH = 480*screenScale;
-	printf("Display mode: %s, Scale: %.2f, Resolution: %dx%d\n",
-		   wideScreen ? "Widescreen" : "Standard", screenScale, screenW, screenH);
+	printf("Display mode: %s, Scale: %.2f, Resolution: %dx%d (DPI factor %.2f)\n",
+		   wideScreen ? "Widescreen" : "Standard", screenScale, screenW, screenH, dpiFactor);
 #ifdef USE_SDL2
 	if(flags&SDL_WINDOW_FULLSCREEN || flags&SDL_WINDOW_FULLSCREEN_DESKTOP)
 #else

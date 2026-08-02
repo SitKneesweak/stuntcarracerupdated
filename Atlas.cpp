@@ -1,6 +1,11 @@
 #include "dxstdafx.h"
 #include "Atlas.h"
 
+/* ---- Tweakable (rebuild with "make MACOS=1" after changing) ---- */
+// Width of the red/yellow road side lines, in atlas texels out of the road's 400.
+// 9 is the atlas as authored; lower = thinner stripes; 0 = none.
+#define ROAD_LINE_WIDTH_TEXELS  5.0f
+
 float atlas_tx1[eLAST] = {0};
 float atlas_tx2[eLAST] = {0};
 float atlas_ty1[eLAST] = {0};
@@ -61,9 +66,18 @@ void InitAtlasCoord() {
 
     };
 
+    // The road cells in the atlas are a single horizontal strip spanning the road's
+    // width, with the coloured side lines baked into the outermost 9 texels of the
+    // 400.  Insetting the u range trims texels off those side lines, which makes the
+    // stripes narrower on screen (the middle is a flat colour, so stretching it to
+    // compensate is invisible).  9 = the atlas as authored, 0 = no side lines at all.
+    // The Amiga original plots these as single pixel lines, so lower looks truer.
+    const float roadLineInset = 9.0f - ROAD_LINE_WIDTH_TEXELS;
+
     for (int i=0; i<eLAST; i++) {
-        atlas_tx1[i] = (float)x[i] / 1024.0f;
-        atlas_tx2[i] = (float)(x[i]+w[i]) / 1024.0f;
+        float inset = (i >= eRoadYellowDark) ? roadLineInset : 0.0f;
+        atlas_tx1[i] = ((float)x[i] + inset) / 1024.0f;
+        atlas_tx2[i] = ((float)(x[i]+w[i]) - inset) / 1024.0f;
         #ifdef linux
         atlas_ty1[i] = 1.0f-(float)y[i] / 1024.0f;
         atlas_ty2[i] = 1.0f-(float)(y[i]+h[i]) / 1024.0f;

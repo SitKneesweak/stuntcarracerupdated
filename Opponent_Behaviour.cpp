@@ -17,6 +17,7 @@
 #include "Car_Behaviour.h"
 #include "Track.h"
 #include "3D_Engine.h"
+#include "Physics_FloatV2.h"
 
 /*	===== */
 /*	Debug */
@@ -278,9 +279,16 @@ static void UpdateOpponentsZSpeed( void );
 
 static void CalculateDistancesBetweenPlayers( void );
 
-static void OpponentPlayerInteraction( void );
+static void OpponentPlayerInteraction( bool applySteering = true );
+static void SteerTowardSuggested( void );
 static void MoveOpponentToOneSide( void );
 static void OpponentPushPlayer( void );
+
+// FloatV2 opponent step (OpponentStepF in PhysicsFloatV2.cs). Defined at the
+// bottom of this file, next to the legacy functions it drives.
+static void OpponentStepFloatV2( double dt );
+
+extern long fourteen_frames_elapsed;	// Car_Behaviour.cpp
 
 
 /*	======================================================================================= */
@@ -308,6 +316,8 @@ static void ResetOpponent (void)
 
 	player_close_to_opponent = FALSE;
 	opponent_behind_player = FALSE;
+
+	scr::gFloatV2OpponentNeedsSeed = true;	// re-seed the FloatV2 sub-state
 	return;
 	}
 
@@ -375,9 +385,23 @@ void OpponentBehaviour (long *x,
 	CalculatePlayersRoadPosition();
 	if (!bOpponentPaused)
 	{
-		OpponentMovement();
-		CalculateDistancesBetweenPlayers();
-		OpponentPlayerInteraction();
+		if (scr::gUseFloatV2Physics && scr::gUseFloatV2Opponent)
+		{
+			// Timestep-parameterised opponent. Called once per *player* physics
+			// step rather than once per frameGap tick, so the opponent moves as
+			// smoothly as the player does.
+			OpponentStepFloatV2(scr::gFloatV2Dt);
+		}
+		else
+		{
+			scr::gFloatV2OpponentNeedsSeed = true;
+			// Only the FloatV2 step maintains this; make sure it cannot be
+			// left latched on if the opponent path is toggled mid-race.
+			fourteen_frames_elapsed = 0;
+			OpponentMovement();
+			CalculateDistancesBetweenPlayers();
+			OpponentPlayerInteraction();
+		}
 	}
 	else
 		CalculateDistancesBetweenPlayers();
@@ -1929,8 +1953,61 @@ static long opponents_suggested_road_x_position;
 extern unsigned char sections_car_can_be_put_on[];
 
 
+/*	======================================================================================= */
+/*	Function:		SteerTowardSuggested													*/
+/*																							*/
+/*	Description:	Move opponent one step toward opponents_suggested_road_x_position.		*/
+/*					This is the tail of the Amiga's opponent.player.interaction; it is		*/
+/*					split out because OpponentStepF (PhysicsFloatV2.cs) calls it on its		*/
+/*					own so the resulting road-x change can be scaled by dtRatio.			*/
+/*	======================================================================================= */
+
+static void SteerTowardSuggested( void )
+{
+long d0;
+
+	d0 = B1bbbd;
+	if (d0 < 0) goto opi10;
+	if (d0) goto opi11;
+
+	d0 = opponents_suggested_road_x_position;
+	d0 -= opponents_road_x_position & 0xff;
+	if (!d0) return;
+	if (d0 >= 0) goto opi11;
+
+opi10:
+	if (d0 >= -16)
+		return;
+
+	d0 = -9;
+	goto opi12;
+
+opi11:
+	if (d0 < 16)
+		return;
+
+	d0 = 9;
+
+opi12:
+	d0 += opponents_road_x_position & 0xff;
+
+	if (!opp_touching_road)
+		return;
+
+	if (d0 < 0)	//temp, remove
+		MessageBox(NULL, L"Less than 0", L"Error", MB_OK);	//temp
+	if (d0 >= 225)
+		return;
+
+	if (d0 < 32)
+		return;
+
+	opponents_road_x_position = d0;
+}
+
+
 // Tested against Amiga
-static void OpponentPlayerInteraction( void )
+static void OpponentPlayerInteraction( bool applySteering )
 {
 // TO DO: Tidy up, rename variables, remove gotos
 long d0, d1, d2;
@@ -2102,45 +2179,11 @@ opic:
 	}
 
 opif:
-	d0 = B1bbbd;
-	if (d0 < 0) goto opi10;
-	if (d0) goto opi11;
+	// The steering tail is a separate function (Physics.cs:783). The FloatV2
+	// opponent step calls it itself so it can interpolate the road-x change.
+	if (applySteering)
+		SteerTowardSuggested();
 
-	d0 = opponents_suggested_road_x_position;
-	d0 -= opponents_road_x_position & 0xff;
-	if (!d0) goto opi13;
-	if (d0 >= 0) goto opi11;
-
-opi10:
-	if (d0 >= -16)
-		goto opi13;
-
-	d0 = -9;
-	goto opi12;
-
-opi11:
-	if (d0 < 16)
-		goto opi13;
-
-	d0 = 9;
-
-opi12:
-	d0 += opponents_road_x_position & 0xff;
-
-	if (!opp_touching_road)
-		goto opi13;
-
-	if (d0 < 0)	//temp, remove
-		MessageBox(NULL, L"Less than 0", L"Error", MB_OK);	//temp
-	if (d0 >= 225)
-		goto opi13;
-
-	if (d0 < 32)
-		goto opi13;
-
-	opponents_road_x_position = d0;
-
-opi13:
 	//VALUE1 = player_close_to_opponent;
 #ifdef TEST_AMIGA_OPI
 	CompareRecordedAmigaWord("x.difference", &x_difference);
@@ -2245,3 +2288,344 @@ long CalculateOpponentsDistance (void)
 
 	return(dist);
 	}
+
+
+/*	======================================================================================= */
+/*	Function:		OpponentStepFloatV2														*/
+/*																							*/
+/*	Description:	Timestep-parameterised opponent step. Direct port of					*/
+/*					OpponentStepF.Tick (PhysicsFloatV2.cs:25).								*/
+/*	======================================================================================= */
+
+// The opponent AI itself is *not* re-derived here: FloatV2 keeps the Amiga's
+// integer routines (RandomizeOpponentsSteering, Get/AdjustOpponentsEngineAcceleration,
+// UpdateOpponentsZSpeed, OpponentPlayerInteraction, CarToCarCollision) exactly as
+// they are and wraps them. Everything the AI *integrates* -- z speed, distance
+// into section, road-x position, the three wheel heights and their y speeds --
+// is held here as a double and advanced by dtRatio, while the AI functions
+// still see plain integers via Sync(). Decisions that the Amiga made once per
+// frame (steering randomisation, player interaction, car-to-car collision) stay
+// on a once-per-frame boundary tracked by _framePhase, so stepping faster makes
+// the opponent smoother rather than more reactive.
+//
+// dtRatio is dt/0.1 -- the same convention the player port uses (see BaseDt in
+// Physics_FloatV2.cpp), so at the default dt the opponent and player agree.
+
+namespace {
+
+struct OppFloatV2State
+{
+	double zSpeed;
+	double roadX;
+	double distance;
+	double act[NUM_OPP_WHEEL_POSITIONS];		// opp_actual_height
+	double ySpd[NUM_OPP_WHEEL_POSITIONS];		// opp_y_speed
+	double oldDiff[NUM_OPP_WHEEL_POSITIONS];	// opp_old_*_difference
+	double framePhase;
+	unsigned char frameFractionAccumulator;
+};
+
+OppFloatV2State gOppF = {};
+
+inline double ClampShortF( double v )
+{
+	double r = floor(v + 0.5);
+	if (r < -32768.0) r = -32768.0;
+	if (r >  32767.0) r =  32767.0;
+	return r;
+}
+
+} // namespace
+
+// PhysicsFloatV2.cs:57 -- the OpponentStepF constructor.
+static void OppFloatV2Seed( void )
+{
+	gOppF.zSpeed   = static_cast<double>(opponents_z_speed);
+	gOppF.roadX    = static_cast<double>(opponents_road_x_position & 0xff);
+	gOppF.distance = static_cast<double>(opponents_distance_into_section);
+
+	for (long i = 0; i < NUM_OPP_WHEEL_POSITIONS; i++)
+	{
+		gOppF.act[i]  = static_cast<double>(opp_actual_height[i]);
+		gOppF.ySpd[i] = static_cast<double>(opp_y_speed[i]);
+	}
+
+	gOppF.oldDiff[REAR_LEFT]  = static_cast<double>(opp_old_rear_left_difference);
+	gOppF.oldDiff[REAR_RIGHT] = static_cast<double>(opp_old_rear_right_difference);
+	gOppF.oldDiff[FRONT]      = static_cast<double>(opp_old_front_difference);
+
+	// _framePhase / _frameFractionAccumulator deliberately survive a re-seed:
+	// they track the Amiga frame clock, not car state.
+}
+
+// PhysicsFloatV2.cs:160 -- Sync(). Publishes the doubles into the integer
+// globals the legacy AI functions read and write.
+static void OppFloatV2Sync( void )
+{
+	opponents_z_speed = static_cast<long>(ClampShortF(gOppF.zSpeed));
+
+	double rx = floor(gOppF.roadX + 0.5);
+	if (rx < 0.0) rx = 0.0;
+	if (rx > 255.0) rx = 255.0;
+	opponents_road_x_position = (opponents_road_x_position & ~0xffL) | static_cast<long>(rx);
+
+	double d = floor(gOppF.distance + 0.5);
+	if (d < 0.0) d = 0.0;
+	if (d > 65535.0) d = 65535.0;
+	opponents_distance_into_section = static_cast<long>(d);
+
+	for (long i = 0; i < NUM_OPP_WHEEL_POSITIONS; i++)
+	{
+		opp_actual_height[i] = static_cast<long>(ClampShortF(gOppF.act[i]));
+		opp_y_speed[i]       = static_cast<long>(ClampShortF(gOppF.ySpd[i]));
+	}
+
+	opp_old_rear_left_difference  = static_cast<long>(ClampShortF(gOppF.oldDiff[REAR_LEFT]));
+	opp_old_rear_right_difference = static_cast<long>(ClampShortF(gOppF.oldDiff[REAR_RIGHT]));
+	opp_old_front_difference      = static_cast<long>(ClampShortF(gOppF.oldDiff[FRONT]));
+}
+
+// PhysicsFloatV2.cs:182 -- UpdateWheelHeights(). The double counterpart of
+// UpdateOpponentsActualWheelHeights() above; keep the two in step.
+static void OppFloatV2UpdateWheelHeights( double dtRatio, bool frameBoundary )
+{
+	const double height_adjust = (Track[opponents_current_piece].type & 0x80) ? 124.0 : 40.0;
+
+	double smallest  = -32768.0;
+	double forceBits = 0.0;
+
+	// Local ProcessWheel: identical to CalculateWheelDifference(), in doubles.
+	// The predictive term is per-10Hz-step, hence the / dtRatio.
+	struct ProcessWheel
+	{
+		static double Run( double roadH, double actH, double& oldDiff,
+						   double height_adjust, double dtRatio,
+						   double& smallest, double& forceBits )
+		{
+			double diff = roadH - actH;
+			if (diff > smallest) smallest = diff;
+
+			diff += height_adjust;
+			if (diff < -96.0) diff = -96.0;		// maximum amount above road
+
+			double newDiff = diff;
+			double below = newDiff + (diff - oldDiff) * (INCREASE / 256.0) / dtRatio;
+			oldDiff = newDiff;
+
+			if (below < 0.0)    below = 0.0;
+			if (below > 1023.0) below = 1023.0;
+
+			forceBits += below;
+			return below - height_adjust;
+		}
+	};
+
+	double newRL = ProcessWheel::Run(static_cast<double>(opp_rear_left_road_pos.y),
+									 gOppF.act[REAR_LEFT],  gOppF.oldDiff[REAR_LEFT],
+									 height_adjust, dtRatio, smallest, forceBits);
+	double newRR = ProcessWheel::Run(static_cast<double>(opp_rear_right_road_pos.y),
+									 gOppF.act[REAR_RIGHT], gOppF.oldDiff[REAR_RIGHT],
+									 height_adjust, dtRatio, smallest, forceBits);
+	double newF  = ProcessWheel::Run(static_cast<double>(opp_front_road_pos_y),
+									 gOppF.act[FRONT],      gOppF.oldDiff[FRONT],
+									 height_adjust, dtRatio, smallest, forceBits);
+
+	opp_touching_road = (forceBits > 0.5) ? TRUE : FALSE;
+	opp_smallest_difference = static_cast<long>(ClampShortF(smallest));
+
+	opp_new_rear_left_difference  = static_cast<long>(ClampShortF(newRL));
+	opp_new_rear_right_difference = static_cast<long>(ClampShortF(newRR));
+	opp_new_front_difference      = static_cast<long>(ClampShortF(newF));
+
+	// 6 parts this wheel, 1 part each of the other two
+	double total = newRL + newRR + newF;
+	double accRL = (total + 5.0 * newRL) / 8.0;
+	double accRR = (total + 5.0 * newRR) / 8.0;
+	double accF  = (total + 5.0 * newF)  / 8.0;
+
+	opp_y_acceleration[REAR_LEFT]  = static_cast<long>(ClampShortF(accRL));
+	opp_y_acceleration[REAR_RIGHT] = static_cast<long>(ClampShortF(accRR));
+	opp_y_acceleration[FRONT]      = static_cast<long>(ClampShortF(accF));
+
+	// Randomly make opponent do a wheelie (if they have that attribute).
+	// Once per Amiga frame only -- otherwise the chance would scale with dt.
+	if (frameBoundary && (opponent_attributes[opponentsID] & WHEELIE))
+	{
+		long i = static_cast<long>(ClampShortF(gOppF.ySpd[FRONT]))
+			   | static_cast<long>(ClampShortF(accF));
+		if ((i & 0xfffc) == 0)			// front of car isn't moving much vertically
+		{
+			if ((rand() & 0xf) == 0)
+				gOppF.ySpd[FRONT] = 160.0;
+		}
+	}
+
+	const double reduction = REDUCTION / 256.0;		// 238/256
+
+	gOppF.ySpd[REAR_LEFT]  += accRL * reduction * dtRatio;
+	gOppF.ySpd[REAR_RIGHT] += accRR * reduction * dtRatio;
+	gOppF.ySpd[FRONT]      += accF  * reduction * dtRatio;
+
+	gOppF.act[REAR_LEFT]  += gOppF.ySpd[REAR_LEFT]  * reduction / 2.0 * dtRatio;
+	gOppF.act[REAR_RIGHT] += gOppF.ySpd[REAR_RIGHT] * reduction / 2.0 * dtRatio;
+	gOppF.act[FRONT]      += gOppF.ySpd[FRONT]      * reduction / 2.0 * dtRatio;
+
+	// Limit movement of opponent's wheels (LimitOpponentWheels, in doubles)
+	double rearDiff = gOppF.act[REAR_LEFT] - gOppF.act[REAR_RIGHT];
+
+	// Rear pair, max 296 apart
+	{
+		double drop = fabs(rearDiff) - 296.0;
+		if (drop > 0.0)
+		{
+			if (rearDiff >= 0.0) gOppF.act[REAR_LEFT]  -= drop;
+			else                 gOppF.act[REAR_RIGHT] -= drop;
+
+			double avg = (gOppF.ySpd[REAR_LEFT] + gOppF.ySpd[REAR_RIGHT]) / 2.0;
+			gOppF.ySpd[REAR_LEFT] = gOppF.ySpd[REAR_RIGHT] = avg;
+		}
+	}
+
+	// Higher rear wheel against the front wheel, max 368 apart
+	{
+		long rear = (rearDiff < 0.0) ? REAR_RIGHT : REAR_LEFT;
+		double diff = gOppF.act[rear] - gOppF.act[FRONT];
+		double drop = fabs(diff) - 368.0;
+		if (drop > 0.0)
+		{
+			if (diff >= 0.0) gOppF.act[rear]  -= drop;
+			else             gOppF.act[FRONT] -= drop;
+
+			double avg = (gOppF.ySpd[REAR_LEFT] + gOppF.ySpd[REAR_RIGHT]) / 2.0;
+			gOppF.ySpd[REAR_LEFT] = gOppF.ySpd[REAR_RIGHT] = avg;
+			gOppF.ySpd[FRONT] = (gOppF.ySpd[FRONT] + avg) / 2.0;
+			gOppF.ySpd[REAR_LEFT] = gOppF.ySpd[REAR_RIGHT] = (avg + gOppF.ySpd[FRONT]) / 2.0;
+		}
+	}
+
+	// Adjust wheel y speeds when opponent is in the air, to pitch the car forwards
+	if (!opp_touching_road)
+	{
+		double rearSpd = (rearDiff < 0.0) ? gOppF.ySpd[REAR_RIGHT] : gOppF.ySpd[REAR_LEFT];
+		if ((rearSpd - gOppF.ySpd[FRONT]) < 16.0)
+		{
+			gOppF.ySpd[FRONT]      -= 4.0 * dtRatio;
+			gOppF.ySpd[REAR_LEFT]  += 4.0 * dtRatio;
+			gOppF.ySpd[REAR_RIGHT] += 4.0 * dtRatio;
+		}
+	}
+}
+
+// PhysicsFloatV2.cs:73 -- OpponentStepF.Tick()
+static void OpponentStepFloatV2( double dt )
+{
+	if (!drop_start_done)
+		return;
+
+	if (scr::gFloatV2OpponentNeedsSeed)
+	{
+		OppFloatV2Seed();
+		scr::gFloatV2OpponentNeedsSeed = false;
+	}
+
+	const double dtRatio = dt / 0.1;		// BaseDt, as in Physics_FloatV2.cpp
+
+	// One Amiga frame's worth of decisions per 1/10s of simulated time.
+	bool frameBoundary = false;
+	gOppF.framePhase += dtRatio;
+	if (gOppF.framePhase >= 0.999999999)
+	{
+		gOppF.framePhase -= 1.0;
+		frameBoundary = true;
+	}
+
+	OppFloatV2UpdateWheelHeights(dtRatio, frameBoundary);
+
+	if (frameBoundary)
+	{
+		// The 14-frame clock the Amiga used to hold off boost drain and damage
+		// for one frame in fourteen. It lives on the opponent's frame boundary
+		// in FloatV2 (PhysicsFloatV2.cs:87) and the player reads it.
+		int acc = gOppF.frameFractionAccumulator + 238;
+		gOppF.frameFractionAccumulator = static_cast<unsigned char>(acc);
+		fourteen_frames_elapsed = (acc <= 255) ? -1 : 0;
+
+		RandomizeOpponentsSteering();
+	}
+
+	OppFloatV2Sync();
+
+	GetOpponentsEngineAcceleration();
+	AdjustOpponentsEngineAcceleration();
+
+	long prevZSpeed = opponents_z_speed;
+	UpdateOpponentsZSpeed();
+	gOppF.zSpeed += static_cast<double>(opponents_z_speed - prevZSpeed) * dtRatio;
+	if (gOppF.zSpeed < 0.0) gOppF.zSpeed = 0.0;
+
+	// Advance along the section. Same chain as OpponentMovement(), but the
+	// low byte that OpponentMovement carries in byte_count is simply the
+	// fractional part of the double here.
+	{
+		long lengthReduction = (static_cast<long>(Track[opponents_current_piece].lengthReduction) << 7) & 0x7fff;
+		short zs = static_cast<short>(ClampShortF(gOppF.zSpeed));
+		short v1 = static_cast<short>((static_cast<long>(zs) * lengthReduction * 2) >> 16);
+		short v2 = static_cast<short>((static_cast<long>(v1) * REDUCTION) >> 8);
+		double advance = static_cast<double>(static_cast<long>(v2) << 3) / 256.0;
+
+		gOppF.distance += advance * dtRatio;
+
+		double sectionLength = static_cast<double>(Track[opponents_current_piece].numSegments * 256);
+		if (gOppF.distance >= sectionLength)
+		{
+			gOppF.distance -= sectionLength;
+
+			// go to next piece
+			opponents_current_piece++;
+			if (opponents_current_piece > (NumTrackPieces - 1)) opponents_current_piece = 0;
+		}
+	}
+
+	OppFloatV2Sync();
+
+	if (frameBoundary)
+	{
+		CalculateDistancesBetweenPlayers();
+		OpponentPlayerInteraction(false);	// steering applied separately, below
+
+		// Car-to-car collision is an impulse: it is applied once per frame and
+		// its effect on the opponent is taken whole, not scaled by dtRatio.
+		long prevZ  = opponents_z_speed;
+		long prevRL = opp_y_speed[REAR_LEFT];
+		long prevRR = opp_y_speed[REAR_RIGHT];
+		long prevF  = opp_y_speed[FRONT];
+
+		CarToCarCollision();
+
+		gOppF.zSpeed += static_cast<double>(opponents_z_speed - prevZ);
+		if (gOppF.zSpeed < 0.0) gOppF.zSpeed = 0.0;
+		gOppF.ySpd[REAR_LEFT]  += static_cast<double>(opp_y_speed[REAR_LEFT]  - prevRL);
+		gOppF.ySpd[REAR_RIGHT] += static_cast<double>(opp_y_speed[REAR_RIGHT] - prevRR);
+		gOppF.ySpd[FRONT]      += static_cast<double>(opp_y_speed[FRONT]      - prevF);
+	}
+	else
+	{
+		// Distances are needed every step (the HUD and the player's own
+		// collision test read them), the decisions are not.
+		CalculateDistancesBetweenPlayers();
+	}
+
+	OppFloatV2Sync();
+
+	// Steering: take the integer step the AI would have made and spread it
+	// across the timestep.
+	{
+		long before = opponents_road_x_position & 0xff;
+		SteerTowardSuggested();
+		long after = opponents_road_x_position & 0xff;
+		signed char delta = static_cast<signed char>(after - before);
+		gOppF.roadX += static_cast<double>(delta) * dtRatio;
+	}
+
+	OppFloatV2Sync();
+}

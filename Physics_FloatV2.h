@@ -54,6 +54,14 @@ struct PhysicsStateF
     double  FrontLeftRoadHeight,  FrontRightRoadHeight,  RearRoadHeight;
     double  FrontLeftAmountBelowRoad, FrontRightAmountBelowRoad, RearAmountBelowRoad;
 
+    // Per-wheel "currently in contact" latch. The Amiga tests the previous
+    // step's penetration (>= 0x400 now, < 0x200 then), which only fires if the
+    // wheel crosses the whole band in a single step - true at its 10Hz rate,
+    // false at 60Hz where the wheel eases through the band and no step sees
+    // both conditions. The latch is the same edge detector expressed in a
+    // rate-independent way. See ProcessWheel.
+    bool    FrontLeftGrounded, FrontRightGrounded, RearGrounded;
+
     uint8_t DamagedCount, DamagedLimit, Damaged;
     int16_t DamageValue;
     uint8_t GroundedCount, FourteenFramesElapsed, CarOnChainsCountdown;
@@ -87,6 +95,16 @@ extern bool gUseFloatV2Physics;
 // against the legacy path. The whole point of FloatV2 is that lowering this
 // changes smoothness without changing how the car behaves.
 extern double gFloatV2Dt;
+
+// Feature toggle for the opponent (OpponentStepF in PhysicsFloatV2.cs). Only
+// has any effect while gUseFloatV2Physics is on, because it steps the opponent
+// on the player's clock. When false the opponent keeps running once per
+// frameGap tick (~8.3Hz) exactly as the Amiga did. Press O to toggle.
+extern bool gUseFloatV2Opponent;
+
+// Set while the legacy opponent path has run, so the next FloatV2 opponent step
+// re-seeds its doubles from the legacy opponent globals.
+extern bool gFloatV2OpponentNeedsSeed;
 
 // Set while the legacy path is driving, so the next FloatV2 step re-seeds from
 // the legacy globals instead of continuing from stale state.
