@@ -988,8 +988,8 @@ double gDbgXAngle = 0, gDbgZAngle = 0, gDbgXRotSpeed = 0, gDbgZRotSpeed = 0;
 double gDbgRawRoadFL = 0, gDbgPosZSpeed = 0, gDbgSurfZ = 0;
 int    gDbgBlendUsed = 0;
 
-bool   gUseFloatV2Physics = false;   // V toggles at runtime
-double gFloatV2Dt         = 0.1;     // 10Hz to start; see header
+bool   gUseFloatV2Physics = true;        // now the default path; V toggles back to legacy
+double gFloatV2Dt         = 1.0 / 60.0;  // 60Hz; B cycles 10 -> 25 -> 60
 bool   gFloatV2NeedsSeed  = true;    // set whenever the legacy path has run
 bool   gFloatV2UnreverseCurveDist = true;    // ON by default; J toggles. See header.
 bool   gFloatV2DumpOnCurves       = false;   // K toggles; see header

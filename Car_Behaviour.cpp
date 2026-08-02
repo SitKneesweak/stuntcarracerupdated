@@ -498,6 +498,7 @@ extern long Track_Map[NUM_TRACK_CUBES][NUM_TRACK_CUBES];	// [x][z]
 extern long NumTrackPieces;
 extern long PlayersStartPiece;
 extern long StartLinePiece;
+extern long StandardBoost, SuperBoost;	// league boost maxima, from the track data
 extern long HalfALapPiece;
 
 
@@ -640,6 +641,13 @@ void CarBehaviour (DWORD input,
 /*					(i.e. prevent road 'tearing')											*/
 /*	======================================================================================= */
 
+// NOTE (2026-08-02): this whole function is a PC-port invention, not an Amiga
+// mechanism, and it is no longer called — see CalcGameViewpoint() in
+// StuntCarRacer.cpp, which now implements the Amiga's own `y.pers.shift` rule
+// from set.road.position.values ("Reference only/StuntCarRacer.s":13396).
+// Kept intact, and restored to its original form, in case it is ever wanted as
+// a backstop. Note it adjusts player1_y itself, which also moves the drawn car,
+// not just the camera — one reason to prefer the Amiga rule.
 #define Y_ADJUSTMENT_THRESHOLD 0x480
 
 void LimitViewpointY (long *y)
@@ -2681,6 +2689,23 @@ static long FV2_PlayersRoadXPosition (long roadX)
 	return ROAD_WIDTH - roadX;
 	}
 
+// Boost reserve: legacy keeps a plain count, FloatV2 keeps the Amiga's packed
+// BCD (it decrements with BcdSubtract1). Track data supplies the league maxima.
+// StandardBoost / SuperBoost are declared at file scope above (Track.cpp defines
+// them outside namespace scr, so they cannot be declared extern from in here).
+
+static uint8_t FV2_ToBcd (long value)
+	{
+	if (value < 0)  value = 0;
+	if (value > 99) value = 99;
+	return static_cast<uint8_t>(((value / 10) << 4) | (value % 10));
+	}
+
+static long FV2_FromBcd (uint8_t bcd)
+	{
+	return static_cast<long>(((bcd >> 4) & 0xF) * 10 + (bcd & 0xF));
+	}
+
 // Per-step: only the values the legacy code still owns. Everything else is
 // FloatV2's own state and must NOT be round-tripped through the legacy longs
 // each step — the fractional parts (BoostUnit, damage remainders, sub-unit
@@ -2752,8 +2777,18 @@ void CopyLegacyToFloatV2 (PhysicsStateF& s)
 	// --- Car / league state -------------------------------------------------
 	s.EnginePower     = FV2_SwapEnginePower(engine_power);
 	s.BoostUnitValue  = static_cast<uint8_t>(boost_unit_value);
-	s.BoostReserve    = static_cast<uint8_t>(boostReserve);
+	// Boost reserve is another Amiga representation the C# preserves: FloatV2
+	// decrements it with BcdSubtract1, so it is packed BCD, while our legacy
+	// global is a plain count (--boostReserve, and the HUD prints it %02d).
+	s.BoostReserve    = FV2_ToBcd(boostReserve);
 	s.BoostUnit       = static_cast<double>(boostUnit);
+	// BoostMaxUnits is the post-decrement clamp. Leaving it 0 (the value a
+	// zero-initialised PhysicsStateF has) makes `if (next >= max) next = max`
+	// fire on the very first decrement and zero the reserve -- boost dies about
+	// a second after the lights. It must be the league maximum, not the reserve
+	// at seed time: seeding it from the current reserve would clamp the count
+	// permanently at whatever it happened to be when the toggle flipped.
+	s.BoostMaxUnits   = FV2_ToBcd(bSuperLeague ? SuperBoost : StandardBoost);
 	s.BoostActivated  = static_cast<uint8_t>(boost_activated);
 	s.Accelerating    = static_cast<uint8_t>(accelerating ? 128 : 0);
 	s.WreckWheelHeightReduction = static_cast<int32_t>(wreck_wheel_height_reduction);
@@ -2830,7 +2865,7 @@ void CopyFloatV2ToLegacy (const PhysicsStateF& s)
 	damage_value       = static_cast<long>(s.DamageValue);
 	grounded_count     = static_cast<long>(s.GroundedCount);
 
-	boostReserve    = static_cast<long>(s.BoostReserve);
+	boostReserve    = FV2_FromBcd(s.BoostReserve);	// BCD -> plain count for the HUD
 	boostUnit       = static_cast<long>(s.BoostUnit);
 	boost_activated = static_cast<long>(s.BoostActivated);
 	accelerating    = (static_cast<int8_t>(s.Accelerating) < 0) ? TRUE : FALSE;

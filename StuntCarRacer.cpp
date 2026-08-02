@@ -93,6 +93,9 @@ long VALUE1 = 1, VALUE2 = 2, VALUE3 = 3;
 
 extern long TrackID;
 extern long boostReserve, boostUnit, StandardBoost, SuperBoost;
+// Per-wheel road penetration, for the Amiga y.pers.shift camera rule.
+extern long front_left_amount_below_road, front_right_amount_below_road,
+			rear_amount_below_road;
 extern long INITIALISE_PLAYER;
 extern bool raceFinished, raceWon;
 extern long lapNumber[];
@@ -869,6 +872,99 @@ static void CalcTrackPreviewViewpoint( void )
 /*	Description:	*/
 /*	======================================================================================= */
 
+/*	======================================================================================= */
+/*	Function:		CalcAmigaYPerspectiveShift												*/
+/*																							*/
+/*	Description:	Height of the in-car camera above the car body, the way the Amiga		*/
+/*					original did it (`y.pers.shift`, set.road.position.values in			*/
+/*					"Reference only/StuntCarRacer.s":13396).								*/
+/*																							*/
+/*					The Amiga never clamped the camera against the road. Instead it			*/
+/*					RAISES the eye point in proportion to how far the wheels are below		*/
+/*					the road surface, so the view climbs out of the road exactly as the		*/
+/*					suspension compresses. Above a compression of $500 the slope doubles	*/
+/*					(hard landings and corner loading lift the camera fast). Nose-down		*/
+/*					pitch adds a further half-angle of lift.								*/
+/*																							*/
+/*					The 68k source, verbatim:												*/
+/*						move.w	#$780,d3												*/
+/*						move.w	average.amount.below.road,d0							*/
+/*						cmpi.w	#$500,d0												*/
+/*						bcs	srpv1														*/
+/*						asl.w	#1,d0													*/
+/*						move.w	#$280,d3												*/
+/*					srpv1	add.w	d3,d0												*/
+/*						move.w	players.x.angle,d3											*/
+/*						bpl	srpv2														*/
+/*						asr.w	#1,d3													*/
+/*						sub.w	d3,d0													*/
+/*					srpv2	asr.w	#4,d0												*/
+/*						add.w	players.smaller.y,d0										*/
+/*						move.w	d0,y.pers.shift											*/
+/*																							*/
+/*					players.smaller.y is the car's own Y (players.world.y >> 11), which		*/
+/*					here is player1_y, so we return only the offset term.					*/
+/*																							*/
+/*					Units: the Amiga shift counts 2^11 of players.world.y; player1_y is		*/
+/*					player_y * LOCAL_Y_FACTOR, so one Amiga unit is 2^13 here. Sanity		*/
+/*					check: with no compression and level pitch the offset is				*/
+/*					($780 >> 4) = 120 units = 120 << 13 = 60 << LOG_PRECISION -- exactly		*/
+/*					the HEIGHT_ABOVE_ROAD 60 this replaces. The old fixed 100 was a			*/
+/*					port-era fudge standing in for the missing dynamic term.				*/
+/*	======================================================================================= */
+
+#define AMIGA_Y_SHIFT_LOG	13		// see units note above
+
+static long CalcAmigaYPerspectiveShift( void )
+{
+	// average.amount.below.road, as CarCollisionDetection computes it. Taken from
+	// the per-wheel globals so this works under both the legacy and FloatV2 paths
+	// (CopyFloatV2ToLegacy writes them).
+	long average_front = (front_left_amount_below_road + front_right_amount_below_road) >> 1;
+	long below         = (average_front + rear_amount_below_road) >> 1;
+
+	// ---- Not Amiga; needed because we no longer tick at the Amiga's rate -----
+	// amount.below.road is set to 0 the instant a wheel leaves the road. That is
+	// faithful -- the Amiga (front.left.above.road, StuntCarRacer.s:15987), the
+	// FloatV2 C# and our port all do it. But FloatV2's contact test carries a
+	// predictive term, (d - oldDiff) * 1.078125/dtRatio, whose divisor makes it
+	// 6.47x the per-step delta at 60Hz. A wheel barely unloading for a single
+	// step is then enough to drive the test negative, zero the average, and drop
+	// the camera by the whole compression lift for exactly one frame -- the
+	// one-frame flash through the road. The Amiga never saw this because its
+	// camera sampled a ~10Hz value where one step spanned a whole 1/10s.
+	//
+	// So smooth only the camera's copy, asymmetrically: rise instantly, so
+	// impacts still lift the view with no lag and the original feel is kept, but
+	// fall gradually, over roughly one Amiga frame. Physics is untouched.
+	static double heldBelow = 0.0;
+	if (static_cast<double>(below) >= heldBelow)
+		heldBelow = static_cast<double>(below);
+	else
+		heldBelow += (static_cast<double>(below) - heldBelow) * 0.25;	// ~1/10s at 60Hz
+	below = static_cast<long>(heldBelow);
+	// -------------------------------------------------------------------------
+
+	long base = 0x780;
+	if (below >= 0x500)
+	{
+		below <<= 1;		// slope doubles once the suspension is well compressed
+		base = 0x280;
+	}
+	long shift = below + base;
+
+	// Nose-down pitch lifts the eye further. The Amiga tests the sign of the
+	// 16-bit angle, so convert our unsigned 0..65535 global to signed first
+	// (the same trap as the FloatV2 angle boundary).
+	short x_angle = static_cast<short>(player1_x_angle & (MAX_ANGLE - 1));
+	if (x_angle < 0)
+		shift -= (x_angle >> 1);	// subtracting a negative: adds |angle| / 2
+
+	shift >>= 4;
+
+	return (shift << AMIGA_Y_SHIFT_LOG);
+}
+
 static void CalcGameViewpoint( void )
 {
 long x_offset, y_offset, z_offset;
@@ -904,8 +1000,8 @@ long x_offset, y_offset, z_offset;
 	else
 	{
 		viewpoint1_x = player1_x;
-		viewpoint1_y = player1_y - (HEIGHT_ABOVE_ROAD << LOG_PRECISION);
-//		viewpoint1_y = player1_y - (90 << LOG_PRECISION);
+		viewpoint1_y = player1_y - CalcAmigaYPerspectiveShift();
+//		viewpoint1_y = player1_y - (HEIGHT_ABOVE_ROAD << LOG_PRECISION);	// old fixed height
 		viewpoint1_z = player1_z;
 
 		viewpoint1_x_angle = player1_x_angle;
@@ -1152,7 +1248,13 @@ static float lastFrame = 0.0f;
 							  bOpponentPaused);
 		}
 
-		LimitViewpointY(&player1_y);
+		// LimitViewpointY(&player1_y);
+		// Disabled 2026-08-02. This was a PC-port invention: it clamped the car
+		// against the road to stop the camera tearing through it. The Amiga did
+		// no such clamp -- it raised the eye point with suspension compression
+		// instead, which CalcAmigaYPerspectiveShift() now implements. Leaving
+		// both active would double-correct, and this one also displaces the
+		// drawn car (it edits player1_y, which SetCarWorldTransform reads).
 	}
 
 	if ((GameMode == TRACK_MENU) || (GameMode == TRACK_PREVIEW))

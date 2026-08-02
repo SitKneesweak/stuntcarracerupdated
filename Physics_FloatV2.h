@@ -82,10 +82,10 @@ void PhysicsStepF_Tick(PhysicsStateF& state, const PhysicsInput& input, double d
 // Feature toggle. When false, the legacy CarBehaviour() runs unchanged.
 extern bool gUseFloatV2Physics;
 
-// Timestep handed to Tick. Starts at 0.1 (10Hz, the Amiga rate) so the port
-// can be A/B'd against the legacy path at matching behaviour before the rate
-// is raised. The whole point of FloatV2 is that lowering this changes
-// smoothness without changing how the car behaves.
+// Timestep handed to Tick. Defaults to 1/60. Press B to cycle 10 -> 25 -> 60Hz;
+// 0.1 (10Hz) is the original Amiga rate and the reference for A/B'ing the port
+// against the legacy path. The whole point of FloatV2 is that lowering this
+// changes smoothness without changing how the car behaves.
 extern double gFloatV2Dt;
 
 // Set while the legacy path is driving, so the next FloatV2 step re-seeds from
