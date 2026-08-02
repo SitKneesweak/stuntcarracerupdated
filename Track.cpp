@@ -13,6 +13,7 @@
 #include "dxstdafx.h"
 
 #include "Track.h"
+#include "Track_FloatV2.h"
 #include "StuntCarRacer.h"
 #include "3D_Engine.h"
 #include "Atlas.h"
@@ -1558,8 +1559,35 @@ long ConvertAmigaTrack( long track )
 			}
 		}
 
+	// build the C#-shaped view of this track for the FloatV2 physics port
+	scr::FV2_BuildTrackView(NumTrackPieces,
+							Piece_Angle_And_Template,
+							Left_Y_Coordinate_ID,
+							Right_Y_Coordinate_ID,
+							Left_Overall_Y_Shift,
+							Right_Overall_Y_Shift);
+
 	return(TRUE);
 	}
+
+/*	======================================================================================= */
+/*	Function:		FV2_GetRawYCoord														*/
+/*																							*/
+/*	Description:	Decoded (pre-shift) Amiga Y coordinate, for Track_FloatV2.cpp			*/
+/*	======================================================================================= */
+
+namespace scr {
+
+long FV2_GetRawYCoord( int yCoordId, int coordIndex )
+	{
+	if ((yCoordId < 0) || (yCoordId >= NUM_AMIGA_PIECE_Y) ||
+		(coordIndex < 0) || (coordIndex >= MAX_Y_COORDS_PER_PIECE))
+		return(0);
+
+	return(Piece_Y[yCoordId][coordIndex].y);
+	}
+
+} // namespace scr
 
 /*	======================================================================================= */
 /*	Function:		GetRotatedPieceXZ														*/

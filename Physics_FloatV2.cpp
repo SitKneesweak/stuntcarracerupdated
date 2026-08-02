@@ -5,6 +5,7 @@
 // comments in place while porting so cross-referencing stays cheap.
 
 #include "Physics_FloatV2.h"
+#include "Track_FloatV2.h"
 
 #include <algorithm>
 #include <array>
@@ -196,6 +197,180 @@ WheelXZ CalculateWheelXZOffsets(const ScArray& sc) {
     };
 }
 
+// --- Sub-step 4: road heights under each wheel ----------------------------
+// PhysicsFloatV2.cs:955-1157, with the track data reached through the
+// C#-shaped view in Track_FloatV2.h. Everything here is Amiga integer maths
+// (8.8 fixed point along the section, 0..255 across it) even though the
+// wheel offsets arriving from sub-step 3 are doubles.
+
+// SignalOffRoad — PhysicsFloatV2.cs:1153
+// Shifts a 1 into the top of AtSideByte (a 3-frame history the collision code
+// reads) and reports the minimum "ground" height.
+int SignalOffRoad(PhysicsStateF& s) {
+    s.AtSideByte = static_cast<uint8_t>((s.AtSideByte >> 1) | 0x80);
+    return 4096;
+}
+
+// HandleOffRoad — PhysicsFloatV2.cs:1122
+// Just past either road edge there is a narrow (48 unit) sloped verge the car
+// can ride on; beyond that, or if the verge has fallen too far below the road,
+// the wheel is off the track entirely.
+int HandleOffRoad(PhysicsStateF& s, int16_t wheelRoadXPos, int roadHeight, uint8_t plus180) {
+    int distPastEdge;
+    if (wheelRoadXPos < 0) {
+        distPastEdge = -wheelRoadXPos;
+    } else {
+        distPastEdge = wheelRoadXPos - 384;
+        if (distPastEdge < 0) distPastEdge = -distPastEdge;
+    }
+    if (distPastEdge > 48) return SignalOffRoad(s);
+
+    distPastEdge = (distPastEdge & 0xFF) << 4;
+    int height = roadHeight - distPastEdge - 256;
+    if (height < 4096) return SignalOffRoad(s);
+
+    uint8_t side = static_cast<uint8_t>(static_cast<uint8_t>(wheelRoadXPos) ^ plus180);
+    s.WhichSideByte = static_cast<uint8_t>((side & 0x80) ? 128 : 64);
+    return height;
+}
+
+// HandleSectionCrossing — PhysicsFloatV2.cs:1059
+// A wheel can sit in the section ahead of or behind the car's own. Step to
+// that section and re-express the along/across position in its coordinate
+// frame — which may need mirroring if the two sections run opposite ways.
+void HandleSectionCrossing(const FV2Track& t, int& currentSection, uint8_t plus180,
+                           int16_t surfaceZ, int& surfaceX, int16_t& newSurfaceZ) {
+    uint8_t zHi = static_cast<uint8_t>(surfaceZ >> 8);
+    bool forwards = static_cast<int8_t>(static_cast<uint8_t>(zHi ^ plus180)) >= 0;
+
+    if (forwards) {
+        if (++currentSection >= t.SectionCount) currentSection = 0;
+    } else {
+        if (--currentSection < 0) currentSection = t.SectionCount - 1;
+    }
+
+    const FV2RoadSection& sec   = t.Sections[currentSection];
+    const FV2RoadPiece&   piece = FV2_GetPiece(sec.PieceIndex);
+    uint8_t newPlus180 = static_cast<uint8_t>((sec.Angle & 0x10) << 3);
+
+    bool atFarEnd = forwards ? ((newPlus180 & 0x80) != 0) : ((newPlus180 & 0x80) == 0);
+
+    int z = surfaceZ & 0xFF;
+    int x = surfaceX & 0xFF;
+
+    int coordIdx;
+    bool mirror;
+    if (atFarEnd) {
+        coordIdx = piece.CoordCount - 2;
+        mirror   = static_cast<int8_t>(zHi) >= 0;
+    } else {
+        coordIdx = 0;
+        mirror   = static_cast<int8_t>(zHi) < 0;
+    }
+
+    if (mirror) {
+        z = -z & 0xFF; if (z == 0) z = 255;
+        x = -x & 0xFF; if (x == 0) x = 255;
+    }
+
+    newSurfaceZ = static_cast<int16_t>((coordIdx << 8) | z);
+    surfaceX    = x;
+}
+
+// ProcessOneWheel — PhysicsFloatV2.cs:965
+// Converts one wheel's XZ offset into a road height, following the wheel into
+// a neighbouring section if it has crossed out of the car's own.
+double ProcessOneWheel(PhysicsStateF& s, const FV2Track& t, int& currentSection,
+                       double wheelXOff, double wheelZOff, double& storedHeight,
+                       double dtRatio, bool isRearWheel = false) {
+    currentSection = s.RoadSection;
+
+    const FV2RoadSection* sec   = &t.Sections[currentSection];
+    const FV2RoadPiece*   piece = &FV2_GetPiece(sec->PieceIndex);
+    uint8_t plus180 = static_cast<uint8_t>((sec->Angle & 0x10) << 3);
+
+    // Across the road: wheel offset (in 1/16ths) plus the car's own position.
+    int16_t roadX = static_cast<int16_t>(
+        static_cast<int>(std::floor(wheelXOff / 16.0) + s.PlayersRoadXPosition));
+
+    bool     offRoad = false;
+    int16_t  wheelRoadXPos = 0;
+    int      surfaceX;
+    if (static_cast<uint16_t>(roadX) >= 384) {
+        // Unsigned compare: catches both edges at once (negative wraps high).
+        offRoad = true;
+        wheelRoadXPos = roadX;
+        surfaceX = (roadX >= 0) ? 255 : 0;
+    } else {
+        int16_t absX = (roadX < 0) ? static_cast<int16_t>(-roadX) : roadX;
+        int width = (piece->WidthReduction << 7) & 0x7FFF;
+        surfaceX = static_cast<int>((static_cast<uint32_t>(absX * width) << 1) >> 16);
+        if (surfaceX >= 256) surfaceX = 255;
+    }
+
+    if (isRearWheel) {
+        uint8_t rearX = static_cast<uint8_t>(surfaceX);
+        if (static_cast<int8_t>(plus180) < 0) rearX ^= 0xFF;
+        s.RearWheelSurfaceXPosition = rearX;
+    }
+
+    // Along the road: 8.8 fixed point, high byte selecting the segment.
+    int16_t zOff = static_cast<int16_t>(static_cast<int>(std::floor(wheelZOff / 8.0)));
+    int length = (piece->LengthReduction << 7) & 0x7FFF;
+    int16_t surfaceZ = static_cast<int16_t>(
+        static_cast<int16_t>((static_cast<uint32_t>(zOff * length) << 1) >> 16) +
+        static_cast<int16_t>(static_cast<int>(s.NormalDistanceIntoSection)));
+
+    uint8_t segIdx = static_cast<uint8_t>(static_cast<uint8_t>(surfaceZ >> 8) << 1);
+    uint8_t lastSeg = static_cast<uint8_t>(piece->CoordCount * 2 - 2);
+    if (static_cast<int8_t>(segIdx) < 0 || segIdx >= lastSeg) {
+        HandleSectionCrossing(t, currentSection, plus180, surfaceZ, surfaceX, surfaceZ);
+        sec     = &t.Sections[currentSection];
+        piece   = &FV2_GetPiece(sec->PieceIndex);
+        plus180 = static_cast<uint8_t>((sec->Angle & 0x10) << 3);
+    }
+
+    int height = FV2_GetRoadHeight(t, currentSection,
+                                   static_cast<uint16_t>(surfaceZ), surfaceX & 0xFF);
+    if (offRoad) height = HandleOffRoad(s, wheelRoadXPos, height, plus180);
+
+    // Above a certain speed, or at a steep pitch, take the new height as-is.
+    // Otherwise ease towards it — this is the road "cushion" that stops the
+    // car chattering over segment boundaries at low speed.
+    double previous = storedHeight;
+    if (s.PosPlayersZSpeed >= 2560.0) {
+        storedHeight = height;
+        return height;
+    }
+
+    int pitch = static_cast<uint8_t>(static_cast<int16_t>(static_cast<int>(s.XAngle)) >> 8);
+    if (static_cast<int8_t>(pitch) < 0) pitch = static_cast<uint8_t>(-static_cast<int8_t>(pitch));
+    if (pitch > 5) {
+        storedHeight = height;
+        return height;
+    }
+
+    double blend = 1.0 - std::pow(0.5, dtRatio);   // half-way per 10Hz step
+    storedHeight = std::round(previous + blend * (static_cast<double>(height) - previous));
+    return storedHeight;
+}
+
+// CalculateRoadWheelHeights — PhysicsFloatV2.cs:955
+struct WheelRoadH { double fl, fr, r; };
+WheelRoadH CalculateRoadWheelHeights(PhysicsStateF& s, const FV2Track& t,
+                                     const WheelXZ& w, double dtRatio) {
+    int currentSection = s.RoadSection;
+    s.AtSideByte = 0;
+    s.WhichSideByte = 0;
+    // Rear first — it is the wheel that sets RearWheelSurfaceXPosition, and
+    // the AtSideByte history is shifted in wheel order.
+    WheelRoadH h{};
+    h.r  = ProcessOneWheel(s, t, currentSection, w.rX,  w.rZ,  s.RearRoadHeight,       dtRatio, true);
+    h.fr = ProcessOneWheel(s, t, currentSection, w.frX, w.frZ, s.FrontRightRoadHeight, dtRatio);
+    h.fl = ProcessOneWheel(s, t, currentSection, w.flX, w.flZ, s.FrontLeftRoadHeight,  dtRatio);
+    return h;
+}
+
 // CalculateActualWheelHeights — PhysicsFloatV2.cs:1159
 // Actual (car-body) wheel heights from the car centre. Rear wheel sits
 // along the car's forward axis (sc[4]=sinX); front pair are offset laterally
@@ -316,7 +491,7 @@ namespace {
 //   1. ComputeEngineAcceleration
 //   2. MakeRotationMatrix
 //   3. CalculateWheelXZOffsets
-//   4. CalculateRoadWheelHeights   <-- depends on Track adapter
+//   4. CalculateRoadWheelHeights   (via the Track_FloatV2 adapter)
 //   5. CalculateActualWheelHeights
 //   6. CalculateXZSpeeds
 //   7. SetWheelRotationSpeed
@@ -338,14 +513,16 @@ void PhysicsStepF_Tick(PhysicsStateF& state, const PhysicsInput& input, double d
     ScArray sc{};
     MakeRotationMatrix(state, sc);
     WheelXZ wheels = CalculateWheelXZOffsets(sc);
-    (void)wheels;   // will feed CalculateRoadWheelHeights (sub-step 4)
+    WheelRoadH roadH{};
+    if (const FV2Track* track = FV2_GetTrack())
+        roadH = CalculateRoadWheelHeights(state, *track, wheels, dtRatio);
     WheelActualH actualH = CalculateActualWheelHeights(state, sc);
     LocalSpeed   local   = CalculateXZSpeeds(state, sc);
     state.PlayersZSpeed  = local.z;
     SetWheelRotationSpeed(state, local.z, dtRatio);
     GravityXYZ grav = CalculateGravityAcceleration(sc);
-    (void)actualH; (void)grav;   // consumers land with sub-steps 9-11
-    // TODO: port remaining sub-steps 4, 9-17 (see plan above). Until then,
+    (void)actualH; (void)grav; (void)roadH;   // consumers land with sub-steps 9-11
+    // TODO: port remaining sub-steps 9-17 (see plan above). Until then,
     // callers should keep gUseFloatV2Physics == false so the legacy
     // CarBehaviour() path stays authoritative.
 }
