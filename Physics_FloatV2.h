@@ -92,6 +92,50 @@ extern double gFloatV2Dt;
 // the legacy globals instead of continuing from stale state.
 extern bool gFloatV2NeedsSeed;
 
+// EXPERIMENT (J key) — recover NormalDistanceIntoSection from the legacy
+// players_distance_into_section. Physics.cs:3672 keeps two distinct values:
+// NormalDistanceIntoSection (raw, the piece's own order) and
+// DistanceIntoSection = DetailNearRoad(Normal, numSegments, plus180), which is
+// the plus180 mirror (Physics.cs:4055). The road-height lookup uses the Normal
+// one and applies plus180 itself. But Track.cpp:1422 already builds
+// Track[].coords in travel order for plus180 sections, so the legacy value we
+// receive is the mirrored form. This un-mirrors it. See the fuller note on
+// FV2_NormalDistanceIntoSection in Car_Behaviour.cpp.
+extern bool gFloatV2UnreverseCurveDist;
+
+// Dump every step spent on a curved piece (K key). Saves having to time the
+// N key against a corner.
+extern bool gFloatV2DumpOnCurves;
+
+// --- Diagnostics -----------------------------------------------------------
+// Counts down while non-zero; each FloatV2 step dumps its intermediate values
+// to stdout and decrements it. Set by the 'N' key so a burst can be captured
+// mid-drive without flooding the terminal. Tick fills the gDbg* values in;
+// the hook in Car_Behaviour.cpp prints them next to the legacy equivalents,
+// which is the only place both sets of units are visible at once.
+extern int    gFloatV2DebugSteps;
+extern double gDbgRoadFL, gDbgRoadFR, gDbgRoadR;
+extern double gDbgActFL,  gDbgActFR,  gDbgActR;
+extern double gDbgBelowFL, gDbgBelowFR, gDbgBelowR;
+// The forward-force chain, in the order Tick builds it. A car that drives
+// backwards has a sign flip somewhere along here.
+extern double gDbgZSpeed, gDbgEngineIn, gDbgEngineOut, gDbgGrip;
+extern double gDbgCollY, gDbgCollZ, gDbgGravZ, gDbgTotalZ, gDbgWorldZSpeed;
+// Yaw / steering channel: separates "steering lag lets the car run wide" from
+// "suspension spikes and throws it". gDbgHeadingErr is CalculateSteering's
+// diffAngle (road heading minus car heading, plus the bend offset), which is
+// the error the whole steering loop is working against.
+extern double gDbgYAngle, gDbgSectionYAngle, gDbgHeadingErr;
+extern double gDbgYRotSpeed, gDbgYRotAccel;
+extern int    gDbgAlignFired, gDbgAtSideByte, gDbgLeftRight;
+// Pitch/roll: the "is it flipping" signal, and the ±11264 / ±2560 clamps.
+extern double gDbgXAngle, gDbgZAngle, gDbgXRotSpeed, gDbgZRotSpeed;
+// Road-height lookup internals for the front-left wheel: the raw table result
+// before the cushion blend, the blend fraction actually applied, and the
+// PosPlayersZSpeed that decides whether the blend is bypassed at all.
+extern double gDbgRawRoadFL, gDbgPosZSpeed, gDbgSurfZ;
+extern int    gDbgBlendUsed;
+
 // Adapters between legacy fixed-point globals (player_x, etc. in
 // Car_Behaviour.cpp) and PhysicsStateF. Implemented in Car_Behaviour.cpp,
 // where those file-static globals are visible.

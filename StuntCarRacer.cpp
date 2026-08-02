@@ -982,6 +982,9 @@ void CALLBACK OnFrameMove( IDirect3DDevice9 *pd3dDevice, double fTime, float fEl
 {
 static D3DXVECTOR3 vUpVec( 0.0f, 1.0f, 0.0f );
 static long frameCount = 0;
+// Set by OnFrameMove's accumulators, consumed by the physics/draw body below.
+static long PlayerPhysicsSteps = 0;
+static bool bOpponentStepDue = false;
 DWORD input = lastInput;	// take copy of user input
 D3DXMATRIX matRot, matTemp, matTrans, matView;
 
@@ -1017,20 +1020,40 @@ static float lastFrame = 0.0f;
 	// accumulator so behaviour matches the Amiga on any display refresh.
 	if ((GameMode == TRACK_PREVIEW) || (GameMode == GAME_IN_PROGRESS))
 	{
-		static double physicsAccum = 0.0;
+		// Two independent clocks:
+		//
+		//  - The 50Hz clock drives FramesWheelsEngine (engine sound and wheel
+		//    animation, which the Amiga ran at the PAL vsync rate) and counts
+		//    down frameGap for the *legacy* physics and the opponent.
+		//
+		//  - The player clock drives CarBehaviour. On the legacy path that is
+		//    still 50Hz/frameGap (~8.3Hz), which is why the game looks jerky:
+		//    the world only changes 8 times a second. With the FloatV2 port
+		//    enabled it runs at 1/gFloatV2Dt instead, because that physics is
+		//    timestep-parameterised and can be stepped as often as we like.
+		//
+		// The opponent stays on the legacy clock either way — its AI has no
+		// timestep, so stepping it faster would simply make it drive faster.
+		static double engineAccum = 0.0;
+		static double playerAccum = 0.0;
 		static double lastPhysicsT = DXUTGetTime();
 		const double STEP_50HZ = 1.0 / 50.0;
 
+		const bool   bFloatV2   = scr::gUseFloatV2Physics;
+		const double playerStep = bFloatV2 ? scr::gFloatV2Dt : STEP_50HZ;
+
 		double nowT = DXUTGetTime();
-		physicsAccum += (nowT - lastPhysicsT);
+		double elapsed = nowT - lastPhysicsT;
 		lastPhysicsT = nowT;
 		// Clamp to avoid spiral-of-death after pauses / stalls
-		if (physicsAccum > 0.25) physicsAccum = 0.25;
+		if (elapsed > 0.25) elapsed = 0.25;
+		engineAccum += elapsed;
+		playerAccum += elapsed;
 
-		bool ranPhysicsStep = false;
-		while (physicsAccum >= STEP_50HZ)
+		bool ranLegacyStep = false;
+		while (engineAccum >= STEP_50HZ)
 		{
-			physicsAccum -= STEP_50HZ;
+			engineAccum -= STEP_50HZ;
 
 			if (GameMode == GAME_IN_PROGRESS)
 			{
@@ -1043,12 +1066,29 @@ static float lastFrame = 0.0f;
 			if (frameCount == 0)
 			{
 				frameCount = frameGap;
-				ranPhysicsStep = true;
+				ranLegacyStep = true;
 			}
 		}
 
-		// If no physics tick was due this render frame, skip the physics/draw-update body
-		if (!ranPhysicsStep)
+		// How many player physics steps are due this render frame.
+		PlayerPhysicsSteps = 0;
+		while (playerAccum >= playerStep)
+		{
+			playerAccum -= playerStep;
+			++PlayerPhysicsSteps;
+			if (PlayerPhysicsSteps >= 8) { playerAccum = 0.0; break; }	// sanity cap
+		}
+
+		if (!bFloatV2)
+		{
+			// Legacy: the player moves on the frameGap clock, as before.
+			PlayerPhysicsSteps = ranLegacyStep ? 1 : 0;
+		}
+
+		bOpponentStepDue = ranLegacyStep;
+
+		// Nothing to do at all this render frame?
+		if ((PlayerPhysicsSteps == 0) && !ranLegacyStep)
 			return;
 	}
 	else if (GameMode == TRACK_MENU)
@@ -1075,6 +1115,22 @@ static float lastFrame = 0.0f;
 		if (!bPaused)
 		{
 			if ((GameMode == GAME_IN_PROGRESS) && (!bPlayerPaused))
+			{
+				// May be more than one step per render frame if the FloatV2
+				// rate is above the render rate, or if a frame ran long.
+				for (long step = 0; step < PlayerPhysicsSteps; ++step)
+				{
+				// FloatV2 treats road section / distance-into-section / road-x
+				// as *inputs*, but their only writer, CalculatePlayersRoadPosition(),
+				// sits inside OpponentBehaviour() on the 8.3Hz frameGap clock.
+				// At 60Hz that leaves the road-height lookup frozen for ~8 steps
+				// and then snapping, and ProcessWheel's (1.078125 / dtRatio)
+				// predictive term turns each snap into a fake impact that rolls
+				// the car over. Refresh per player step. Gated so the legacy
+				// path keeps its original call pattern exactly.
+				if (scr::gUseFloatV2Physics)
+					CalculatePlayersRoadPosition();
+
 				CarBehaviour(input,
 							 &player1_x,
 							 &player1_y,
@@ -1082,8 +1138,12 @@ static float lastFrame = 0.0f;
 							 &player1_x_angle,
 							 &player1_y_angle,
 							 &player1_z_angle);
+				}
+			}
 
-			OpponentBehaviour(&opponent_x,
+			// Opponent AI has no timestep, so it stays on the legacy clock.
+			if (bOpponentStepDue)
+				OpponentBehaviour(&opponent_x,
 							  &opponent_y,
 							  &opponent_z,
 							  &opponent_x_angle,
@@ -1744,18 +1804,33 @@ void CALLBACK KeyboardProc( UINT nChar, bool bKeyDown, bool bAltDown, void *pUse
 			frameGap++;
 			break;
 
-		case VK_F11:
+		case 'V':
 			// Toggle the FloatV2 physics port (see Physics_FloatV2.h).
 			scr::gUseFloatV2Physics = !scr::gUseFloatV2Physics;
 			break;
 
-		case VK_F12:
+		case 'B':
 			// Cycle the FloatV2 timestep: 10Hz (Amiga rate) -> 25Hz -> 60Hz.
 			// At 10Hz this should behave like the legacy path; the higher
 			// rates are the point of the port.
 			if      (scr::gFloatV2Dt > 0.05)  scr::gFloatV2Dt = 1.0 / 25.0;
 			else if (scr::gFloatV2Dt > 0.025) scr::gFloatV2Dt = 1.0 / 60.0;
 			else                              scr::gFloatV2Dt = 0.1;
+			break;
+
+		case 'N':
+			// Dump the next 20 FloatV2 steps to stdout (see Physics_FloatV2.h).
+			scr::gFloatV2DebugSteps = (int)(2.0 / scr::gFloatV2Dt);	// ~2s of steps at any rate
+			break;
+
+		case 'K':
+			scr::gFloatV2DumpOnCurves = !scr::gFloatV2DumpOnCurves;
+			break;
+
+		case 'J':
+			// EXPERIMENT: un-reverse distance-into-section on opposite-direction
+			// curves (see gFloatV2UnreverseCurveDist in Physics_FloatV2.h).
+			scr::gFloatV2UnreverseCurveDist = !scr::gFloatV2UnreverseCurveDist;
 			break;
 
 #if defined(DEBUG) || defined(_DEBUG)
@@ -2016,16 +2091,48 @@ bool process_events()
 					frameGap++;
 					break;
 
-				case SDLK_F11:
+				case SDLK_v:
 					// Toggle the FloatV2 physics port (see Physics_FloatV2.h).
+					// Letter keys, not F11/F12 — those collide with macOS.
 					scr::gUseFloatV2Physics = !scr::gUseFloatV2Physics;
+					printf("FloatV2 physics %s (dt=%.4f, %.0fHz)\n",
+						   scr::gUseFloatV2Physics ? "ON" : "OFF",
+						   scr::gFloatV2Dt, 1.0 / scr::gFloatV2Dt);
+					fflush(stdout);
 					break;
 
-				case SDLK_F12:
+				case SDLK_b:
 					// Cycle the FloatV2 timestep: 10Hz (Amiga rate) -> 25Hz -> 60Hz.
 					if      (scr::gFloatV2Dt > 0.05)  scr::gFloatV2Dt = 1.0 / 25.0;
 					else if (scr::gFloatV2Dt > 0.025) scr::gFloatV2Dt = 1.0 / 60.0;
 					else                              scr::gFloatV2Dt = 0.1;
+					printf("FloatV2 dt=%.4f (%.0fHz)%s\n", scr::gFloatV2Dt,
+						   1.0 / scr::gFloatV2Dt,
+						   scr::gUseFloatV2Physics ? "" : "  [physics still OFF - press V]");
+					fflush(stdout);
+					break;
+
+				case SDLK_n:
+					// Dump the next 20 FloatV2 steps to stdout.
+					scr::gFloatV2DebugSteps = (int)(2.0 / scr::gFloatV2Dt);	// ~2s of steps at any rate
+					break;
+
+				case SDLK_j:
+					// EXPERIMENT: un-reverse distance-into-section on
+					// opposite-direction curves (Physics_FloatV2.h). M is taken
+					// by the track menu, so this lives on J.
+					scr::gFloatV2UnreverseCurveDist = !scr::gFloatV2UnreverseCurveDist;
+					printf("FloatV2 un-mirror NormalDistanceIntoSection: %s\n",
+						   scr::gFloatV2UnreverseCurveDist ? "ON" : "OFF");
+					fflush(stdout);
+					break;
+
+				case SDLK_k:
+					// Dump every step spent on a curved piece.
+					scr::gFloatV2DumpOnCurves = !scr::gFloatV2DumpOnCurves;
+					printf("FloatV2 dump-on-curves: %s\n",
+						   scr::gFloatV2DumpOnCurves ? "ON" : "OFF");
+					fflush(stdout);
 					break;
 
 #if defined(DEBUG) || defined(_DEBUG)
@@ -2513,8 +2620,15 @@ int main(int argc, const char** argv)
 		SDL_GL_SwapBuffers();
 #endif
 
-		int32_t timetowait = (1.0f/50.0f - (fTime-fLastTime))*1000;
-		//int32_t timetowait = (1.0f/60.0f - (fTime-fLastTime))*1000;
+		// Cap the render rate. 50Hz matches the Amiga's PAL vsync, but the
+		// FloatV2 physics can step faster than that, and rendering slower than
+		// the physics just throws those steps away — so follow it when it is
+		// running above 50Hz.
+		double renderStep = 1.0/50.0;
+		if (scr::gUseFloatV2Physics && scr::gFloatV2Dt < renderStep)
+			renderStep = scr::gFloatV2Dt;
+
+		int32_t timetowait = (renderStep - (fTime-fLastTime))*1000;
 		if (timetowait>0)
 			SDL_Delay(timetowait);
 

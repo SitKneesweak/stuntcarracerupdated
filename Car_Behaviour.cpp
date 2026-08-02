@@ -257,6 +257,10 @@ static void BoostPower (long boost_flag,
 						long accelerate,
 						long brake);
 
+// Defined further down with the other legacy<->FloatV2 adapter helpers; the
+// debug dump in CarMovement prints the value FloatV2 actually receives.
+namespace scr { static long FV2_PlayersRoadXPosition (long roadX); }
+
 static void CarMovement (void);
 static long GetPieceUsingMap (long x, long z, long *piece_out);
 static void CalcXZRelativeToPiece (long x, long z, long piece, long *rx_out, long *rz_out);
@@ -925,7 +929,7 @@ static void CarMovement (void)
 
 	// FloatV2 physics: replaces everything below, but *after* the road-position
 	// tracking above has run — Tick treats road section / distance / road-x as
-	// inputs. Toggle with F11; see Physics_FloatV2.h.
+	// inputs. Toggle with V; see Physics_FloatV2.h.
 	if (scr::gUseFloatV2Physics)
 		{
 		scr::PhysicsInput in;
@@ -935,7 +939,87 @@ static void CarMovement (void)
 		in.Brake      = (brake != 0);
 		in.Boost      = (boost_activated != 0);
 
+		// Snapshot the legacy values before the step overwrites them, so the
+		// dump below compares like with like.
+		long dbg_y = player_y, dbg_ys = player_world_y_speed;
+		long dbg_rfl = front_left_road_height, dbg_rfr = front_right_road_height;
+		long dbg_rr = rear_road_height;
+		CalculateActualWheelHeights();
+		long dbg_afl = front_left_actual_height, dbg_afr = front_right_actual_height;
+		long dbg_ar = rear_actual_height;
+
 		scr::FloatV2_RunStep(in, scr::gFloatV2Dt);
+
+		// K arms a dump for as long as the car is on a curved piece, so a
+		// corner can be captured without having to time the N key.
+		if (scr::gFloatV2DumpOnCurves && (Track[player_current_piece].type & 0x80))
+			scr::gFloatV2DebugSteps = 1;
+
+		// At 60Hz the dump is six times longer and the event of interest is a
+		// single step, so flag the step where amount-below-road jumps. That is
+		// the signature of ProcessWheel's (1.078125 / dtRatio) predictive term
+		// amplifying a one-step discontinuity in the road-height inputs.
+		{
+		static double prev_below = 0.0;
+		double now_below = scr::gDbgBelowFL;
+		if (now_below < scr::gDbgBelowFR) now_below = scr::gDbgBelowFR;
+		if (now_below < scr::gDbgBelowR)  now_below = scr::gDbgBelowR;
+		if ((scr::gFloatV2DebugSteps > 0) && ((now_below - prev_below) > 1500.0))
+			printf("*** SPIKE: max below %.0f -> %.0f in one step ***\n",
+				   prev_below, now_below);
+		prev_below = now_below;
+		}
+
+		if (scr::gFloatV2DebugSteps > 0)
+			{
+			--scr::gFloatV2DebugSteps;
+			printf("FV2 dt=%.4f sec=%ld  y %ld->%ld  yspd %ld->%ld  [unmirror=%s]\n",
+				   scr::gFloatV2Dt, player_current_piece,
+				   dbg_y, player_y, dbg_ys, player_world_y_speed,
+				   scr::gFloatV2UnreverseCurveDist ? "ON" : "OFF");
+			printf("    road  legacy FL/FR/R %ld %ld %ld | fv2 %.0f %.0f %.0f\n",
+				   dbg_rfl, dbg_rfr, dbg_rr,
+				   scr::gDbgRoadFL, scr::gDbgRoadFR, scr::gDbgRoadR);
+			printf("    act   legacy FL/FR/R %ld %ld %ld | fv2 %.0f %.0f %.0f\n",
+				   dbg_afl, dbg_afr, dbg_ar,
+				   scr::gDbgActFL, scr::gDbgActFR, scr::gDbgActR);
+			printf("    below fv2 FL/FR/R %.0f %.0f %.0f  touching=%d\n",
+				   scr::gDbgBelowFL, scr::gDbgBelowFR, scr::gDbgBelowR,
+				   (int)touching_road);
+			printf("    Z: zspd %.0f  engine %.0f->%.0f  grip %.0f  collZ %.0f "
+				   "gravZ %.0f  totalZ %.0f  worldZspd %.0f  in(a=%d b=%d)\n",
+				   scr::gDbgZSpeed, scr::gDbgEngineIn, scr::gDbgEngineOut,
+				   scr::gDbgGrip, scr::gDbgCollZ, scr::gDbgGravZ,
+				   scr::gDbgTotalZ, scr::gDbgWorldZSpeed,
+				   (int)in.Accelerate, (int)in.Brake);
+			printf("    yaw: yAng %.0f  secY %.0f  err %.0f  yRotSpd %.1f "
+				   "yRotAcc %.0f  lr=%d align=%d atSide=%d\n",
+				   scr::gDbgYAngle, scr::gDbgSectionYAngle, scr::gDbgHeadingErr,
+				   scr::gDbgYRotSpeed, scr::gDbgYRotAccel,
+				   scr::gDbgLeftRight, scr::gDbgAlignFired, scr::gDbgAtSideByte);
+			printf("    lookup: rawFL %.0f -> storedFL %.0f  surfZ %.0f "
+				   "posZspd %.0f  blend=%d  distIntoSec %ld\n",
+				   scr::gDbgRawRoadFL, scr::gDbgRoadFL, scr::gDbgSurfZ,
+				   scr::gDbgPosZSpeed, scr::gDbgBlendUsed,
+				   players_distance_into_section);
+			printf("    tilt: xAng %.0f (spd %.1f)  zAng %.0f (spd %.1f)\n",
+				   scr::gDbgXAngle, scr::gDbgXRotSpeed,
+				   scr::gDbgZAngle, scr::gDbgZRotSpeed);
+			// Corner diagnostics. roadX is the across-the-road input FloatV2
+			// adds each wheel's offset to; on curves the legacy code computes
+			// it by a completely different route (abs(radius - dist), so never
+			// negative) than on straights (signed, can go off either edge).
+			// pieceType: 0 = straight, 0x40 = diagonal, 0x80|.. = curve.
+			printf("    road-x: roadX %ld (fv2 %ld)  pieceType 0x%02lx  curveLeft %d  oppDir %d  segment %ld/%ld\n",
+				   players_road_x_position,
+				   scr::FV2_PlayersRoadXPosition(players_road_x_position),
+				   (long)(Track[player_current_piece].type & 0xFF),
+				   (int)Track[player_current_piece].curveToLeft,
+				   (int)Track[player_current_piece].oppositeDirection,
+				   player_current_segment,
+				   (long)Track[player_current_piece].numSegments);
+			fflush(stdout);
+			}
 		return;
 		}
 
@@ -2469,6 +2553,134 @@ static void LiftCarOntoTrack (void)
 
 namespace scr {
 
+// Angle form conversion across the boundary. Legacy globals hold 0..65535
+// (MAX_ANGLE == 65536 == 360 degrees); FloatV2 holds the signed equivalent,
+// because its pitch/roll clamps and WrapAngle are both written around zero.
+static long FV2_ToSignedAngle (long a)
+	{
+	a &= (MAX_ANGLE - 1);
+	return (a >= _180_DEGREES) ? (a - MAX_ANGLE) : a;
+	}
+
+static long FV2_ToUnsignedAngle (double a)
+	{
+	return static_cast<long>(a) & (MAX_ANGLE - 1);
+	}
+
+// The C# keeps EnginePower as the Amiga stored it: a byte-reversed word, which
+// ComputeEngineAcceleration swaps back before use. Our engine_power is a plain
+// 240/320, so pre-reverse it here or the swap-back yields 0xF000 == -4096 and
+// the car drives backwards under full power. The swap is its own inverse.
+static int16_t FV2_SwapEnginePower (long p)
+	{
+	return static_cast<int16_t>(((p & 0xFF) << 8) | ((p >> 8) & 0xFF));
+	}
+
+// DistanceIntoSection vs NormalDistanceIntoSection.
+//
+// These are NOT the same value in the reference, and the adapter was feeding
+// the same legacy long to both. Physics.cs:3672 builds them as:
+//
+//     NormalDistanceIntoSection = <raw, piece's own coordinate order>
+//     DistanceIntoSection       = DetailNearRoad(Normal, numberOfSegments, plus180)
+//
+// and DetailNearRoad (Physics.cs:4055) is exactly the plus180 mirror:
+//
+//     if (plus180) return (numberOfSegments << 8) - normalDistance;
+//
+// FloatV2's road-height lookup uses *NormalDistanceIntoSection* (the raw one)
+// and applies plus180 itself at lookup time, via `reversed` in FV2_GetRoadHeight
+// and `plus180` in ProcessOneWheel. But Track.cpp:1422 already builds
+// Track[].coords in travel order for plus180 sections, so the legacy
+// players_distance_into_section that reaches us is the *mirrored* form — i.e.
+// it corresponds to DistanceIntoSection, not to NormalDistanceIntoSection.
+//
+// So Normal has to be un-mirrored back out of it. This applies to every piece
+// type, not just curves: Track.cpp reverses the coords for any section with
+// bit 0x10 set. (An earlier version of this experiment gated on curves only,
+// which is why toggling it changed nothing either way.)
+static long FV2_NormalDistanceIntoSection (long dist)
+	{
+	if (!scr::gFloatV2UnreverseCurveDist)
+		return dist;
+
+	const long piece = player_current_piece;
+	if (!Track[piece].oppositeDirection)		// plus180 clear: the two agree
+		return dist;
+
+	// 8.8 fixed point; numSegments segments per piece.
+	return (Track[piece].numSegments * 256) - dist;
+	}
+
+// SectionYAngle for FloatV2.
+//
+// CalcSectionYAngle's curve path applies its half-turn on oppositeDirection
+// alone (Car_Behaviour.cpp:3657). The reference carries a curve-direction term
+// as well — Physics.cs:3988 builds it as
+//
+//     num3 = num + 16384 - curveToLeftWord      // curveToLeftWord == -32768 for left curves
+//
+// so the half-turn belongs on (oppositeDirection XOR curveToLeft). Legacy can
+// live with the discrepancy because the value only ever feeds its own steering,
+// which was tuned against it; FloatV2 cannot, because SectionYAngle sets the
+// frame the wheel XZ offsets are built in (MakeRotationMatrix's sectionRelAngle
+// = YAngle - SectionYAngle). Half a turn there negates sinSec/cosSec, which
+// swaps front/rear and left/right wheels, so all three sample the road in the
+// wrong place and the car is thrown into the air.
+//
+// Diagnosed from a K dump crossing section 25 (curveLeft 0, oppDir 0 — fine,
+// heading error ~0) into section 26 (curveLeft 1, oppDir 1 — heading error
+// 32641, i.e. exactly 180 degrees, road heights diverging from legacy by 3000+
+// and amount-below-road saturating at 4607 on all three wheels).
+//
+// Adding 180 for curveToLeft turns the existing "if oppositeDirection" into the
+// XOR, since 180*a + 180*b == 180*(a XOR b) modulo a full turn.
+static double FV2_SectionYAngle (void)
+	{
+	const long piece = player_current_piece;
+
+	long rx = 0, rz = 0;
+	CalcXZRelativeToPiece(player_x, player_z, piece, &rx, &rz);
+	long angle = CalcSectionYAngle(piece, rx, rz);
+
+	if ((Track[piece].type & 0x80) && Track[piece].curveToLeft)
+		angle += _180_DEGREES;
+
+	// Legacy holds unsigned 0..65535; FloatV2 wants the signed form (and the
+	// 22/05/1998 reversal, so the sense matches the car's own YAngle).
+	angle = (-angle & (MAX_ANGLE - 1));
+	if (angle >= _180_DEGREES) angle -= MAX_ANGLE;
+	return static_cast<double>(angle);
+	}
+
+// PlayersRoadXPosition — the across-road counterpart of the Z un-mirror above.
+//
+// Reversing the direction of travel flips both axes, and Track.cpp:1422
+// reverses the whole coordinate list for plus180 sections, so the legacy
+// players_road_x_position that reaches us is mirrored across the road as well
+// as along it. FloatV2 expects the piece's own frame and applies its own flip
+// at lookup time, by swapping the left/right Y-coord blocks in the `reversed`
+// branch of FV2_GetRoadHeight — so without this the X axis is flipped once too
+// often, exactly as Z was.
+//
+// Diagnosed from matched 10Hz/60Hz K dumps with the Z un-mirror already on:
+// the along-road index then tracked legacy's segment correctly, sections 25 and
+// 27 (oppDir 0) matched legacy within ~30, and only section 26 (oppDir 1)
+// diverged — by an amount that grew as roadX moved across the road, which is
+// the signature of a mirrored across-road coordinate on a banked piece.
+//
+// ROAD_WIDTH (0x180 == 384) is also FloatV2's off-road bound, so the mirror is
+// symmetric: a negative road_x maps above 384 and still reads as off-road.
+static long FV2_PlayersRoadXPosition (long roadX)
+	{
+	if (!scr::gFloatV2UnreverseCurveDist)
+		return roadX;
+	if (!Track[player_current_piece].oppositeDirection)
+		return roadX;
+
+	return ROAD_WIDTH - roadX;
+	}
+
 // Per-step: only the values the legacy code still owns. Everything else is
 // FloatV2's own state and must NOT be round-tripped through the legacy longs
 // each step — the fractional parts (BoostUnit, damage remainders, sub-unit
@@ -2481,17 +2693,10 @@ void CopyLegacyRoadStateToFloatV2 (PhysicsStateF& s)
 	// CalculateRoadWheelHeights() has just recomputed them for us.
 	s.RoadSection               = static_cast<uint8_t>(player_current_piece);
 	s.DistanceIntoSection       = static_cast<double>(players_distance_into_section);
-	s.NormalDistanceIntoSection = static_cast<double>(players_distance_into_section);
-	s.PlayersRoadXPosition      = static_cast<double>(players_road_x_position);
+	s.NormalDistanceIntoSection = static_cast<double>(FV2_NormalDistanceIntoSection(players_distance_into_section));
+	s.PlayersRoadXPosition      = static_cast<double>(FV2_PlayersRoadXPosition(players_road_x_position));
 
-		{
-		long rx = 0, rz = 0;
-		CalcXZRelativeToPiece(player_x, player_z, player_current_piece, &rx, &rz);
-		long angle = CalcSectionYAngle(player_current_piece, rx, rz);
-		angle = (-angle & (MAX_ANGLE - 1));
-		if (angle >= _180_DEGREES) angle -= MAX_ANGLE;
-		s.SectionYAngle = static_cast<double>(angle);
-		}
+	s.SectionYAngle = FV2_SectionYAngle();
 
 	// Car-to-car impulses are produced by the (still legacy) collision code.
 	s.CarToCarXAcceleration = static_cast<int16_t>(car_collision_x_acceleration);
@@ -2504,7 +2709,7 @@ void CopyLegacyRoadStateToFloatV2 (PhysicsStateF& s)
 	s.OffMapStatus          = static_cast<uint8_t>(off_map_status);
 	s.CarOnChainsCountdown  = static_cast<uint8_t>(on_chains);
 	s.RoadID                = static_cast<uint8_t>(TrackID);
-	s.EnginePower           = static_cast<int16_t>(engine_power);
+	s.EnginePower           = FV2_SwapEnginePower(engine_power);
 	s.BoostUnitValue        = static_cast<uint8_t>(boost_unit_value);
 	}
 
@@ -2516,30 +2721,25 @@ void CopyLegacyToFloatV2 (PhysicsStateF& s)
 
 	s.RoadSection             = static_cast<uint8_t>(player_current_piece);
 	s.DistanceIntoSection     = static_cast<double>(players_distance_into_section);
-	s.NormalDistanceIntoSection = static_cast<double>(players_distance_into_section);
-	s.PlayersRoadXPosition    = static_cast<double>(players_road_x_position);
+	s.NormalDistanceIntoSection = static_cast<double>(FV2_NormalDistanceIntoSection(players_distance_into_section));
+	s.PlayersRoadXPosition    = static_cast<double>(FV2_PlayersRoadXPosition(players_road_x_position));
 
 	// SectionYAngle: the legacy code computes this inside its own
-	// CalculateSteering, which we are replacing, so derive it here the same
-	// way (including the 22/05/1998 reversal).
-		{
-		long rx = 0, rz = 0;
-		CalcXZRelativeToPiece(player_x, player_z, player_current_piece, &rx, &rz);
-		long angle = CalcSectionYAngle(player_current_piece, rx, rz);
-		angle = (-angle & (MAX_ANGLE - 1));
-		// Tick wants a signed 16-bit angle, not the 0..65535 legacy form.
-		if (angle >= _180_DEGREES) angle -= MAX_ANGLE;
-		s.SectionYAngle = static_cast<double>(angle);
-		}
+	// CalculateSteering, which we are replacing. See FV2_SectionYAngle.
+	s.SectionYAngle = FV2_SectionYAngle();
 
 	// --- Position / orientation --------------------------------------------
 	s.WorldX = static_cast<double>(player_x) / FV2_XZ_SCALE;
 	s.WorldY = static_cast<double>(player_y);
 	s.WorldZ = static_cast<double>(player_z) / FV2_XZ_SCALE;
 
-	s.XAngle = static_cast<double>(player_x_angle);
-	s.YAngle = static_cast<double>(player_y_angle);
-	s.ZAngle = static_cast<double>(player_z_angle);
+	// Angles: the legacy globals are unsigned 0..65535, FloatV2 works in the
+	// signed -32768..32767 form (see WrapAngle, and the +-11264 pitch/roll
+	// clamps in UpdatePosition). Convert, or a car sitting at a hair's-breadth
+	// nose-down 65200 seeds as +65200, hits the clamp, and is launched.
+	s.XAngle = static_cast<double>(FV2_ToSignedAngle(player_x_angle));
+	s.YAngle = static_cast<double>(FV2_ToSignedAngle(player_y_angle));
+	s.ZAngle = static_cast<double>(FV2_ToSignedAngle(player_z_angle));
 
 	s.WorldXSpeed = static_cast<double>(player_world_x_speed);
 	s.WorldYSpeed = static_cast<double>(player_world_y_speed);
@@ -2550,7 +2750,7 @@ void CopyLegacyToFloatV2 (PhysicsStateF& s)
 	s.ZRotationSpeed = static_cast<double>(player_z_rotation_speed);
 
 	// --- Car / league state -------------------------------------------------
-	s.EnginePower     = static_cast<int16_t>(engine_power);
+	s.EnginePower     = FV2_SwapEnginePower(engine_power);
 	s.BoostUnitValue  = static_cast<uint8_t>(boost_unit_value);
 	s.BoostReserve    = static_cast<uint8_t>(boostReserve);
 	s.BoostUnit       = static_cast<double>(boostUnit);
@@ -2596,9 +2796,10 @@ void CopyFloatV2ToLegacy (const PhysicsStateF& s)
 	player_y = static_cast<long>(s.WorldY);
 	player_z = static_cast<long>(s.WorldZ * FV2_XZ_SCALE);
 
-	player_x_angle = static_cast<long>(s.XAngle);
-	player_y_angle = static_cast<long>(s.YAngle);
-	player_z_angle = static_cast<long>(s.ZAngle);
+	// Back to the legacy unsigned 0..65535 form (see CopyLegacyToFloatV2).
+	player_x_angle = FV2_ToUnsignedAngle(s.XAngle);
+	player_y_angle = FV2_ToUnsignedAngle(s.YAngle);
+	player_z_angle = FV2_ToUnsignedAngle(s.ZAngle);
 
 	player_world_x_speed = static_cast<long>(s.WorldXSpeed);
 	player_world_y_speed = static_cast<long>(s.WorldYSpeed);

@@ -338,6 +338,15 @@ double ProcessOneWheel(PhysicsStateF& s, const FV2Track& t, int& currentSection,
     // Otherwise ease towards it — this is the road "cushion" that stops the
     // car chattering over segment boundaries at low speed.
     double previous = storedHeight;
+    // Debug: capture the raw table result for the front-left wheel, i.e. the
+    // last wheel CalculateRoadWheelHeights processes (see call order below).
+    const bool dbgWheel = !isRearWheel;
+    if (dbgWheel) {
+        gDbgRawRoadFL = height;
+        gDbgPosZSpeed = s.PosPlayersZSpeed;
+        gDbgSurfZ     = static_cast<double>(static_cast<uint16_t>(surfaceZ));
+        gDbgBlendUsed = 0;
+    }
     if (s.PosPlayersZSpeed >= 2560.0) {
         storedHeight = height;
         return height;
@@ -351,6 +360,7 @@ double ProcessOneWheel(PhysicsStateF& s, const FV2Track& t, int& currentSection,
     }
 
     double blend = 1.0 - std::pow(0.5, dtRatio);   // half-way per 10Hz step
+    if (dbgWheel) gDbgBlendUsed = 1;
     storedHeight = std::round(previous + blend * (static_cast<double>(height) - previous));
     return storedHeight;
 }
@@ -659,6 +669,8 @@ TotalAccel CalculateTotalAcceleration(PhysicsStateF& s, const GravityXYZ& grav,
     t.y = grav.y + coll.y;
 
     double engine = s.EngineZAcceleration;
+    gDbgZSpeed = zSpeed; gDbgEngineIn = engine;
+    gDbgCollY = coll.y; gDbgCollZ = coll.z; gDbgGravZ = grav.z;
     // Rolling resistance, only when engine force and travel agree in sign.
     uint8_t signs = static_cast<uint8_t>(
         static_cast<uint8_t>(static_cast<int16_t>(engine) >> 8) |
@@ -673,6 +685,7 @@ TotalAccel CalculateTotalAcceleration(PhysicsStateF& s, const GravityXYZ& grav,
         engine = (engine < 0.0) ? -grip : grip;
     }
     s.EngineZAcceleration = engine;
+    gDbgGrip = grip; gDbgEngineOut = engine;
     t.z = engine + coll.z + grav.z;
 
     double lateral = grav.x + coll.x;
@@ -815,6 +828,12 @@ void CalculateSteering(PhysicsStateF& s, const FV2Track& t, double playerZSpeed,
         align = static_cast<uint8_t>(absDiff >> 8) >= 30;
     }
 
+    // Debug channel (see Physics_FloatV2.h). signedDiff is the heading error
+    // the loop is chasing; align tells us whether the hard YAngle snap fired.
+    gDbgHeadingErr = static_cast<double>(signedDiff);
+    gDbgAlignFired = align ? 1 : 0;
+    gDbgLeftRight  = static_cast<int>(leftRightValue);
+
     if (align) AlignCarWithRoad(s, absDiff, signedDiff, zSpeedS, dtRatio);
 
     yAccel = static_cast<int16_t>(yAccel - SaturateToShort(s.YRotationSpeed));
@@ -956,9 +975,24 @@ void UpdatePosition(PhysicsStateF& s, const FinalRot& f, double dtRatio) {
 
 } // anonymous namespace
 
-bool   gUseFloatV2Physics = false;   // F11 toggles at runtime
+int    gFloatV2DebugSteps = 0;       // N key arms a burst; see Physics_FloatV2.h
+double gDbgRoadFL = 0, gDbgRoadFR = 0, gDbgRoadR = 0;
+double gDbgActFL  = 0, gDbgActFR  = 0, gDbgActR  = 0;
+double gDbgBelowFL = 0, gDbgBelowFR = 0, gDbgBelowR = 0;
+double gDbgZSpeed = 0, gDbgEngineIn = 0, gDbgEngineOut = 0, gDbgGrip = 0;
+double gDbgCollY = 0, gDbgCollZ = 0, gDbgGravZ = 0, gDbgTotalZ = 0, gDbgWorldZSpeed = 0;
+double gDbgYAngle = 0, gDbgSectionYAngle = 0, gDbgHeadingErr = 0;
+double gDbgYRotSpeed = 0, gDbgYRotAccel = 0;
+int    gDbgAlignFired = 0, gDbgAtSideByte = 0, gDbgLeftRight = 0;
+double gDbgXAngle = 0, gDbgZAngle = 0, gDbgXRotSpeed = 0, gDbgZRotSpeed = 0;
+double gDbgRawRoadFL = 0, gDbgPosZSpeed = 0, gDbgSurfZ = 0;
+int    gDbgBlendUsed = 0;
+
+bool   gUseFloatV2Physics = false;   // V toggles at runtime
 double gFloatV2Dt         = 0.1;     // 10Hz to start; see header
 bool   gFloatV2NeedsSeed  = true;    // set whenever the legacy path has run
+bool   gFloatV2UnreverseCurveDist = true;    // ON by default; J toggles. See header.
+bool   gFloatV2DumpOnCurves       = false;   // K toggles; see header
 
 // --- Tuning constants (from PhysicsStepF in PhysicsFloatV2.cs) --------------
 namespace {
@@ -1048,6 +1082,18 @@ void PhysicsStepF_Tick(PhysicsStateF& state, const PhysicsInput& input, double d
 
     UpdateWorldSpeeds(state, total, dtRatio);
     UpdatePosition(state, finalRot, dtRatio);
+
+    gDbgRoadFL = roadH.fl;   gDbgRoadFR = roadH.fr;   gDbgRoadR = roadH.r;
+    gDbgActFL  = actualH.fl; gDbgActFR  = actualH.fr; gDbgActR  = actualH.r;
+    gDbgBelowFL = coll.flBelow; gDbgBelowFR = coll.frBelow; gDbgBelowR = coll.rBelow;
+    gDbgTotalZ = total.z; gDbgWorldZSpeed = state.WorldZSpeed;
+    gDbgYAngle        = state.YAngle;
+    gDbgSectionYAngle = state.SectionYAngle;
+    gDbgYRotSpeed     = state.YRotationSpeed;
+    gDbgYRotAccel     = state.YRotationAcceleration;
+    gDbgAtSideByte    = static_cast<int>(state.AtSideByte);
+    gDbgXAngle = state.XAngle; gDbgZAngle = state.ZAngle;
+    gDbgXRotSpeed = state.XRotationSpeed; gDbgZRotSpeed = state.ZRotationSpeed;
 }
 
 // --- Persistent state / step entry point -----------------------------------
