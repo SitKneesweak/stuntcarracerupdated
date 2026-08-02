@@ -62,6 +62,13 @@ extern void SetSolidColour (long colour_index);
 extern void SetLineColour (long colour_index);
 extern void SetTextureColour (long colour_index);
 
+// TRUE when the legacy world clock (50Hz / frameGap, the Amiga's race.loop rate) has ticked
+// since the last time the render side looked.  DrawSceneParticles() clears it.
+extern bool bWorldStepDue;
+
+// Duration of one such step, in seconds.
+extern double gWorldStepSeconds;
+
 // Debug
 extern long VALUE1, VALUE2, VALUE3;
 

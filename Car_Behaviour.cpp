@@ -48,6 +48,7 @@
 #include <stdlib.h>
 
 #include "StuntCarRacer.h"
+#include "Car.h"
 #include "Car_Behaviour.h"
 #include "Opponent_Behaviour.h"
 #include "Track.h"
@@ -138,6 +139,7 @@ extern IDirectSoundBuffer8 *SmashSoundBuffer;
 extern IDirectSoundBuffer8 *OffRoadSoundBuffer;
 
 extern bool bSuperLeague;
+extern int wideScreen;
 
 /*	=========== */
 /*	Static data */
@@ -188,8 +190,33 @@ static long smaller_limit_required = FALSE;
 
 static long wreck_wheel_height_reduction = 0;		// 0x200 if wrecked
 
-	// set the on_chains flag to FALSE for now (won't implement chains at first)
-static long on_chains = FALSE;
+	// Amiga StuntCarRacer's crane sequence (lift.car.onto.track, StuntCarRacer.s:7869).
+	// car_on_chains_countdown is kept in the Amiga's 0..255 byte form because the
+	// release test is a *signed* byte one - values >= 128 mean "still hanging" - and
+	// because the countdown doubles as left.right.value while the car is chained.
+static long car_on_chains_countdown = 0;
+#define	ON_CHAINS	(car_on_chains_countdown != 0)
+
+	// swing.car state.  The car does not oscillate: it hangs rolled to one side and
+	// the roll decays towards +/-16 (high byte) before the crane lets go.
+static long swing_from_left = FALSE;
+static long swing_magnitude = 0;
+static long required_raise_height = 0;
+
+	// Set in CarControl, read by the "press fire to be dropped" path of a re-lift.
+static long chain_fire_pressed = FALSE;
+
+	// The crane runs on Amiga frames, not physics steps: the countdowns below are
+	// frame counts, so FloatV2's variable dt has to be accumulated back into them.
+static double chain_frame_phase = 0.0;
+
+	// The Amiga gated the drop-start countdown on fourteen.frames.elapsed, the 238/256
+	// clock built in display.lap.time (StuntCarRacer.s:10775), so the countdown skips
+	// roughly one frame in fourteen.  The port's fourteen_frames_elapsed is maintained
+	// by the FloatV2 opponent step, which does not run until drop_start_done - so the
+	// crane keeps its own accumulator at the same rate rather than waiting on a clock
+	// that is stopped for exactly as long as the car is hanging.
+static long chain_frame_fraction = 0;
 
 static long player_distance_off_road;	// used to determine the value below
 static long off_map_status = 0;	// not set exactly like Amiga StuntCarRacer
@@ -262,6 +289,7 @@ static void BoostPower (long boost_flag,
 namespace scr { static long FV2_PlayersRoadXPosition (long roadX); }
 
 static void CarMovement (void);
+static void UpdateOffMapStatus (void);
 static long GetPieceUsingMap (long x, long z, long *piece_out);
 static void CalcXZRelativeToPiece (long x, long z, long piece, long *rx_out, long *rz_out);
 
@@ -307,6 +335,7 @@ static void CalculateInclinationSinCos (long inclination_in,
 										long *inclination_sin_out,
 										long *inclination_cos_out);
 static void LiftCarOntoTrack (void);
+static void LiftCarOntoTrackFloatV2 (double dt);
 
 static void CalculateTotalAcceleration (void);
 static long GetTwiceCollisionYAcceleration (void);
@@ -340,8 +369,13 @@ static void CalcCurveMeasurements (long piece,
 
 static void PositionCarAbovePiece (long piece);
 static void UpdateEngineRevs (void);
-static void DrawDustClouds (void);
-static void DrawSparks (void);
+static bool DrawDustClouds (void);
+static bool DrawSparks (void);
+static void UpdateSparks (bool emit_sparks, bool emit_dust);
+static void InitialiseSparksTable (void);
+
+// Stands in for main.loop.count, which only the dust clouds use (to cycle the puff shape).
+static long spark_step_count = 0;
 static void SetWheelRotationSpeed();
 
 #ifdef NOT_USED
@@ -410,6 +444,10 @@ void ResetPlayer (void)
 	wheel_off_road = 0, distance_off_road = 0;
 	at_side_byte = 0, which_side_byte = 0;
 
+	// initialise.sparks.table - the car has been repositioned, so any sparks or dust still
+	// in flight belong to wherever it used to be
+	InitialiseSparksTable();
+
 	smaller_limit_required = FALSE;
 
 	wreck_wheel_height_reduction = 0;		// 0x200 if wrecked
@@ -417,8 +455,16 @@ void ResetPlayer (void)
 	drop_start_done = TRUE;
 	touching_road = FALSE;
 
-	// set the on_chains flag to FALSE for now (won't implement chains at first)
-	on_chains = FALSE;
+	// Crane state.  PositionCarAbovePiece puts the car back on the chains; until
+	// then it is simply not hanging.
+	// swing_from_left is deliberately not cleared here: it records which side the
+	// car went off, and UpdateOffMapStatus set it well before this reset runs.
+	car_on_chains_countdown = 0;
+	swing_magnitude = 0;
+	required_raise_height = 0;
+	chain_fire_pressed = FALSE;
+	chain_frame_phase = 0.0;
+	chain_frame_fraction = 0;
 
 	// calculated
 	player_distance_off_road = 0;
@@ -484,6 +530,13 @@ void ResetPlayer (void)
 	player_x_rotation_acceleration = 0;
 	player_y_rotation_acceleration = 0;
 	player_z_rotation_acceleration = 0;
+
+	// The FloatV2 state is a copy of these globals, not a view of them, so it
+	// has to be re-seeded — otherwise the step immediately overwrites the reset
+	// position with its own and the car never actually moves. Callers reposition
+	// the car after this returns; the seed happens on the next step, so it picks
+	// up the final position.
+	scr::gFloatV2NeedsSeed = true;
 	return;
 	}
 
@@ -537,8 +590,14 @@ void CarBehaviour (DWORD input,
 		}
 
 
+	// off_track_count counts physics steps, and OFF_TRACK_LIMIT is in Amiga
+	// 50Hz frames, so scale it when FloatV2 is running at some other rate.
+	long off_track_limit = OFF_TRACK_LIMIT;
+	if (scr::gUseFloatV2Physics && (scr::gFloatV2Dt > 0.0))
+		off_track_limit = lround(OFF_TRACK_LIMIT * (0.02 / scr::gFloatV2Dt));
+
 	// reset player and control action replay as required
-	if ((off_track_count > OFF_TRACK_LIMIT) ||
+	if ((off_track_count > off_track_limit) ||
 	    (bNewGame) ||
 		(ReplayRequested))
 		{
@@ -551,15 +610,19 @@ void CarBehaviour (DWORD input,
 			ReplayFinished = FALSE;
 			}
 
-		if (off_track_count > OFF_TRACK_LIMIT)
+		// PositionCarAbovePiece puts the car back on the crane, and reads
+		// drop_start_done to tell a start-of-race drop start (from high up, on a
+		// timer) from a re-lift after going off the track (from just above the road,
+		// waiting for fire).  So it has to be right before the car is positioned.
+		if (off_track_count > off_track_limit)
 			{
 			PositionCarAbovePiece(player_current_piece);
 			}
 		else
 			{
+			drop_start_done = FALSE;
 			PositionCarAbovePiece(PlayersStartPiece);
 			}
-		drop_start_done = FALSE;
 
 		if (bNewGame)
 			{
@@ -615,7 +678,9 @@ void CarBehaviour (DWORD input,
 	CarMovement();
 	UpdateEngineRevs();
 
-	if (touching_road) drop_start_done = TRUE;	// Amiga StuntCarRacer does this differently
+	// drop_start_done used to be set here, on first contact with the road, because
+	// there was no crane to set it.  LiftCarOntoTrack now sets it where the Amiga
+	// did, at car.off.chains - the moment the chains let go.
 
 
 	// output player values for use by functions that draw the world
@@ -836,12 +901,24 @@ static void CarControl (DWORD input)
 	}
 #endif
 	left_right_value = 0;
-	if ((touching_road) && (! on_chains))
+	if (touching_road)
 		{
-		if (left)
-			left_right_value = -15;
-		if (right)
-			left_right_value = 15;
+		if (ON_CHAINS)
+			{
+			// car.control (StuntCarRacer.s:10578) tests the countdown *after*
+			// loading it into d0 and never reloads it, so while the car is on the
+			// chains the countdown itself is what reaches left.right.value.  Odd,
+			// but the FloatV2 reference kept it (PhysicsFloatV2.cs:829), so it is
+			// part of how the car settles as it is lowered.
+			left_right_value = static_cast<signed char>(car_on_chains_countdown);
+			}
+		else
+			{
+			if (left)
+				left_right_value = -15;
+			if (right)
+				left_right_value = 15;
+			}
 		}
 
 	long boost_flag;	// active low
@@ -850,7 +927,9 @@ static void CarControl (DWORD input)
 	else
 		boost_flag = TRUE;
 
-	if ((player_z_speed < 120*256) && (! on_chains) && (NOT_WRECKED))
+	chain_fire_pressed = (boost ? TRUE : FALSE);
+
+	if ((player_z_speed < 120*256) && (! ON_CHAINS) && (NOT_WRECKED))
 		{
 		if (accelerate)
 			{
@@ -961,6 +1040,11 @@ static void CarMovement (void)
 		long dbg_afl = front_left_actual_height, dbg_afr = front_right_actual_height;
 		long dbg_ar = rear_actual_height;
 
+		// The crane sits inside CarCollisionDetection on the Amiga, which FloatV2
+		// replaces, so it has to be driven from here instead. It feeds its lift
+		// through car_collision_y_acceleration, which the step takes as an input.
+		LiftCarOntoTrackFloatV2(scr::gFloatV2Dt);
+
 		scr::FloatV2_RunStep(in, scr::gFloatV2Dt);
 
 		// FloatV2 replaces CarCollisionDetection, so the landing thump that
@@ -1046,6 +1130,11 @@ static void CarMovement (void)
 				   (long)Track[player_current_piece].numSegments);
 			fflush(stdout);
 			}
+
+		// The off-map bookkeeping is not part of the physics step, but it has
+		// to run every frame in both paths: it drives the off-road sound and
+		// the crane-back-onto-the-track reset in CarBehaviour.
+		UpdateOffMapStatus();
 		return;
 		}
 
@@ -1106,8 +1195,44 @@ static void CarMovement (void)
 #endif
 
 	// 23/08/1998 - extra bit to set flags
+	UpdateOffMapStatus();
+
+
+	//VALUE1 = player_z_speed;
+	//VALUE1 = player_current_piece;
+
+	//VALUE1 = Track[player_current_piece].coords[0].y;
+	//long temp = Track[player_current_piece].numSegments;
+	//VALUE2 = Track[player_current_piece].coords[(temp*4)].y;
+
+//	fprintf(out, "------------------------------------------------------------\n");
+	return;
+	}
+
+
+/*	======================================================================================= */
+/*	Function:		UpdateOffMapStatus														*/
+/*																							*/
+/*	Description:	Flag whether the car has left the track entirely, and count how long	*/
+/*					it has been down there so CarBehaviour can crane it back on.			*/
+/*	======================================================================================= */
+
+static void UpdateOffMapStatus (void)
+	{
 	if (player_distance_off_road >= (256-ROAD_WIDTH/2))
 		{
+		if (off_map_status == 0)
+			{
+			// Remember which side it went off, so the crane picks it up from there
+			// (set.road.centre.values, StuntCarRacer.s:13478, records this the frame
+			// the car first leaves the map).
+			long x_offset = players_road_x_position - (ROAD_WIDTH/2);
+			if (Track[player_current_piece].oppositeDirection)
+				x_offset = -x_offset;
+
+			swing_from_left = (x_offset < 0 ? TRUE : FALSE);
+			}
+
 		off_map_status = 0x80;
 		}
 	else
@@ -1122,17 +1247,6 @@ static void CarMovement (void)
 		off_track_count++;
 		smaller_limit_required = TRUE;
 		}
-
-
-	//VALUE1 = player_z_speed;
-	//VALUE1 = player_current_piece;
-
-	//VALUE1 = Track[player_current_piece].coords[0].y;
-	//long temp = Track[player_current_piece].numSegments;
-	//VALUE2 = Track[player_current_piece].coords[(temp*4)].y;
-
-//	fprintf(out, "------------------------------------------------------------\n");
-	return;
 	}
 
 
@@ -1356,6 +1470,13 @@ static void CalculateRoadWheelHeights (void)
 	COORD_3D wheel_pos[NUM_WHEEL_POSITIONS];
 
 	at_side_byte = 0;
+
+	// Amiga StuntCarRacer cleared which.side.byte at the end of draw.world, which on that
+	// machine was also once per physics step.  Here the two run at different rates, so it
+	// has to be cleared by whoever recomputes it - otherwise every render frame between
+	// two physics steps sees 0 and the sparks blink out.  (The FloatV2 path does the same
+	// thing for itself, Physics_FloatV2.cpp:378.)
+	which_side_byte = 0;
 
 	// create array of wheel world x/z positions
 	wheel_pos[FRONT_LEFT].x = front_left_wheel_x_offset + player_x;
@@ -2294,7 +2415,7 @@ static void CarCollisionDetection (void)
 
 	touching_road = (average_amount_below_road != 0 ? TRUE : FALSE);
 
-	if ((! touching_road) && (! on_chains))
+	if ((! touching_road) && (! ON_CHAINS))
 		{
 		// get angle in Amiga StuntCarRacer format (i.e. correct sign)
 		long angle = (player_x_angle < (_180_DEGREES) ? (player_x_angle) :
@@ -2321,7 +2442,7 @@ static void CarCollisionDetection (void)
 		}
 
 
-	// following function won't do anything at first
+	// The legacy path is one physics step per Amiga frame.
 	LiftCarOntoTrack();
 
 	car_to_road_collision_z_acceleration = car_collision_z_acceleration;
@@ -2605,9 +2726,176 @@ static void CalculateInclinationSinCos (long inclination_in,
 	}
 
 
+/*	======================================================================================= */
+/*	Function:		LiftCarOntoTrack														*/
+/*																							*/
+/*	Description:	The crane.  Transcribed from Amiga StuntCarRacer's						*/
+/*					lift.car.onto.track (Reference only/StuntCarRacer.s:7869),				*/
+/*					raise.car.off.ground (:7989) and swing.car (:8012).						*/
+/*																							*/
+/*					The car does not oscillate on the chains.  It hangs rolled to one		*/
+/*					side, the roll decays, and then it hangs there for a random number		*/
+/*					of frames before being let go - which is why no two drop starts are		*/
+/*					timed alike.															*/
+/*	======================================================================================= */
+
+	// players.smaller.y (StuntCarRacer.s:13391).  player_y is the Amiga's players.world.y
+	// unchanged - both take the wheel heights as world.y >> 8 - so this is the Amiga's
+	// shift as well.  It puts the height into the same units as required_raise_height,
+	// which is (road height >> 2).
+static long PlayersSmallerY (void)
+	{
+	return (player_y >> 11);
+	}
+
+
+	// A height servo pulling the car up to required_raise_height + (amount << 8).
+	// The return value is the Amiga's signed byte result: only stage 1 looks at it,
+	// to decide the crane has taken hold.
+static long RaiseCarOffGround (long amount)
+	{
+	long d3 = static_cast<int16_t>(PlayersSmallerY() - required_raise_height - (amount << 8));
+
+	long d0 = (d3 >> 3) - 256;
+	if (d0 < -512) d0 = -512;
+
+	car_collision_y_acceleration -= d0;
+
+	// lsr.w #8 and then a byte add, so this is the unsigned top byte plus 2
+	return static_cast<signed char>(((static_cast<unsigned long>(d3) & 0xffff) >> 8) + 2);
+	}
+
+
+#define	SWING_REDUCTION		238		// REDUCTION, StuntCarRacer.s:29
+
+	// Decays the roll towards +/-16 (swing_magnitude's high byte) when adjust is -1,
+	// and writes the resulting roll angle.  Returns TRUE once the roll has settled.
+static long SwingCar (long adjust)
+	{
+	long target = 16;					// d4
+
+	if (swing_from_left)
+		{
+		adjust = -adjust;
+		target = -16;
+		}
+
+	long step = ((adjust << 8) * SWING_REDUCTION) >> 8;
+
+	// players.x.offset.from.road.centre, from set.road.centre.values (StuntCarRacer.s:13452)
+	long x_offset = players_road_x_position - (ROAD_WIDTH/2);
+	if (Track[player_current_piece].oppositeDirection)
+		x_offset = -x_offset;
+
+	if (static_cast<signed char>(swing_magnitude >> 8) != target)
+		swing_magnitude = static_cast<int16_t>(swing_magnitude + step);
+
+	player_z_angle = ((swing_magnitude - (x_offset << 5)) & (MAX_ANGLE - 1));
+
+	overall_difference_below_road = 0;
+
+	return (static_cast<signed char>(swing_magnitude >> 8) == target ? TRUE : FALSE);
+	}
+
+
+	// One Amiga frame of the crane.  Called once per frame in both physics paths -
+	// the lift it writes into car_collision_y_acceleration is a whole frame's impulse
+	// (FloatV2 divides those by dtRatio precisely so that one step delivers the lot),
+	// so running it per physics step would multiply the lift by the step count.
 static void LiftCarOntoTrack (void)
 	{
-	return;
+	long d1 = car_on_chains_countdown;
+
+	if (d1 == 0)
+		return;								// car.not.on.chains
+
+	if (d1 >= 230)
+		{
+		// Being picked up: hold the full swing, to whichever side the car left the road.
+		// (The Amiga also syncs the side with the other machine here, coll1.sub2.sub3,
+		// which has no equivalent in this port - there is no link-up.)
+		swing_magnitude = (swing_from_left ? -(44 << 8) : (44 << 8));
+
+		--car_on_chains_countdown;
+		return;
+		}
+
+	if (d1 == 229)
+		{
+		// lift.car.stage1
+		SwingCar(0);
+
+		if (RaiseCarOffGround(3) >= 0)
+			--car_on_chains_countdown;
+		return;
+		}
+
+	if (d1 == 228)
+		{
+		// lift.car.stage2 - stays here, no countdown, while the roll decays
+		RaiseCarOffGround(4);
+
+		if (! SwingCar(-1))
+			return;
+
+		// Settled.  The hang before the drop is random: 160..191, released once the
+		// byte reads positive again, so 33..64 Amiga frames.  (The Amiga used a fixed
+		// 0x8c in practice mode; this port has no practice mode.)
+		car_on_chains_countdown = 160 + (rand() & 0x1f);
+		return;
+		}
+
+	// lift.car.stage3
+	SwingCar(0);
+	RaiseCarOffGround(2);
+
+	chain_frame_fraction += 238;
+	long fourteen = ((chain_frame_fraction <= 255) ? -1 : 0);
+	chain_frame_fraction &= 0xff;
+
+	if (fourteen == 0)
+		{
+		// not allowed to reach zero here - that would read as "off the chains"
+		if (--car_on_chains_countdown == 0)
+			++car_on_chains_countdown;
+		}
+
+	if (! drop_start_done)
+		{
+		// The drop start itself is on the random timer.
+		if (static_cast<signed char>(car_on_chains_countdown) < 0)
+			return;
+		}
+	else
+		{
+		// Every later lift is held until fire is pressed.
+		if (! chain_fire_pressed)
+			return;
+		}
+
+	// car.off.chains
+	car_on_chains_countdown = 0;
+	off_map_status = 0;
+
+	// The car only wants a drop start at the start of the race.
+	drop_start_done = TRUE;
+	}
+
+
+	// Drives the crane from the FloatV2 step, which runs at some other rate.
+static void LiftCarOntoTrackFloatV2 (double dt)
+	{
+	if (! ON_CHAINS)
+		return;
+
+	const double BaseDt = 0.1;			// one Amiga frame, as in Physics_FloatV2.cpp
+
+	chain_frame_phase += (dt / BaseDt);
+	if (chain_frame_phase >= 0.999999999)
+		{
+		chain_frame_phase -= 1.0;
+		LiftCarOntoTrack();
+		}
 	}
 
 
@@ -2805,7 +3093,14 @@ void CopyLegacyRoadStateToFloatV2 (PhysicsStateF& s)
 	s.RoadCushionValue      = static_cast<uint8_t>(road_cushion_value);
 	s.FourteenFramesElapsed = static_cast<uint8_t>(fourteen_frames_elapsed);
 	s.OffMapStatus          = static_cast<uint8_t>(off_map_status);
-	s.CarOnChainsCountdown  = static_cast<uint8_t>(on_chains);
+	s.CarOnChainsCountdown  = static_cast<uint8_t>(car_on_chains_countdown);
+
+	// While the crane has the car, swing.car owns the roll angle outright - it is
+	// written, not integrated - so it has to be pushed in rather than left to the
+	// step's own rotation.
+	if (car_on_chains_countdown != 0)
+		s.ZAngle = static_cast<double>(FV2_ToSignedAngle(player_z_angle));
+
 	s.RoadID                = static_cast<uint8_t>(TrackID);
 	s.EnginePower           = FV2_SwapEnginePower(engine_power);
 	s.BoostUnitValue        = static_cast<uint8_t>(boost_unit_value);
@@ -2874,7 +3169,7 @@ void CopyLegacyToFloatV2 (PhysicsStateF& s)
 	s.Damaged          = static_cast<uint8_t>(damaged);
 	s.GroundedCount    = static_cast<uint8_t>(grounded_count);
 	s.FourteenFramesElapsed = static_cast<uint8_t>(fourteen_frames_elapsed);
-	s.CarOnChainsCountdown  = static_cast<uint8_t>(on_chains);
+	s.CarOnChainsCountdown  = static_cast<uint8_t>(car_on_chains_countdown);
 	s.RoadID           = static_cast<uint8_t>(TrackID);
 	s.IsSuperLeague    = bSuperLeague;
 
@@ -3538,14 +3833,14 @@ static void ReduceWorldAcceleration (void)
 
 	factor = 1;		// set maximum reduction factor
 
-	if ((touching_road) || (on_chains))
+	if ((touching_road) || (ON_CHAINS))
 		{
 		amount = abs(car_to_road_collision_z_acceleration >> 8);
 
-		if ((amount >= 3) || (off_map_status != 0) || (WRECKED) || (on_chains))
+		if ((amount >= 3) || (off_map_status != 0) || (WRECKED) || (ON_CHAINS))
 			{
 			// collision_z_acceleration large, off map, wrecked or on chains
-			if ((WRECKED) || (on_chains))
+			if ((WRECKED) || (ON_CHAINS))
 				factor = 3;		// set medium reduction factor
 
 			amount = 0x6000;
@@ -4130,8 +4425,33 @@ static void PositionCarAbovePiece (long piece)
 	// convert the result to PC StuntCarRacer magnitude
 	height = ((height / PC_FACTOR) >> (LOG_PRECISION-3));
 
-	height = (height + 0xc00) * 256;
-	player_y = height;
+	/*
+	 * Then the tail of set.road.position.values (StuntCarRacer.s:13760).
+	 *
+	 * The car goes back on the crane's chains, and where it starts from depends on
+	 * which kind of lift this is.  The drop start at the beginning of a race starts
+	 * from a fixed height right up in the air; a re-lift after going off the track
+	 * starts from just above the road.  required_raise_height is the height the
+	 * crane holds it at either way, and is in players_smaller_y units.
+	 */
+	if (! drop_start_done)
+		{
+		player_y = 0x100000;					// players.world.y = 16 << 16
+		car_on_chains_countdown = 240;
+		}
+	else
+		{
+		// (rear.road.height << 9) + $180000.  The doubling is not a typo: it is what
+		// makes this height come out exactly at the crane's hold height, i.e. what
+		// makes stage 1's raise.car.off.ground(3) return zero on the first frame.
+		player_y = (height + 0xc00) * 512;
+		car_on_chains_countdown = 230;
+		}
+
+	required_raise_height = (height >> 2);
+
+	swing_magnitude = 0;
+	chain_frame_phase = 0.0;
 #if defined(DEBUG) || defined(_DEBUG)
 	fprintf(out, "PositionCarAbovePiece player_y 0x%x\n", player_y);
 #endif
@@ -4163,11 +4483,16 @@ static void PositionCarAbovePiece (long piece)
 	 * Shift player in x direction by 160.
 	 *
 	 * This is actually x = 160, z = 0 being rotated about the y axis and then added to the player x and z.
+	 *
+	 * The side is whichever one the car left the road on (swing_from_left), so the
+	 * crane picks it up where it went off rather than always from the right.
 	 */
+	long side = (swing_from_left ? -160 : 160);
+
 	short sin_y, cos_y;
 	GetSinCos(player_y_angle, &sin_y, &cos_y);
-	player_x += (160 * static_cast<long>(cos_y));
-	player_z -= (160 * static_cast<long>(sin_y));
+	player_x += (side * static_cast<long>(cos_y));
+	player_z -= (side * static_cast<long>(sin_y));
 }
 
 
@@ -4511,20 +4836,335 @@ long height;	// Not used
 
 
 /*	======================================================================================= */
-/*	Function:		DrawOtherGraphics														*/
+/*	Function:		DrawSceneParticles														*/
 /*																							*/
 /*	Description:				*/
 /*	======================================================================================= */
 
-void DrawOtherGraphics( void )
+/*	The sparks and dust are plotted into the Amiga's scene bitmap, so the cockpit is drawn
+	over the top of them.  Hence this runs before DrawCockpit, rather than at the end of
+	the frame with the rest of the overlays.									*/
+void DrawSceneParticles( void )
 {
+#ifdef linux
+	// DrawFilledRectangle plots straight into GL in screen space, so it needs the flat,
+	// untextured, unculled state the 2D overlays run in.  Drawing after DrawCockpit used
+	// to leave that set up for us; here we are still in the middle of the world pass, with
+	// the track's texturing and back-face culling live, and the rectangles vanish.
+	const GLboolean had_texture = glIsEnabled(GL_TEXTURE_2D);
+	const GLboolean had_cull    = glIsEnabled(GL_CULL_FACE);
+	const GLboolean had_blend   = glIsEnabled(GL_BLEND);
+	const GLboolean had_depth   = glIsEnabled(GL_DEPTH_TEST);
+	glDisable(GL_TEXTURE_2D);
+	glDisable(GL_CULL_FACE);
+	glDisable(GL_BLEND);
+	glDisable(GL_DEPTH_TEST);
+#endif
+
 	// Draw other graphics that are done as part of 'draw.world'
-	if ((!on_chains) && (off_map_status != 0))
-		DrawDustClouds();
+	bool emit_dust = false;
+	if ((!ON_CHAINS) && (off_map_status != 0))
+		emit_dust = DrawDustClouds();
 
-	DrawSparks();
+	const bool emit_sparks = DrawSparks();
 
-	which_side_byte = 0;	// Amiga StuntCarRacer cleared this in update.wheel.positions
+	// One update for the whole table, whatever the two above decided: particles already
+	// in flight finish their arc even once nothing is throwing new ones.
+	UpdateSparks(emit_sparks, emit_dust);
+
+	// Consume the world tick (the dust puffs change shape on it)
+	if (bWorldStepDue)
+	{
+		++spark_step_count;
+		bWorldStepDue = FALSE;
+	}
+
+#ifdef linux
+	if (had_texture) glEnable(GL_TEXTURE_2D);
+	if (had_cull)    glEnable(GL_CULL_FACE);
+	if (had_blend)   glEnable(GL_BLEND);
+	if (had_depth)   glEnable(GL_DEPTH_TEST);
+#endif
+}
+
+/*	======================================================================================= */
+/*	Sparks and dust clouds																	*/
+/*																							*/
+/*	Description:	Port of the Amiga particle effect ("Reference only/StuntCarRacer.s",		*/
+/*					draw.sparks :14283, draw.dust.clouds :14248 and the shared				*/
+/*					sparks.or.clouds :14340).  Both effects drive one table: yellow sparks	*/
+/*					when a wheel is scraping the road edge, grey-brown dust puffs when the	*/
+/*					car is off the map.  draw.sparks bails out when off.map.status says so,	*/
+/*					so only ever one of the two is live.									*/
+/*																							*/
+/*					The particles live in the Amiga's 256x128 playfield, plotted straight	*/
+/*					into the scene bitmap, so they map onto our cockpit window rather than	*/
+/*					the whole screen (see SCR_WINDOW_* in 3D_Engine.h).						*/
+/*	======================================================================================= */
+
+// draw.sparks uses d1 = 31, draw.dust.clouds d1 = 15 (its "machine" branch is dead code -
+// machine is only ever written as 0, StuntCarRacer.s:4113 and :9943).
+#define	MAX_SPARKS		32
+#define	NUM_DUST_CLOUDS	16
+
+// TAB.1c380 / TAB.1c3c0 (position) and TAB.1c400 / TAB.1c440 (per-step delta).
+//
+// The Amiga integrated these as integers once per race.loop pass, because that was also its
+// draw rate.  We draw at the display's refresh instead, so they are kept in floating point
+// and integrated against a fraction of a world step: same parabola, same flight time, just
+// sampled finely enough to read as a trajectory rather than as eight jumps.  Velocities are
+// still in the original per-world-step units.
+static double spark_x[MAX_SPARKS], spark_y[MAX_SPARKS];
+static double spark_dx[MAX_SPARKS], spark_dy[MAX_SPARKS];
+
+// Which of the two effects each slot was thrown as.  The Amiga could switch the whole table
+// from sparks to clouds between one frame and the next, because it wiped it on the way in
+// and out of the two states; we let particles outlive the thing that threw them, so a slot
+// has to remember what it is.
+static bool spark_is_dust[MAX_SPARKS];
+
+// ferocity.of.sparks.or.clouds - the clamped speed, which sets how fast particles are thrown.
+static long spark_ferocity = 0;
+
+// A y of 128 or more means "not in flight"; initialise.sparks.table parks them all at 212.
+#define	SPARK_DEAD_Y	212
+
+static void InitialiseSparksTable (void)
+{
+	for (long i = 0; i < MAX_SPARKS; i++)
+		spark_y[i] = SPARK_DEAD_Y;
+}
+
+/*	Convert a rectangle of Amiga playfield pixels to device coordinates and fill it.
+	The cockpit window subtends exactly the playfield's field of view, so playfield
+	(0,0)..(256,128) covers the window opening.									*/
+static void FillPlayfieldRect (long px, long py, long w, long h, long colour_index)
+{
+long screen_width, screen_height;
+
+	// The Amiga blitted into a 256x128 bitmap, so anything hanging over an edge was simply
+	// cut off.  Clip the same way, or a puff thrown near the edge spills over the cockpit.
+	if (px < 0) { w += px; px = 0; }
+	if (py < 0) { h += py; py = 0; }
+	if (px + w > AMIGA_PLAYFIELD_WIDTH)  w = AMIGA_PLAYFIELD_WIDTH  - px;
+	if (py + h > AMIGA_PLAYFIELD_HEIGHT) h = AMIGA_PLAYFIELD_HEIGHT - py;
+	if ((w <= 0) || (h <= 0)) return;
+
+	GetScreenDimensions(&screen_width, &screen_height);
+
+	const float base_width  = wideScreen ? static_cast<float>(BASE_WIDTH_WIDESCREEN)
+										 : static_cast<float>(BASE_WIDTH_STANDARD);
+	const float scaleX = static_cast<float>(screen_width) / base_width;
+	const float scaleY = static_cast<float>(screen_height) / static_cast<float>(BASE_HEIGHT);
+
+	// The whole cockpit panel shifts right in widescreen (Car.cpp DrawCockpit)
+	const float left = SCR_WINDOW_LEFT + (wideScreen ? COCKPIT_WIDESCREEN_OFFSET * 2.0f : 0.0f);
+
+	const float sx = SCR_WINDOW_WIDTH  / static_cast<float>(AMIGA_PLAYFIELD_WIDTH);
+	const float sy = SCR_WINDOW_HEIGHT / static_cast<float>(AMIGA_PLAYFIELD_HEIGHT);
+
+	const float x1 = (left + px * sx) * scaleX;
+	const float x2 = (left + (px + w) * sx) * scaleX;
+	const float y1 = (SCR_WINDOW_TOP + py * sy) * scaleY;
+	const float y2 = (SCR_WINDOW_TOP + (py + h) * sy) * scaleY;
+
+	DrawFilledRectangle(static_cast<long>(x1), static_cast<long>(y1),
+						static_cast<long>(x2), static_cast<long>(y2),
+						SCRGB(SCR_BASE_COLOUR + colour_index));
+}
+
+/*	One dust puff (draw.spark.sub :14490 -> draw.spark.sub2 :26964).  The Amiga blitted one
+	of eight cloud bitmaps from its graphics bank; we have no copy of that art, so the puff
+	is drawn as a blob of the same size (graphic.info entries 29..36 give 48-80 pixels wide
+	by 28-38 lines) in the ground's own colours.										*/
+static void DrawDustPuff (long index, long x, long y)
+{
+	// TAB.60fac - which of the eight cloud shapes this particle shows this frame
+	static const unsigned char shape_order[16] = {3,6,7,2,1,5,0,4,0,5,1,2,7,6,2,7};
+	// TAB.60f9c - the x offset the blit applies per shape
+	static const long shape_x_offset[8] = {0x20,0x20,0x20,0x28,0x18,0x20,0x20,0x20};
+	// graphic.info, entries 29..36: (words wide - 1, lines high - 1)
+	static const long shape_width[8]  = {64,64,64,80,48,64,64,64};
+	static const long shape_height[8] = {34,31,38,36,28,34,34,36};
+
+	const long t = shape_order[(index + spark_step_count) & 15];
+
+	// draw.spark.sub adds 32/16, draw.spark.sub2 then takes 2 words / 16 lines back off
+	const long left = x - shape_x_offset[t];
+	const long top  = y;
+	const long w    = shape_width[t];
+	const long h    = shape_height[t];
+
+	// The original art is a billowing white cloud - several overlapping lobes, shaded grey
+	// underneath, with black flecks of grit thrown up with it.  We have no copy of the
+	// bitmaps, so the silhouette is built from five ellipses (in units of the shape's own
+	// width and height) and filled row by row.  The lobe layout is jittered per shape so
+	// the eight frames do not all read as the same blob.
+	struct Lobe { float cx, cy, rx, ry; };
+	static const Lobe lobes[8][5] =
+		{
+		{{0.30f,0.55f,0.30f,0.42f},{0.52f,0.34f,0.26f,0.32f},{0.72f,0.52f,0.28f,0.42f},{0.42f,0.72f,0.26f,0.28f},{0.62f,0.74f,0.24f,0.26f}},
+		{{0.26f,0.58f,0.26f,0.40f},{0.46f,0.32f,0.28f,0.30f},{0.70f,0.50f,0.30f,0.44f},{0.36f,0.76f,0.24f,0.24f},{0.60f,0.70f,0.26f,0.30f}},
+		{{0.32f,0.48f,0.32f,0.44f},{0.56f,0.30f,0.24f,0.28f},{0.74f,0.56f,0.26f,0.40f},{0.46f,0.74f,0.28f,0.26f},{0.66f,0.76f,0.22f,0.24f}},
+		{{0.24f,0.60f,0.24f,0.36f},{0.44f,0.36f,0.26f,0.34f},{0.66f,0.46f,0.28f,0.42f},{0.82f,0.66f,0.18f,0.30f},{0.50f,0.76f,0.30f,0.24f}},
+		{{0.34f,0.52f,0.34f,0.44f},{0.58f,0.36f,0.28f,0.34f},{0.70f,0.62f,0.28f,0.36f},{0.44f,0.76f,0.26f,0.24f},{0.28f,0.34f,0.22f,0.26f}},
+		{{0.28f,0.54f,0.28f,0.42f},{0.50f,0.30f,0.30f,0.30f},{0.74f,0.54f,0.26f,0.40f},{0.40f,0.74f,0.28f,0.26f},{0.64f,0.76f,0.24f,0.24f}},
+		{{0.30f,0.44f,0.28f,0.40f},{0.54f,0.60f,0.30f,0.38f},{0.74f,0.40f,0.24f,0.36f},{0.42f,0.78f,0.24f,0.22f},{0.68f,0.72f,0.26f,0.26f}},
+		{{0.26f,0.50f,0.26f,0.44f},{0.48f,0.36f,0.28f,0.32f},{0.68f,0.56f,0.30f,0.40f},{0.36f,0.74f,0.26f,0.26f},{0.58f,0.74f,0.28f,0.26f}},
+		};
+
+	// Flecks of grit, in the same normalised space (draw.spark.sub2's clouds are speckled)
+	static const float fleck[8][2] =
+		{
+		{0.34f,0.36f},{0.58f,0.30f},{0.46f,0.52f},{0.70f,0.46f},
+		{0.30f,0.62f},{0.62f,0.66f},{0.50f,0.78f},{0.78f,0.60f},
+		};
+
+	// Two playfield lines at a time: at this size that is still smooth, and it keeps the
+	// fill count down when the whole table of sixteen puffs is up.
+	for (long row = 0; row < h; row += 2)
+		{
+		const float v = (row + 1.0f) / static_cast<float>(h);
+
+		float lo = 1.0f, hi = 0.0f;
+		for (long l = 0; l < 5; l++)
+			{
+			const Lobe &b = lobes[t][l];
+			const float dy = (v - b.cy) / b.ry;
+			if ((dy <= -1.0f) || (dy >= 1.0f)) continue;
+
+			const float half = b.rx * sqrtf(1.0f - dy*dy);
+			if (b.cx - half < lo) lo = b.cx - half;
+			if (b.cx + half > hi) hi = b.cx + half;
+			}
+		if (hi <= lo) continue;
+
+		const long rx1 = left + static_cast<long>(lo * w);
+		const long rx2 = left + static_cast<long>(hi * w);
+		const long rh  = (row + 2 <= h) ? 2 : (h - row);
+
+		// White body, grey along the shaded underside
+		FillPlayfieldRect(rx1, top + row, rx2 - rx1, rh, (v > 0.72f) ? 14 : 15);
+		}
+
+	for (long f = 0; f < 8; f++)
+		{
+		if (((index + spark_step_count + f) & 3) != 0) continue;	// only some show
+
+		const long fx = left + static_cast<long>(fleck[f][0] * w);
+		const long fy = top  + static_cast<long>(fleck[f][1] * h);
+		FillPlayfieldRect(fx, fy, 2, 1, 0);
+		}
+}
+
+/*	draw.spark :14417.  Returns true if the particle was in flight (and drawn), false if it
+	has expired - in which case it is marked dead ready for the respawn pass.			*/
+static bool DrawSpark (long index, bool dust)
+{
+const long x = static_cast<long>(spark_x[index]);
+const long y = static_cast<long>(spark_y[index]);
+
+	// The Amiga compares unsigned, so anything that has run off an edge counts as expired
+	if ((y < 1) || (y >= AMIGA_PLAYFIELD_HEIGHT) || (x < 0) || (x >= AMIGA_PLAYFIELD_WIDTH))
+		{
+		spark_y[index] = SPARK_DEAD_Y;
+		return false;
+		}
+
+	if (dust)
+		{
+		DrawDustPuff(index, x, y);
+		return true;
+		}
+
+	if (x >= 254)	// the spark is two pixels wide
+		{
+		spark_y[index] = SPARK_DEAD_Y;
+		return false;
+		}
+
+	// Two by two pixels: colour 3 (yellow) except for a colour 15 (white) top right
+	FillPlayfieldRect(x, y-1, 2, 2, 3);
+	FillPlayfieldRect(x+1, y-1, 1, 1, 15);
+
+	return true;
+}
+
+/*	sparks.or.clouds :14340 - advance and draw the whole table, and throw new particles from
+	the slots that have expired.
+
+	The Amiga only ever ran this while the effect was active, and called
+	initialise.sparks.table (parking every slot as dead) the moment it stopped - so the
+	shower vanished the instant a wheel left the edge.  It could afford that: at 8.3Hz a
+	spark only existed for a handful of frames anyway.  Here the arc is drawn properly, so
+	cutting it off mid-flight is very visible.  Emission stops with the scrape; whatever is
+	already in the air finishes its trajectory and falls off the bottom of the view.	*/
+static void UpdateSparks (bool emit_sparks, bool emit_dust)
+{
+long i;
+
+	const bool emit  = emit_sparks || emit_dust;
+	const bool dust  = emit_dust;
+	const long count = dust ? NUM_DUST_CLOUDS : MAX_SPARKS;
+
+	// How much of a world step has passed since we last drew.  Clamped so that a stall,
+	// or coming back from the menu, does not teleport every particle off the playfield.
+	static double last_time = 0.0;
+	const double now = DXUTGetTime();
+	double dt = (last_time > 0.0) ? ((now - last_time) / gWorldStepSeconds) : 0.0;
+	last_time = now;
+	if (dt < 0.0) dt = 0.0;
+	if (dt > 1.0) dt = 1.0;
+
+	// Draw at the current position, then step: gravity pulls each particle back down.
+	// Always the whole table, not just the first `count` slots - a dust cloud only uses
+	// half of them, and sparks thrown before the car went off the map are still flying.
+	for (i = MAX_SPARKS - 1; i >= 0; --i)
+		{
+		if (!DrawSpark(i, spark_is_dust[i]))
+			continue;
+
+		spark_dy[i] += 2.0 * dt;
+		spark_y[i] += spark_dy[i] * dt;
+		spark_x[i] += spark_dx[i] * dt;
+		}
+
+	if (!emit)
+		return;
+
+	// Throw a new particle from every slot that has expired
+	for (i = count - 1; i >= 0; --i)
+		{
+		if ((spark_y[i] >= 0.0) && (spark_y[i] < AMIGA_PLAYFIELD_HEIGHT))
+			continue;	// still in flight
+
+		long v = spark_ferocity >> 1;
+		if (!dust) v >>= 1;		// sparks are thrown half as hard as dust is
+		v += (rand() & 7);
+		spark_dy[i] = ~v;		// upwards, i.e. -(v+1)
+
+		long start_x;
+		if (dust)
+			{
+			// draw.spark2 :14477 - anywhere across the playfield, from just off the bottom
+			start_x = rand() & 0xff;
+			spark_x[i] = start_x;
+			spark_y[i] = (rand() & 7) + 118;
+			}
+		else
+			{
+			// ddc10 - from the middle half of the playfield, where the wheels are
+			start_x = (rand() & 0x7f) + 64;
+			spark_x[i] = start_x;
+			spark_y[i] = 119 + (rand() & 7);
+			}
+
+		// Fan out from the centre: the further from the middle, the more sideways speed
+		spark_dx[i] = (start_x - 128) >> 3;
+		spark_is_dust[i] = dust;
+
+		DrawSpark(i, dust);
+		}
 }
 
 /*	======================================================================================= */
@@ -4533,22 +5173,27 @@ void DrawOtherGraphics( void )
 /*	Description:				*/
 /*	======================================================================================= */
 
-static void DrawDustClouds (void)
+// Returns true if the car should be throwing up dust this frame.
+static bool DrawDustClouds (void)
 {
-	// currently just plays the sound effect
+	long p = abs(player_z_speed) >> 8;
+	if (p > 16) p = 16;			// set to maximum
+	spark_ferocity = p;
 
-	int p = rand();
+	p = rand();
 	p &= 0x1c;
 	p += 450;
 
 	OffRoadSoundBuffer->SetFrequency(AMIGA_PAL_HZ / p);
 
 	if (!touching_road)
-		return;
+		return false;			// airborne, so nothing to kick up
 
 //	OffRoadSoundBuffer->Stop();
 //	OffRoadSoundBuffer->SetCurrentPosition(0);
 	OffRoadSoundBuffer->Play(NULL,NULL,NULL);	// not looping
+
+	return true;
 }
 
 /*	======================================================================================= */
@@ -4557,26 +5202,25 @@ static void DrawDustClouds (void)
 /*	Description:				*/
 /*	======================================================================================= */
 
-static void DrawSparks (void)
+// Returns true if a wheel is scraping hard enough to be throwing sparks this frame.
+static bool DrawSparks (void)
 {
 int p;
-
-	// currently just plays the sound effect
 
 	//VALUE1 = distance_off_road;
 	//VALUE2 = which_side_byte;
 	if (which_side_byte) goto on_an_edge;
 
-	if (NOT_WRECKED) return;	// if car is not scraping on road
+	if (NOT_WRECKED) return false;	// if car is not scraping on road
 
 on_an_edge:
-	if (off_map_status != 0) return;	// dust clouds will be drawn instead
+	if (off_map_status != 0) return false;	// dust clouds will be drawn instead
 
 	p = abs(player_z_speed) >> 8;
-	if (p < 1) return;		// if speed is not large enough
+	if (p < 1) return false;		// if speed is not large enough
 
 	if (p > 50) p = 50;		// set to maximum
-	// ferocity.of.sparks.or.clouds = p
+	spark_ferocity = p;
 
 	p >>= 1;
 	if (p > 31) p = 31;
@@ -4589,10 +5233,12 @@ on_an_edge:
 	WreckSoundBuffer->SetFrequency(AMIGA_PAL_HZ / p);
 
 	if (!touching_road)
-		return;
+		return false;			// airborne, so nothing is scraping
 
 //	WreckSoundBuffer->SetCurrentPosition(0);
 	WreckSoundBuffer->Play(NULL,NULL,NULL);	// not looping
+
+	return true;
 }
 
 /*	======================================================================================= */
@@ -4667,16 +5313,53 @@ bool raceFinished, raceWon;
 long lapNumber[NUM_CARS];
 static bool carOnFirstHalfOfLap[NUM_CARS] = {false, false};
 
+// Lap stopwatch.  The Amiga keeps three BCD bytes per slot - minutes, seconds and
+// hundredths (add.to.lap.time in "Reference only/StuntCarRacer.s") - and ticks them on
+// by a fixed 19 hundredths per race.loop iteration, which only reads as real time if
+// that loop runs at about 5.3Hz.  We run the world at a different (and variable) rate,
+// so the clock accumulates wall-clock seconds instead: the digits then mean what they
+// say, and lap times are comparable with a real stopwatch.
+//
+// The minute digit clamps at 9 exactly as the original does (cmpi.b #10 / bge).
+#define LAP_TIME_MAX_SECONDS	(10.0 * 60.0 - 0.01)
+
+// After crossing the line the readout freezes on the completed lap for a moment before
+// reverting to the running clock; the Amiga holds it for 27 race.loop iterations
+// (B.1bbcc, set in start.of.new.lap).
+#define LAP_TIME_HOLD_SECONDS	(3.2)
+
+double currentLapTime = 0.0;
+double lastLapTime = 0.0;
+double bestLapTime = 0.0;
+bool   bBestLapTimeSet = false;
+double lapTimeHoldRemaining = 0.0;
+
 void ResetLapData (long car)
 {
 	raceFinished = raceWon = FALSE;
 	lapNumber[car] = 0;
 	carOnFirstHalfOfLap[car] = false;
+
+	currentLapTime = lastLapTime = bestLapTime = 0.0;
+	bBestLapTimeSet = false;
+	lapTimeHoldRemaining = 0.0;
 }
 
-void UpdateLapData (void)
+void UpdateLapData (double elapsedSeconds)
 {
 	long car, current_piece, start_finish_piece = (StartLinePiece + 1 < NumTrackPieces) ? (StartLinePiece + 1) : 0;
+
+	// add.to.lap.time: the clock runs whether or not the player has started a lap yet,
+	// and is cleared on each crossing of the line (clear.three.bytes).
+	if (!raceFinished)
+	{
+		currentLapTime += elapsedSeconds;
+		if (currentLapTime > LAP_TIME_MAX_SECONDS)
+			currentLapTime = LAP_TIME_MAX_SECONDS;
+	}
+
+	if (lapTimeHoldRemaining > 0.0)
+		lapTimeHoldRemaining -= elapsedSeconds;
 
 	for (car = OPPONENT; car < NUM_CARS; car++)
 	{
@@ -4691,6 +5374,27 @@ void UpdateLapData (void)
 		{
 			carOnFirstHalfOfLap[car] = true;
 			++lapNumber[car];
+
+			// start.of.new.lap: the first crossing only starts the clock (the original
+			// skips show/copy when players.lap == 1); later ones complete a lap.
+			if (car == PLAYER)
+			{
+				if (lapNumber[PLAYER] > 1)
+				{
+					lastLapTime = currentLapTime;
+
+					// new.lap.sub3: keep it only if it beats the stored best
+					if (!bBestLapTimeSet || (lastLapTime < bestLapTime))
+					{
+						bestLapTime = lastLapTime;
+						bBestLapTimeSet = true;
+					}
+
+					lapTimeHoldRemaining = LAP_TIME_HOLD_SECONDS;
+				}
+
+				currentLapTime = 0.0;
+			}
 		}
 	}
 

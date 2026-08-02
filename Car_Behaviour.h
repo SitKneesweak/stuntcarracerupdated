@@ -63,11 +63,18 @@ extern void EngineSoundStopped (void);
 
 extern void CalculatePlayersRoadPosition (void);
 
-extern void DrawOtherGraphics (void);
+extern void DrawSceneParticles (void);
 extern void UpdateDamage (void);
 
 extern void ResetLapData (long car);
-extern void UpdateLapData (void);
+extern void UpdateLapData (double elapsedSeconds);
+
+// Lap stopwatch (see UpdateLapData).  All times are in seconds.
+extern double currentLapTime;		// clock for the lap being driven
+extern double lastLapTime;			// the lap just completed
+extern double bestLapTime;			// fastest lap so far, valid only if bBestLapTimeSet
+extern bool   bBestLapTimeSet;
+extern double lapTimeHoldRemaining;	// >0 while the readout is frozen on lastLapTime
 
 #ifdef USE_AMIGA_RECORDING
 extern void RequestGameReplay (void);

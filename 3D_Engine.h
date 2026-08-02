@@ -62,6 +62,8 @@
 //   y: COCKPIT_TOP_HEIGHT*2.4 .. COCKPIT_SIDE_HEIGHT*2.4       = 38.4 .. 367.2 (328.8 tall)
 #define	SCR_WINDOW_WIDTH	476.0f
 #define	SCR_WINDOW_HEIGHT	328.8f
+#define	SCR_WINDOW_LEFT		82.0f		// COCKPIT_TOP_X_OFFSET * 2 (add COCKPIT_WIDESCREEN_OFFSET*2
+										// in widescreen, where the whole panel shifts right)
 
 // ...and where it sits. The opening runs y 38.4 .. 367.2, so its centre is 202.8, NOT the
 // screen's 240. The Amiga always put the horizon at the centre of its playfield (z.rotate
@@ -70,11 +72,35 @@
 #define	SCR_WINDOW_TOP		38.4f		// COCKPIT_TOP_HEIGHT  * 2.4
 #define	SCR_WINDOW_CENTRE_Y	(SCR_WINDOW_TOP + SCR_WINDOW_HEIGHT * 0.5f)
 
+// The Amiga playfield the world is projected into, in pixels.  2D effects that were plotted
+// straight into it (see DrawSparks in Car_Behaviour.cpp) map onto the cockpit window above.
+#define	AMIGA_PLAYFIELD_WIDTH	256
+#define	AMIGA_PLAYFIELD_HEIGHT	128
+
 #define	AMIGA_HALF_FOV_X	22.5f	// degrees, across the cockpit window
 #define	AMIGA_HALF_FOV_Y	11.25f
 
+// Pixel aspect (width:height) of one Amiga lores pixel on a PAL screen: 320 across the 4:3
+// active width, 256 down the 4:3 active height, so (4/3)/(320/256). Slightly WIDER than
+// square. The NTSC figure is (4/3)/(320/200) = 0.8333, i.e. 1.2x taller - that one is the
+// origin of the "Amiga pixels are 1.2x tall" folklore, and it does not apply here. See the
+// diwstrt/diwstop note in 3D_Engine.cpp for why this game is PAL.
+#define	AMIGA_PAL_PIXEL_ASPECT	1.06667f
+
+// The base 640x480 space holds the Amiga's 320x200 scaled by (2.0, 2.4) - see DrawCockpit()
+// in Car.cpp - so one Amiga pixel is 1.2x taller than wide IN BASE SPACE. That is the number
+// the 3D projection has to match (gAmigaFovStretch) for the world to sit in the same space
+// as the 2D art.
+#define	AMIGA_BASE_STRETCH	1.2f
+
+// ...and this undoes it at present time, once, for the whole raster - exactly as the display
+// did on real hardware. 1/(1.2 * 1.06667) = 0.78125, so the 480-unit base presents 375 units
+// tall with 52.5 units of black above and below. Without it the base-space 1.2 leaks out as
+// final geometry and the entire picture is 28% too tall.
+#define	SCR_PRESENT_SQUASH	(1.0f / (AMIGA_BASE_STRETCH * AMIGA_PAL_PIXEL_ASPECT))
+
 extern bool  gAmigaFov;			// F toggles; see StuntCarRacer.cpp
-extern float gAmigaFovStretch;	// , and . adjust; 1.0667 = the PAL Amiga's pixel aspect
+extern float gAmigaFovStretch;	// , and . adjust; 1.2 = base space, see AMIGA_BASE_STRETCH
 
 // Half-angle tangents of the *full screen* frustum, for the current mode.
 extern void GetProjectionTangents( float *tan_half_x, float *tan_half_y );

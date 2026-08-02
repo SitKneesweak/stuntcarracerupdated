@@ -55,6 +55,22 @@
 #define HUD_DIST_X                  44.0f   // sign + 4 digits, column 6, fine.x 1 (+1)
 #define HUD_DIST_Y                 188.0f   // row 23, fine.y 4
 
+// Lap stopwatch, "M:SS.hh", from print.lap.time.  It starts at column 34 and then walks
+// the print column and fine.x about, so the pieces are not evenly spaced: minutes at
+// column 33 fine.x 6, colon at 34 fine.x 5, the two seconds digits at columns 35/36
+// fine.x 3, the point at column 37 fine.x 2, the hundredths at columns 37/38 fine.x 7.
+// The point is also lifted two scanlines (subq.b #2,print.fine.y).
+#define HUD_TIME_MINS_X            237.0f
+#define HUD_TIME_COLON_X           243.0f
+#define HUD_TIME_SECS_X            248.0f
+#define HUD_TIME_POINT_X           261.0f
+#define HUD_TIME_HUNDREDTHS_X      266.0f
+#define HUD_TIME_POINT_Y_OFFSET     -2.0f
+// Row 22 fine.y 2 for the running / just-completed lap (TAB.5e46c entry 2), row 23
+// fine.y 4 for the best lap (entry 3).
+#define HUD_TIME_Y                 178.0f
+#define HUD_BEST_TIME_Y            188.0f
+
 /*	===================== */
 /*	Structure definitions */
 /*	===================== */

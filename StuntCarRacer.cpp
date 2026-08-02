@@ -76,6 +76,17 @@ int wideScreen = 0;
 static long frameGap = DEFAULT_FRAME_GAP;
 static bool bFrameMoved = FALSE;
 
+// Latched by FrameMove whenever the legacy 50Hz/frameGap world clock ticked, and consumed
+// (cleared) by the render side.  Effects that the Amiga advanced once per race.loop pass -
+// the sparks and dust clouds - hang off this so they keep their original speed instead of
+// running at whatever the display refresh happens to be.
+bool bWorldStepDue = FALSE;
+
+// How long one of those world steps lasts.  The Amiga advanced the sparks once per step,
+// so this is the unit their velocities are expressed in; the effect integrates against it
+// to draw the same trajectory at the display's refresh rate instead of in 8.3Hz jumps.
+double gWorldStepSeconds = static_cast<double>(DEFAULT_FRAME_GAP) / 50.0;
+
 bool bShowStats = FALSE;
 bool bNewGame = FALSE;
 bool bPaused = FALSE;
@@ -356,7 +367,8 @@ void GetScreenDimensions( long *screen_width,
 /*	======================================================================================= */
 
 /*	Print the field of view the cockpit window actually ends up with, for comparison against
-	the Amiga's 45.0 x 22.5 angular degrees at its 1.067 PAL pixel aspect.										*/
+	the Amiga's 45.0 x 22.5 degrees at the 1.200 the base space is built on.  This is a
+	base-space figure: the PAL display aspect is applied later, at present time.										*/
 static void ReportFieldOfView( void )
 {
 	float tan_half_x, tan_half_y;
@@ -372,7 +384,7 @@ static void ReportFieldOfView( void )
 	const float rad_to_deg = 180.0f / 3.14159265358979323846f;
 
 	printf("Amiga FOV %s - cockpit window %.1f x %.1f degrees, stretch %.3f"
-		   "  (Amiga: 45.0 x 22.5, stretch 1.067)\n",
+		   "  (Amiga: 45.0 x 22.5, stretch 1.200)\n",
 		   gAmigaFov ? "ON" : "OFF",
 		   2.0f * atanf((SCR_WINDOW_WIDTH  * 0.5f) / focal_x) * rad_to_deg,
 		   2.0f * atanf((SCR_WINDOW_HEIGHT * 0.5f) / focal_y) * rad_to_deg,
@@ -1279,6 +1291,10 @@ static float lastFrame = 0.0f;
 
 		bOpponentStepDue = ranLegacyStep;
 
+		// Latch rather than assign: the 60fps cap above can skip whole FrameMove calls,
+		// and a tick that has not been drawn yet must not be lost.
+		if (ranLegacyStep) bWorldStepDue = TRUE;
+
 		// The drawbridge advances one animation frame per *world* step, not per
 		// render frame: on the Amiga move.draw.bridge is called once per race.loop
 		// iteration, right alongside car.movement (StuntCarRacer.s:10310), and the
@@ -1629,6 +1645,48 @@ extern long new_damage;
 extern long opponentsID;
 extern WCHAR *opponentNames[];
 
+//--------------------------------------------------------------------------------------
+// Draw one "M:SS.hh" stopwatch readout in the dashboard, following print.lap.time in
+// "Reference only/StuntCarRacer.s".  Each piece gets its own position because the
+// original walks the print column and the sub-character fine.x between them - see the
+// HUD_TIME_* constants in Car.h.  bShowHundredths false blanks the last two digits,
+// which is what the running clock does.
+//--------------------------------------------------------------------------------------
+static void DrawLapTime( CDXUTTextHelper &txtHelper, double timeSeconds, float rowY,
+						 bool bShowHundredths, float wide, float textScale, float scaleY )
+{
+	if (timeSeconds < 0.0) timeSeconds = 0.0;
+
+	long hundredths = static_cast<long>(timeSeconds * 100.0 + 0.5);
+	long mins = (hundredths / 6000) % 10;
+	long secs = (hundredths / 100) % 60;
+	long frac = hundredths % 100;
+
+	#define HUD_X(ax)	static_cast<int>((wide + (ax)) * 2.0f * textScale)
+	#define HUD_Y(ay)	static_cast<int>((ay) * 2.4f * scaleY)
+
+	txtHelper.SetInsertionPos( HUD_X(HUD_TIME_MINS_X), HUD_Y(rowY) );
+	txtHelper.DrawFormattedTextLine( L"%d", mins );
+
+	txtHelper.SetInsertionPos( HUD_X(HUD_TIME_COLON_X), HUD_Y(rowY) );
+	txtHelper.DrawTextLine( L":" );
+
+	txtHelper.SetInsertionPos( HUD_X(HUD_TIME_SECS_X), HUD_Y(rowY) );
+	txtHelper.DrawFormattedTextLine( L"%02ld", secs );
+
+	txtHelper.SetInsertionPos( HUD_X(HUD_TIME_POINT_X), HUD_Y(rowY + HUD_TIME_POINT_Y_OFFSET) );
+	txtHelper.DrawTextLine( L"." );
+
+	if (bShowHundredths)
+	{
+		txtHelper.SetInsertionPos( HUD_X(HUD_TIME_HUNDREDTHS_X), HUD_Y(rowY) );
+		txtHelper.DrawFormattedTextLine( L"%02ld", frac );
+	}
+
+	#undef HUD_X
+	#undef HUD_Y
+}
+
 void RenderText( double fTime )
 {
     // The helper object simply helps keep track of text position, and color
@@ -1717,6 +1775,21 @@ void RenderText( double fTime )
 			long distance = CalculateOpponentsDistance();
 			txtHelper.SetInsertionPos( HUD_X(HUD_DIST_X), HUD_Y(HUD_DIST_Y) );
 			txtHelper.DrawFormattedTextLine( L"%c%04ld", (distance < 0) ? L'-' : L' ', labs(distance) );
+
+			// The stopwatch, laid out piece by piece as print.lap.time does it.  The top
+			// row runs the current lap with the hundredths blanked out (show.lap.time only
+			// prints them while B.1bbcc is counting down), and freezes on the lap just
+			// completed - hundredths and all - for a moment after crossing the line.
+			// The row below holds the best lap, once there is one.
+			{
+			bool bHolding = (lapTimeHoldRemaining > 0.0);
+			double showTime = bHolding ? lastLapTime : currentLapTime;
+
+			DrawLapTime( txtHelper, showTime, HUD_TIME_Y, bHolding, wide, textScale, scaleY );
+
+			if (bBestLapTimeSet)
+				DrawLapTime( txtHelper, bestLapTime, HUD_BEST_TIME_Y, true, wide, textScale, scaleY );
+			}
 			#undef HUD_X
 			#undef HUD_Y
 			}
@@ -1923,6 +1996,10 @@ HRESULT hr;
 				pd3dDevice->SetTransform( D3DTS_WORLD, &matWorldOpponentsCar );
 				DrawOpponentsCar(pd3dDevice);
 
+				// Sparks and dust go into the scene, so they must be drawn before the
+				// cockpit is laid over the top of it
+				if (GameMode == GAME_IN_PROGRESS) DrawSceneParticles();
+
 				if (bOutsideView)
 				{
 				// Draw Player1's Car
@@ -1939,12 +2016,22 @@ HRESULT hr;
 
 		if (GameMode == GAME_IN_PROGRESS)
 		{
-			DrawOtherGraphics();
-
 			//jsr	display.speed.bar
 			if (bFrameMoved) UpdateDamage();
 
-			UpdateLapData();
+			// The lap stopwatch runs on the wall clock rather than a step count, so feed
+			// UpdateLapData the real time since the last render frame.  A large gap means
+			// we were stalled (or came back from the menu), so it does not count.
+			{
+			static double lastLapClockT = 0.0;
+			double nowT = DXUTGetTime();
+			double lapClockElapsed = (lastLapClockT > 0.0) ? (nowT - lastLapClockT) : 0.0;
+			lastLapClockT = nowT;
+			if ((lapClockElapsed < 0.0) || (lapClockElapsed > 0.25) || bPaused)
+				lapClockElapsed = 0.0;
+
+			UpdateLapData( lapClockElapsed );
+			}
 			//jsr	display.opponents.distance
 		}
 
@@ -2906,7 +2993,14 @@ int main(int argc, const char** argv)
 	if(flags&SDL_FULLSCREEN)
 #endif
 		SDL_ShowCursor(SDL_DISABLE);
-	glViewport(screenX, screenY, screenW, screenH);
+	// The 640x480 base holds the Amiga's 320x200 at (2.0, 2.4), i.e. 1.2x taller than wide.
+	// Undo that here, once, for the whole raster - geometry and 2D art alike - and replace it
+	// with PAL's own 1.0667, exactly as the monitor did on real hardware. 200 lines were
+	// letterboxed inside PAL's 256-line display window, so the black bands are authentic too.
+	// See SCR_PRESENT_SQUASH / AMIGA_PAL_PIXEL_ASPECT in 3D_Engine.h for the derivation.
+	long viewH = static_cast<long>(screenH * SCR_PRESENT_SQUASH + 0.5f);
+	long viewY = screenY + (screenH - viewH) / 2;
+	glViewport(screenX, viewY, screenW, viewH);
 	glMatrixMode(GL_PROJECTION);
 	glLoadIdentity();
 	screenH = 480;

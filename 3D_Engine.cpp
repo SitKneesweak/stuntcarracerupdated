@@ -84,22 +84,30 @@ static long LockAngle( long opposite,
 /*					320 x 200 screen, so the original image really was stretched vertically	*/
 /*					- but only by the pixel aspect, not by the 2:1 the angles suggest.		*/
 /*																							*/
-/*					And the pixel aspect is 1.067, not the 1.2 usually quoted.  1.2 is the	*/
-/*					NTSC figure: there 320 x 200 FILLS the 4:3 screen, so the pixels come		*/
-/*					out 1.2x taller than wide.  This is a PAL game - "Reference only/		*/
+/*					The 1.2 here is a BASE-SPACE number, not a display one.  DrawCockpit()	*/
+/*					blows the Amiga's 320 x 200 art up by (2.0, 2.4) into our 640 x 480		*/
+/*					base space, so in that space an Amiga pixel is 1.2x taller than wide,	*/
+/*					and the world has to be projected the same way or the geometry and the	*/
+/*					2D art disagree.  See AMIGA_BASE_STRETCH.								*/
+/*																							*/
+/*					The DISPLAY aspect is applied once, to the whole raster, at present		*/
+/*					time - SCR_PRESENT_SQUASH, used by the glViewport call in				*/
+/*					StuntCarRacer.cpp - just as the monitor did it on real hardware.  And	*/
+/*					that aspect is PAL's, not the 1.2 usually quoted: "Reference only/		*/
 /*					StuntCarRacer.s" sets diwstrt $3c81 / diwstop $04c1, i.e. lines 60..260	*/
-/*					(200 of them) of a 256-line PAL display window, and 320 lores pixels		*/
-/*					across.  200 lines LETTERBOXED inside 256 leaves the pixel shape at		*/
-/*					PAL's own (4/3)/(320/256) = 1.0667 - a shade wider than square.			*/
-/*					1.2 over-stretched everything by 12.5%, which is visible as too-tall		*/
-/*					cars and cooling towers next to a real PAL capture.						*/
+/*					(200 of them) inside a 256-line PAL display window, 320 lores pixels		*/
+/*					across, so a pixel is (4/3)/(320/256) = 1.0667 WIDER than tall.  1.2 is	*/
+/*					the NTSC figure, where 320 x 200 fills the screen instead.				*/
+/*																							*/
+/*					Do not "fix" the vertical stretch by lowering the number below.  If the	*/
+/*					picture is too tall, the presentation squash is what is missing.			*/
 /*																							*/
 /*					Our cockpit window is 476 x 328.8, i.e. 1.4477:1, narrower than the		*/
 /*					Amiga's 1.667:1.  Forcing 45 AND 22.5 degrees into it would need a		*/
 /*					1.437x stretch - far more than the original ever had, which shows up as	*/
 /*					vertically stretched cars and a camera that feels perched on climbs.	*/
-/*					So the stretch is pinned at the authentic 1.067 and the horizontal		*/
-/*					gives way instead: the window subtends 34.2 rather than 45 degrees.		*/
+/*					So the stretch is pinned at the authentic 1.2 and the horizontal gives	*/
+/*					way instead: the window subtends 38.1 rather than 45 degrees.			*/
 /*																							*/
 /*					(Getting all three - 45, 22.5 and the pixel aspect - needs the cockpit	*/
 /*					window itself to be the Amiga's 256 x 128 rather than 238 x 137. That is	*/
@@ -108,11 +116,12 @@ static long LockAngle( long opposite,
 
 bool gAmigaFov = true;
 
-/*	Vertical:horizontal angular magnification.  1.0667 = the PAL Amiga's pixel aspect
-	(authentic), 1.0 = geometrically square, no stretch at all, 1.2 = the NTSC pixel
-	aspect this used to default to, 1.437 = the Amiga's exact 45 x 22.5 angles at the
-	cost of over-stretching.  Adjustable at runtime with , and . */
-float gAmigaFovStretch = 1.0667f;
+/*	Vertical:horizontal angular magnification, IN BASE SPACE.  1.2 = matches the (2.0, 2.4)
+	the 2D art is scaled by, which is what you want; 1.0 = geometrically square, which makes
+	the world disagree with the cockpit; 1.437 = the Amiga's exact 45 x 22.5 angles at the
+	cost of over-stretching.  The PAL display aspect is applied separately, at present time
+	- see SCR_PRESENT_SQUASH.  Adjustable at runtime with , and . */
+float gAmigaFovStretch = AMIGA_BASE_STRETCH;
 
 #ifndef SCR_DEG_TO_RAD
 #define SCR_DEG_TO_RAD(d)	((d) * 3.14159265358979323846f / 180.0f)
