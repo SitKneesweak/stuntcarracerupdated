@@ -339,6 +339,75 @@ void GetScreenDimensions( long *screen_width,
 #endif
 	}
 
+/*	======================================================================================= */
+/*	Function:		SetSceneProjection														*/
+/*																							*/
+/*	Description:	Build and install the 3D projection.  The half-angles come from			*/
+/*					GetProjectionTangents (3D_Engine.cpp), which is also what the software-	*/
+/*					projected backdrop and scenery use, so the two stay in step.			*/
+/*																							*/
+/*					The frustum is ANAMORPHIC in Amiga-FOV mode (x and y half-angles not		*/
+/*					related by the screen's aspect ratio - see GetProjectionTangents) and	*/
+/*					OFF-CENTRE: its principal point sits at the cockpit window's centre,	*/
+/*					not the screen's.  The Amiga always put the horizon at the centre of		*/
+/*					its playfield; our window's centre is 37.2 base units above the			*/
+/*					screen's, so centring on the screen dropped the horizon that far into	*/
+/*					the lower part of the window and made the camera feel perched.			*/
+/*	======================================================================================= */
+
+/*	Print the field of view the cockpit window actually ends up with, for comparison against
+	the Amiga's 45.0 x 22.5 angular degrees at its 1.067 PAL pixel aspect.										*/
+static void ReportFieldOfView( void )
+{
+	float tan_half_x, tan_half_y;
+	GetProjectionTangents(&tan_half_x, &tan_half_y);
+
+	const float base_width = wideScreen ? static_cast<float>(BASE_WIDTH_WIDESCREEN)
+										: static_cast<float>(BASE_WIDTH_STANDARD);
+
+	// Back out the full-screen frustum to the window's own subtended angles.
+	const float focal_x = (base_width  * 0.5f) / tan_half_x;
+	const float focal_y = (BASE_HEIGHT * 0.5f) / tan_half_y;
+
+	const float rad_to_deg = 180.0f / 3.14159265358979323846f;
+
+	printf("Amiga FOV %s - cockpit window %.1f x %.1f degrees, stretch %.3f"
+		   "  (Amiga: 45.0 x 22.5, stretch 1.067)\n",
+		   gAmigaFov ? "ON" : "OFF",
+		   2.0f * atanf((SCR_WINDOW_WIDTH  * 0.5f) / focal_x) * rad_to_deg,
+		   2.0f * atanf((SCR_WINDOW_HEIGHT * 0.5f) / focal_y) * rad_to_deg,
+		   focal_y / focal_x);
+	fflush(stdout);
+}
+
+void SetSceneProjection( IDirect3DDevice9 *pd3dDevice )
+{
+	float tan_half_x, tan_half_y;
+	GetProjectionTangents(&tan_half_x, &tan_half_y);
+
+	long screen_width, screen_height, centre_x, centre_y;
+	GetScreenDimensions(&screen_width, &screen_height);
+	GetProjectionCentre(&centre_x, &centre_y);
+
+	// Focal lengths in screen pixels, then the four frustum edges as the pixel distance
+	// from the principal point out to each screen edge.
+	const float zn = 0.5f;
+	const float focal_x = (screen_width  * 0.5f) / tan_half_x;
+	const float focal_y = (screen_height * 0.5f) / tan_half_y;
+
+	// b/t follow D3DXMatrixPerspectiveFovLH's flipped y (dx_linux.cpp): b is the screen
+	// TOP edge, t the screen BOTTOM one. With a centred principal point these come out
+	// as the +fh / -fh that function uses.
+	const float l = -(centre_x                  / focal_x) * zn;
+	const float r =  ((screen_width  - centre_x) / focal_x) * zn;
+	const float b =  (centre_y                  / focal_y) * zn;
+	const float t = -((screen_height - centre_y) / focal_y) * zn;
+
+	D3DXMATRIX matProj;
+	D3DXMatrixPerspectiveOffCenterLH( &matProj, l, r, b, t, zn, FURTHEST_Z );
+	pd3dDevice->SetTransform( D3DTS_PROJECTION, &matProj );
+}
+
 //--------------------------------------------------------------------------------------
 // Colours
 //--------------------------------------------------------------------------------------
@@ -498,7 +567,13 @@ static void EnforceConstantFrameRate( long max_frame_rate )
 TTF_Font *g_pFont = NULL;
 TTF_Font *g_pFontLarge = NULL;
 float GetTextScale() {
-	return 1.0f;	//TODO
+	// Must match the cockpit's scaling (DrawCockpit) so the dashboard readouts stay in
+	// their boxes at any window size.
+	long current_width, current_height;
+	GetScreenDimensions(&current_width, &current_height);
+	float base_width = wideScreen ? static_cast<float>(BASE_WIDTH_WIDESCREEN)
+								  : static_cast<float>(BASE_WIDTH_STANDARD);
+	return static_cast<float>(current_width) / base_width;
 }
 GLuint   g_pSprite = 0;	// Texture for batching text calls
 #else
@@ -655,10 +730,7 @@ HRESULT CALLBACK OnResetDevice( IDirect3DDevice9 *pd3dDevice,
 	}
 
 	// Set the projection transform (view and world are updated per frame)
-    D3DXMATRIX matProj;
-	FLOAT fAspect = pBackBufferSurfaceDesc->Width / static_cast<FLOAT>(pBackBufferSurfaceDesc->Height);
-    D3DXMatrixPerspectiveFovLH( &matProj, D3DX_PI/4, fAspect, 0.5f, FURTHEST_Z );
-    pd3dDevice->SetTransform( D3DTS_PROJECTION, &matProj );
+	SetSceneProjection( pd3dDevice );
 
     pd3dDevice->SetRenderState( D3DRS_ZENABLE,      TRUE );
     pd3dDevice->SetRenderState( D3DRS_SHADEMODE,    D3DSHADE_FLAT );
@@ -1608,27 +1680,46 @@ void RenderText( double fTime )
 		case GAME_OVER:
 			// Show car speed, damage and race details
 			const D3DSURFACE_DESC *pd3dsdBackBuffer = DXUTGetBackBufferSurfaceDesc();
-			WCHAR lapText[3] = L"  ";
 			// Output opponent's name for four seconds at race start
 			if (((DXUTGetTime() - gameStartTime) < 4.0) && (opponentsID != NO_OPPONENT))
 			{
 				txtHelper.SetInsertionPos( static_cast<int>((250+(wideScreen?80:0)) * textScale), static_cast<int>(pd3dsdBackBuffer->Height-15*20*textScale) );
 				txtHelper.DrawFormattedTextLine( L"Opponent: " STRING, opponentNames[opponentsID] );
 			}
-			txtHelper.SetInsertionPos( static_cast<int>((2+(wideScreen?80:0)) * textScale), static_cast<int>(pd3dsdBackBuffer->Height-15*2*textScale) );
-			if (lapNumber[PLAYER] > 0)
-				StringCchPrintf( lapText, 3, L"%d", lapNumber[PLAYER] );
 			txtHelper.SetForegroundColor( D3DXCOLOR( 0.0f, 0.0f, 0.0f, 1.0f ) );
-			
-			// Position text using base 800x480 coordinates, then scale
-			float base_height = static_cast<float>(BASE_HEIGHT);
-		float scaleY = static_cast<float>(pd3dsdBackBuffer->Height) / base_height;
-		
-		// Boost text - positioned in top dashboard box
-		txtHelper.SetInsertionPos( static_cast<int>((88+(wideScreen?80:0)) * textScale), static_cast<int>((BASE_HEIGHT - 48.0f) * scaleY) );
-		txtHelper.DrawFormattedTextLine( L"L" STRING L"       B%02d", lapText, boostReserve );			// Distance text - positioned in bottom dashboard box
-			txtHelper.SetInsertionPos( static_cast<int>((84+(wideScreen?80:0)) * textScale), static_cast<int>((BASE_HEIGHT - 25.0f) * scaleY) );
-			txtHelper.DrawFormattedTextLine( L"        %+05d", CalculateOpponentsDistance() );
+
+			// The dashboard readouts sit in the four grey boxes of the cockpit bitmap, which
+			// is 320x200 art blown up by 2 horizontally and 2.4 vertically.  Each field is
+			// placed at the exact spot the Amiga prints it (print.lap.boost.text, boost.print
+			// and display.opponents.distance in "Reference only/StuntCarRacer.s"), converted
+			// from its column/row + fine.x/fine.y to 320x200 pixels.  They have to be drawn
+			// individually - the original nudges each field by a different sub-character
+			// offset, so no single padded string lines them all up.
+			{
+			float scaleY = static_cast<float>(pd3dsdBackBuffer->Height) / static_cast<float>(BASE_HEIGHT);
+			float wide = wideScreen ? COCKPIT_WIDESCREEN_OFFSET : 0.0f;
+			#define HUD_X(ax)	static_cast<int>((wide + (ax)) * 2.0f * textScale)
+			#define HUD_Y(ay)	static_cast<int>((ay) * 2.4f * scaleY)
+
+			txtHelper.SetInsertionPos( HUD_X(HUD_LAP_LABEL_X), HUD_Y(HUD_TOP_Y) );
+			txtHelper.DrawTextLine( L"L" );
+			if (lapNumber[PLAYER] > 0)
+			{
+				txtHelper.SetInsertionPos( HUD_X(HUD_LAP_VALUE_X), HUD_Y(HUD_TOP_Y) );
+				txtHelper.DrawFormattedTextLine( L"%d", lapNumber[PLAYER] );
+			}
+			txtHelper.SetInsertionPos( HUD_X(HUD_BOOST_LABEL_X), HUD_Y(HUD_TOP_Y) );
+			txtHelper.DrawTextLine( L"B" );
+			txtHelper.SetInsertionPos( HUD_X(HUD_BOOST_VALUE_X), HUD_Y(HUD_TOP_Y) );
+			txtHelper.DrawFormattedTextLine( L"%02d", boostReserve );
+
+			// Distance carries a leading '-' when the player is behind, a blank when ahead
+			long distance = CalculateOpponentsDistance();
+			txtHelper.SetInsertionPos( HUD_X(HUD_DIST_X), HUD_Y(HUD_DIST_Y) );
+			txtHelper.DrawFormattedTextLine( L"%c%04ld", (distance < 0) ? L'-' : L' ', labs(distance) );
+			#undef HUD_X
+			#undef HUD_Y
+			}
 
 			txtHelper.End();
 
@@ -1799,6 +1890,9 @@ HRESULT hr;
     // Render the scene
     if( SUCCEEDED( pd3dDevice->BeginScene() ) )
     {
+		// Cheap, and means the FOV toggle takes effect immediately
+		SetSceneProjection( pd3dDevice );
+
 		// Disable Z buffer and polygon culling, ready for DrawBackdrop()
 		pd3dDevice->SetRenderState( D3DRS_ZENABLE, FALSE );
 		pd3dDevice->SetRenderState( D3DRS_CULLMODE, D3DCULL_NONE );
@@ -2255,6 +2349,27 @@ bool process_events()
 						   scr::gUseFloatV2Physics ? "ON" : "OFF",
 						   scr::gFloatV2Dt, 1.0 / scr::gFloatV2Dt);
 					fflush(stdout);
+					break;
+
+				case SDLK_f:
+					// Toggle the Amiga field of view (see GetProjectionTangents,
+					// 3D_Engine.cpp).
+					gAmigaFov = !gAmigaFov;
+					ReportFieldOfView();
+					break;
+
+				case SDLK_COMMA:
+					// Less vertical stretch (1.0 = geometrically square).
+					gAmigaFovStretch -= 0.05f;
+					if (gAmigaFovStretch < 1.0f) gAmigaFovStretch = 1.0f;
+					ReportFieldOfView();
+					break;
+
+				case SDLK_PERIOD:
+					// More vertical stretch (1.437 = the Amiga's exact 45 x 22.5 angles).
+					gAmigaFovStretch += 0.05f;
+					if (gAmigaFovStretch > 1.45f) gAmigaFovStretch = 1.45f;
+					ReportFieldOfView();
 					break;
 
 				case SDLK_u:
@@ -2802,10 +2917,7 @@ int main(int argc, const char** argv)
 	glPixelStorei(GL_PACK_ALIGNMENT, 1);
 	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 
-    D3DXMATRIX matProj;
-	FLOAT fAspect = screenW / 480.0f;
-    D3DXMatrixPerspectiveFovLH( &matProj, D3DX_PI/4, fAspect, 0.5f, FURTHEST_Z );
-    pd3dDevice.SetTransform( D3DTS_PROJECTION, &matProj );
+	SetSceneProjection( &pd3dDevice );
 
 	glEnable(GL_DEPTH_TEST);
 	glAlphaFunc(GL_NOTEQUAL, 0);

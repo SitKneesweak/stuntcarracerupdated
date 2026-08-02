@@ -495,6 +495,7 @@ typedef struct _D3DXMATRIX {
 #endif
 
 D3DXMATRIX* D3DXMatrixPerspectiveFovLH(D3DXMATRIX *pOut, FLOAT fovy, FLOAT Aspect, FLOAT zn, FLOAT zf);
+D3DXMATRIX* D3DXMatrixPerspectiveOffCenterLH(D3DXMATRIX *pOut, FLOAT l, FLOAT r, FLOAT b, FLOAT t, FLOAT zn, FLOAT zf);
 D3DXMATRIX* D3DXMatrixIdentity(D3DXMATRIX* pOut);
 D3DXMATRIX* D3DXMatrixRotationX(D3DXMATRIX* pOut, FLOAT Angle);
 D3DXMATRIX* D3DXMatrixRotationY(D3DXMATRIX* pOut, FLOAT Angle);
@@ -926,6 +927,8 @@ private:
 	GLuint 		  m_sprite;
 	int 		    m_size;
   int         m_fontsize;
+  int         m_scale;   // horizontal magnification
+  float       m_scaley;  // vertical, x1.2 of it - the Amiga's non-square pixel
   int         m_posx, m_posy;
   float       m_inv;
   int         m_as[256];

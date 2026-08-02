@@ -22,3 +22,5 @@ SCRlog.txt
 # Third-party reference material (decompiled from stuntcarracer.net for study)
 # Do NOT commit — see reference/README.md
 /reference/
+
+.DS_Store

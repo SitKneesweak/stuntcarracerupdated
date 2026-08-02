@@ -12,6 +12,10 @@
 #include "StuntCarRacer.h"
 #include "3D_Engine.h"
 
+#include <math.h>
+
+extern int wideScreen;
+
 /*	===== */
 /*	Debug */
 /*	===== */
@@ -60,6 +64,157 @@ long TEMPZ[MAX_POLY_SIDES];
 static long LockAngle( long opposite,
 					   long adjacent,
 					   long clockwise );
+
+/*	======================================================================================= */
+/*	Function:		GetProjectionTangents / GetProjectionFocals								*/
+/*																							*/
+/*	Description:	The one place the field of view is decided, so that the D3D projection	*/
+/*					matrix (SetSceneProjection) and the software-projected backdrop and		*/
+/*					scenery (Backdrop.cpp) cannot drift apart.								*/
+/*																							*/
+/*					gAmigaFov off: the port's original 45-degree symmetric frustum, and		*/
+/*					the backdrop's original FOCUS 512. Unchanged, so the two can be A/B'd.	*/
+/*																							*/
+/*					gAmigaFov on: the VERTICAL magnification is set to the Amiga's - the	*/
+/*					cockpit window subtends its 22.5 degrees - and the horizontal follows	*/
+/*					from gAmigaFovStretch.													*/
+/*																							*/
+/*					Why a stretch factor at all.  The Amiga's 45 x 22.5 degrees is a 2:1		*/
+/*					ANGULAR window, but the playfield it lands in is 256 x 128 pixels of a	*/
+/*					320 x 200 screen, so the original image really was stretched vertically	*/
+/*					- but only by the pixel aspect, not by the 2:1 the angles suggest.		*/
+/*																							*/
+/*					And the pixel aspect is 1.067, not the 1.2 usually quoted.  1.2 is the	*/
+/*					NTSC figure: there 320 x 200 FILLS the 4:3 screen, so the pixels come		*/
+/*					out 1.2x taller than wide.  This is a PAL game - "Reference only/		*/
+/*					StuntCarRacer.s" sets diwstrt $3c81 / diwstop $04c1, i.e. lines 60..260	*/
+/*					(200 of them) of a 256-line PAL display window, and 320 lores pixels		*/
+/*					across.  200 lines LETTERBOXED inside 256 leaves the pixel shape at		*/
+/*					PAL's own (4/3)/(320/256) = 1.0667 - a shade wider than square.			*/
+/*					1.2 over-stretched everything by 12.5%, which is visible as too-tall		*/
+/*					cars and cooling towers next to a real PAL capture.						*/
+/*																							*/
+/*					Our cockpit window is 476 x 328.8, i.e. 1.4477:1, narrower than the		*/
+/*					Amiga's 1.667:1.  Forcing 45 AND 22.5 degrees into it would need a		*/
+/*					1.437x stretch - far more than the original ever had, which shows up as	*/
+/*					vertically stretched cars and a camera that feels perched on climbs.	*/
+/*					So the stretch is pinned at the authentic 1.067 and the horizontal		*/
+/*					gives way instead: the window subtends 34.2 rather than 45 degrees.		*/
+/*																							*/
+/*					(Getting all three - 45, 22.5 and the pixel aspect - needs the cockpit	*/
+/*					window itself to be the Amiga's 256 x 128 rather than 238 x 137. That is	*/
+/*					an art/layout change, not a projection one.)							*/
+/*	======================================================================================= */
+
+bool gAmigaFov = true;
+
+/*	Vertical:horizontal angular magnification.  1.0667 = the PAL Amiga's pixel aspect
+	(authentic), 1.0 = geometrically square, no stretch at all, 1.2 = the NTSC pixel
+	aspect this used to default to, 1.437 = the Amiga's exact 45 x 22.5 angles at the
+	cost of over-stretching.  Adjustable at runtime with , and . */
+float gAmigaFovStretch = 1.0667f;
+
+#ifndef SCR_DEG_TO_RAD
+#define SCR_DEG_TO_RAD(d)	((d) * 3.14159265358979323846f / 180.0f)
+#endif
+
+void GetProjectionTangents( float *tan_half_x, float *tan_half_y )
+{
+	if (gAmigaFov)
+	{
+		const float base_width = wideScreen ? static_cast<float>(BASE_WIDTH_WIDESCREEN)
+											: static_cast<float>(BASE_WIDTH_STANDARD);
+		const float base_height = static_cast<float>(BASE_HEIGHT);
+
+		// Focal lengths in base units, so the stretch is expressed exactly once.
+		const float focal_y = (SCR_WINDOW_HEIGHT * 0.5f) / tanf(SCR_DEG_TO_RAD(AMIGA_HALF_FOV_Y));
+		const float focal_x = focal_y / gAmigaFovStretch;
+
+		// The cockpit window is centred in both modes (82..558 of 640, 162..638 of 800),
+		// so widening the frustum out to the full screen keeps it centred too.
+		*tan_half_x = (base_width  * 0.5f) / focal_x;
+		*tan_half_y = (base_height * 0.5f) / focal_y;
+	}
+	else
+	{
+		long screen_width, screen_height;
+		GetScreenDimensions(&screen_width, &screen_height);
+
+		*tan_half_y = tanf(SCR_DEG_TO_RAD(22.5f));		// the old D3DX_PI/4 fovy
+		*tan_half_x = *tan_half_y * (static_cast<float>(screen_width) /
+									 static_cast<float>(screen_height));
+	}
+}
+
+void GetProjectionFocals( long *focal_x, long *focal_y )
+{
+	if (! gAmigaFov)
+	{
+		// Legacy backdrop: a single focal length quoted "for screen width of 640", applied
+		// to both axes. It does not actually agree with the matrix above (512 vs 579 px),
+		// which is why the scenery has never quite sat on the track's vanishing point.
+		// Left alone so that toggling the FOV off restores exactly what shipped.
+		*focal_x = *focal_y = FOCUS;
+		return;
+	}
+
+	long screen_width, screen_height;
+	GetScreenDimensions(&screen_width, &screen_height);
+
+	float tan_half_x, tan_half_y;
+	GetProjectionTangents(&tan_half_x, &tan_half_y);
+
+	*focal_x = static_cast<long>((screen_width  * 0.5f) / tan_half_x);
+	*focal_y = static_cast<long>((screen_height * 0.5f) / tan_half_y);
+}
+
+void GetProjectionCentre( long *centre_x, long *centre_y )
+{
+	long screen_width, screen_height;
+	GetScreenDimensions(&screen_width, &screen_height);
+
+	// Horizontally the cockpit window is already centred (82..558 of 640, 162..638 of 800).
+	*centre_x = screen_width / 2;
+
+	if (! gAmigaFov)
+		*centre_y = screen_height / 2;			// legacy: centred on the screen
+	else
+		*centre_y = static_cast<long>(screen_height * (SCR_WINDOW_CENTRE_Y /
+										  static_cast<float>(BASE_HEIGHT)));
+}
+
+void ProjectToScreen( long trans_x, long trans_y, long trans_z,
+					  long *screen_x, long *screen_y )
+{
+	long screen_width, screen_height;
+	GetScreenDimensions(&screen_width, &screen_height);
+
+	long centre_x, centre_y;
+	GetProjectionCentre(&centre_x, &centre_y);
+
+	if (! gAmigaFov)
+	{
+		// Verbatim legacy: an arithmetic shift, which for the horizon's negative
+		// trans_z rounds differently to a divide. Kept bit-for-bit.
+		long z = trans_z >> LOG_FOCUS;
+		if (z == 0) z = 1;
+
+		*screen_x = (trans_x / z) + screen_width/2;
+		*screen_y = (trans_y / z) + screen_height/2;
+		return;
+	}
+
+	long focal_x, focal_y;
+	GetProjectionFocals(&focal_x, &focal_y);
+
+	long zx = trans_z / focal_x;
+	long zy = trans_z / focal_y;
+	if (zx == 0) zx = 1;
+	if (zy == 0) zy = 1;
+
+	*screen_x = (trans_x / zx) + centre_x;
+	*screen_y = (trans_y / zy) + centre_y;
+}
 
 /*	======================================================================================= */
 /*	Function:		CreateSinCosTable														*/
@@ -333,22 +488,8 @@ long TransformCoordinates( COORD_3D *cptr,
 		Transformed_Coords[i].y = trans_y;
 		Transformed_Coords[i].z = trans_z;
 
-		// perspective projection
-		z = trans_z >> LOG_FOCUS;
-
-		// debug stuff
-		if (z == 0)
-			{
-#if defined(DEBUG) || defined(_DEBUG)
-			fprintf(out, "5.  Preventing division by zero\n");
-			//Sleep(10);
-#endif
-
-			z = 1;
-			}
-
-		x = (trans_x / z) + screen_width/2;
-		y = (trans_y / z) + screen_height/2;
+		// perspective projection (see ProjectToScreen above)
+		ProjectToScreen(trans_x, trans_y, trans_z, &x, &y);
 
 		// store screen x and screen y
 		Screen_Coords[i].x = x;

@@ -333,11 +333,40 @@ extern TRACK_PIECE Track[MAX_PIECES_PER_TRACK];
 extern long Track_Map[NUM_TRACK_CUBES][NUM_TRACK_CUBES];	// [x][z]
 extern long NumTrackPieces;
 extern long PlayersStartPiece;
+extern bool drop_start_done;
 
 //#define USE_ROAD_Y
 #define NEW_OPP_METHOD
 // current surface co-ords
 static long sx1, sy1, sz1, sx2, sy2, sz2, sx3, sy3, sz3, sx4, sy4, sz4;
+
+// ---------------------------------------------------------------------------
+// Continuous mirrors of the opponent's road/wheel positions.
+//
+// The gameplay state stays in Amiga integer units (OppFloatV2Sync rounds the
+// doubles back into it every step), which is what the AI, the collision code
+// and the TEST_AMIGA_RWP comparisons need. But rebuilding the *visuals* from
+// those integers makes the opponent stutter wherever height is steeply coupled
+// to lateral position -- i.e. on banked corners, where a one-unit rounding of
+// the road x position moves the wheel heights by several units and the roll
+// angle is an atan2 of that integer difference. Straights and airborne stretches
+// are insensitive to the same rounding, which is why they look fine.
+//
+// So the FloatV2 opponent additionally derives a double-precision copy of the
+// wheel positions straight from gOppF, and the renderer uses that. Display only:
+// nothing here feeds back into the simulation.
+struct COORD_3D_F { double x, y, z; };
+
+static COORD_3D_F oppf_rear_left_road_pos;
+static COORD_3D_F oppf_rear_right_road_pos;
+static COORD_3D_F oppf_front_left_road_pos;
+static COORD_3D_F oppf_front_right_road_pos;
+static double oppf_front_road_pos_y;
+static double oppf_act[NUM_OPP_WHEEL_POSITIONS];
+
+static void CalculateOpponentsRoadWheelPositionsF( void );
+static void ComputeOpponentRenderStateF( long *x, long *y, long *z,
+										 float *x_angle, float *y_angle, float *z_angle );
 
 void OpponentBehaviour (long *x,
 						long *y,
@@ -407,6 +436,18 @@ void OpponentBehaviour (long *x,
 		CalculateDistancesBetweenPlayers();
 
 	CalculateOpponentsRoadWheelPositions();
+
+	// Once the FloatV2 opponent is running (and seeded), take the render state
+	// from the continuous mirror instead of the integer globals -- see the note
+	// on COORD_3D_F above. The integer positions computed just now are still
+	// what the AI and collision code read next step.
+	if (scr::gUseFloatV2Physics && scr::gUseFloatV2Opponent &&
+		drop_start_done && !scr::gFloatV2OpponentNeedsSeed)
+	{
+		CalculateOpponentsRoadWheelPositionsF();
+		ComputeOpponentRenderStateF(x, y, z, x_angle, y_angle, z_angle);
+		return;
+	}
 
 	//
 	// Calculate opponent's new centre point ...
@@ -2628,4 +2669,324 @@ static void OpponentStepFloatV2( double dt )
 	}
 
 	OppFloatV2Sync();
+}
+
+
+/*	======================================================================================= */
+/*	Function:		CalculateOpponentsRoadWheelPositionsF									*/
+/*																							*/
+/*	Description:	Double-precision counterpart of CalculateOpponentsRoadWheelPositions().	*/
+/*					Same geometry, same Amiga quirks, but fed from gOppF rather than from	*/
+/*					the rounded integer globals, and with the fixed-point >>8 steps done	*/
+/*					in floating point. Display only -- keep the two in step.				*/
+/*	======================================================================================= */
+
+// Height of the current surface quad at continuous (sx, sz), in the same
+// (halved) units CalculateOpponentsRoadWheelHeight() returns.
+static double CalculateOpponentsRoadWheelHeightF( double sx, double sz )
+{
+	// first do x interpolation
+	double sya = sy1 + ((sx * (sy4-sy1)) / 256.0);
+	double syb = sy2 + ((sx * (sy3-sy2)) / 256.0);
+
+	// now do z interpolation, then halve as the integer version's >>9 does
+	return (syb + ((sz * (sya-syb)) / 256.0)) / 2.0;
+}
+
+static double CalcSurfacePositionF( long *next_segment, double distance, double z_shift )
+{
+	double surface_position = distance - (floor(distance / 256.0) * 256.0);
+
+	*next_segment = FALSE;
+	surface_position += z_shift;
+	if (surface_position >= 256.0)
+	{
+		*next_segment = TRUE;
+		surface_position -= 256.0;
+	}
+
+	return(surface_position);
+}
+
+// Half the x distance the opponent's rear wheels span, interpolated between the
+// opponents_x_spans[] entries instead of snapping to one of 32 buckets. The
+// bucket edges are the loop that turns a sub-unit height wobble into a visible
+// jump: the span moves the wheels, which moves the heights, which can move the
+// span back.
+static double OpponentsXSpanF( double height_difference )
+{
+	double t = fabs(height_difference) / 16.0;
+	if (t < 0.0) t = 0.0;
+	if (t > static_cast<double>(NUM_X_SPANS-1)) t = static_cast<double>(NUM_X_SPANS-1);
+
+	long i0 = static_cast<long>(floor(t));
+	if (i0 > NUM_X_SPANS-2) i0 = NUM_X_SPANS-2;
+	double frac = t - static_cast<double>(i0);
+
+	return static_cast<double>(opponents_x_spans[i0]) +
+		   (frac * static_cast<double>(opponents_x_spans[i0+1] - opponents_x_spans[i0]));
+}
+
+static void CalculateOpponentsRoadWheelPositionsF( void )
+{
+long piece = opponents_current_piece, next_segment;
+long segment;
+double distance, surface_position;
+double left_side_x, left_side_z, right_side_x, right_side_z;
+bool draw_shadow = TRUE;
+
+	// Continuous road x position, clamped the way OppFloatV2Sync() clamps it
+	double road_x = gOppF.roadX;
+	if (road_x <   0.0) road_x =   0.0;
+	if (road_x > 255.0) road_x = 255.0;
+
+	for (long i = 0; i < NUM_OPP_WHEEL_POSITIONS; i++)
+		oppf_act[i] = gOppF.act[i];
+
+	/*
+	 * Rear wheels
+	 */
+	distance = gOppF.distance - 64.0;
+	if (distance < 0.0)
+	{
+		// DIRECTION DEPENDANT
+
+		// go to previous piece
+		piece--; if (piece < 0) piece = (NumTrackPieces - 1);
+
+		distance += static_cast<double>(Track[piece].numSegments * 256);
+	}
+
+	// Fetch 4 surface co-ords surrounding rear wheels
+	segment = static_cast<long>(floor(distance / 256.0));
+	if (segment < 0) segment = 0;
+	if (segment >= Track[piece].numSegments) segment = Track[piece].numSegments - 1;
+	GetSurfaceCoords(piece, segment);
+	// Don't draw opponent's shadow on black road segments
+	if (Track[piece].roadColour[segment] == SCR_BASE_COLOUR + 0)
+		draw_shadow = FALSE;
+
+	// Calculate segment left side x,z
+	surface_position = CalcSurfacePositionF(&next_segment, distance, static_cast<double>(B1bbbe[0]));
+	if (!next_segment)
+	{
+		left_side_x = sx2 + ((surface_position * (sx1-sx2)) / 256.0);
+		left_side_z = sz2 + ((surface_position * (sz1-sz2)) / 256.0);
+	}
+	else
+	{
+		// Use other end's value as base (Amiga quirk, mirrored from the integer path)
+		left_side_x = sx1 + ((surface_position * (sx1-sx2)) / 256.0);
+		left_side_z = sz1 + ((surface_position * (sz1-sz2)) / 256.0);
+	}
+
+	// Calculate segment right side x,z
+	surface_position = CalcSurfacePositionF(&next_segment, distance, static_cast<double>(B1bbbe[2]));
+	if (!next_segment)
+	{
+		right_side_x = sx3 + ((surface_position * (sx4-sx3)) / 256.0);
+		right_side_z = sz3 + ((surface_position * (sz4-sz3)) / 256.0);
+	}
+	else
+	{
+		// Use other end's value as base (Amiga quirk, mirrored from the integer path)
+		right_side_x = sx4 + ((surface_position * (sx4-sx3)) / 256.0);
+		right_side_z = sz4 + ((surface_position * (sz4-sz3)) / 256.0);
+	}
+
+	double opponents_x_span = OpponentsXSpanF(oppf_act[REAR_LEFT] - oppf_act[REAR_RIGHT]);
+
+	// Reduce the span for the shadow, to take into account the greater width of
+	// sloped segments
+	double xd = right_side_x - left_side_x;
+	double yd = static_cast<double>(sy3 - sy2) / LOCAL_Y_FACTOR;
+	double zd = right_side_z - left_side_z;
+	double base_width = sqrt((xd*xd) + (zd*zd));
+	double slope_width = sqrt((base_width*base_width) + (yd*yd));
+	double opponents_shadow_x_span = (slope_width > 0.0)
+		? ((opponents_x_span * base_width) / slope_width)
+		: opponents_x_span;
+
+	double sx, sz;
+	sz = distance - (floor(distance / 256.0) * 256.0);	// z position of rear wheels
+
+	COORD_3D_F shadow_rear_left, shadow_rear_right, shadow_front_left, shadow_front_right;
+
+	// Rear left road co-ordinate
+	sx = road_x - opponents_x_span;
+	oppf_rear_left_road_pos.y = CalculateOpponentsRoadWheelHeightF(sx, sz);
+	oppf_rear_left_road_pos.x = left_side_x + ((sx * xd) / 256.0);
+	oppf_rear_left_road_pos.z = left_side_z + ((sx * zd) / 256.0);
+
+	// Rear left shadow co-ordinate
+	sx = road_x - opponents_shadow_x_span;
+	shadow_rear_left.y = CalculateOpponentsRoadWheelHeightF(sx, sz);
+	shadow_rear_left.x = left_side_x + ((sx * xd) / 256.0);
+	shadow_rear_left.z = left_side_z + ((sx * zd) / 256.0);
+
+	// Rear right road co-ordinate
+	sx = road_x + opponents_x_span;
+	oppf_rear_right_road_pos.y = CalculateOpponentsRoadWheelHeightF(sx, sz);
+	oppf_rear_right_road_pos.x = left_side_x + ((sx * xd) / 256.0);
+	oppf_rear_right_road_pos.z = left_side_z + ((sx * zd) / 256.0);
+
+	// Rear right shadow co-ordinate
+	sx = road_x + opponents_shadow_x_span;
+	shadow_rear_right.y = CalculateOpponentsRoadWheelHeightF(sx, sz);
+	shadow_rear_right.x = left_side_x + ((sx * xd) / 256.0);
+	shadow_rear_right.z = left_side_z + ((sx * zd) / 256.0);
+
+	// Position rear co-ordinates within world
+	double piece_x = static_cast<double>(Track[piece].x << (LOG_CUBE_SIZE-LOG_PRECISION));
+	double piece_z = static_cast<double>(Track[piece].z << (LOG_CUBE_SIZE-LOG_PRECISION));
+	oppf_rear_left_road_pos.x  += piece_x;	oppf_rear_left_road_pos.z  += piece_z;
+	oppf_rear_right_road_pos.x += piece_x;	oppf_rear_right_road_pos.z += piece_z;
+	shadow_rear_left.x  += piece_x;			shadow_rear_left.z  += piece_z;
+	shadow_rear_right.x += piece_x;			shadow_rear_right.z += piece_z;
+
+	/*
+	 * Front wheels
+	 */
+	double diff, xdiff, zdiff;
+
+	// Front left and right road x,z co-ordinates
+	diff = oppf_rear_right_road_pos.x - oppf_rear_left_road_pos.x;
+	xdiff = diff * 1.5;	// car length is 1.5 times width
+	diff = oppf_rear_right_road_pos.z - oppf_rear_left_road_pos.z;
+	zdiff = diff * 1.5;	// car length is 1.5 times width
+	oppf_front_left_road_pos.x  = oppf_rear_left_road_pos.x  - zdiff;
+	oppf_front_left_road_pos.z  = oppf_rear_left_road_pos.z  + xdiff;
+	oppf_front_right_road_pos.x = oppf_rear_right_road_pos.x - zdiff;
+	oppf_front_right_road_pos.z = oppf_rear_right_road_pos.z + xdiff;
+
+	// Front left and right shadow x,z co-ordinates
+	diff = shadow_rear_right.x - shadow_rear_left.x;
+	xdiff = diff * 1.5;
+	diff = shadow_rear_right.z - shadow_rear_left.z;
+	zdiff = diff * 1.5;
+	shadow_front_left.x  = shadow_rear_left.x  - zdiff;
+	shadow_front_left.z  = shadow_rear_left.z  + xdiff;
+	shadow_front_right.x = shadow_rear_right.x - zdiff;
+	shadow_front_right.z = shadow_rear_right.z + xdiff;
+
+	// Add 128 to get z of opponent's front
+	distance += 128.0;
+	if (distance >= static_cast<double>(Track[piece].numSegments * 256))
+	{
+		// DIRECTION DEPENDANT
+
+		distance -= static_cast<double>(Track[piece].numSegments * 256);
+
+		// go to next piece
+		piece++; if (piece > (NumTrackPieces - 1)) piece = 0;
+	}
+	// Fetch 4 surface co-ords surrounding front wheels
+	segment = static_cast<long>(floor(distance / 256.0));
+	if (segment < 0) segment = 0;
+	if (segment >= Track[piece].numSegments) segment = Track[piece].numSegments - 1;
+	GetSurfaceCoords(piece, segment);
+	// Don't draw opponent's shadow on black road segments
+	if (Track[piece].roadColour[segment] == SCR_BASE_COLOUR + 0)
+		draw_shadow = FALSE;
+
+	sz = distance - (floor(distance / 256.0) * 256.0);	// z position of front wheels
+
+	// Front road y co-ordinate (centre)
+	oppf_front_road_pos_y = CalculateOpponentsRoadWheelHeightF(road_x, sz);
+
+	// Front left / right road y co-ordinates
+	oppf_front_left_road_pos.y  = CalculateOpponentsRoadWheelHeightF(road_x - opponents_x_span, sz);
+	oppf_front_right_road_pos.y = CalculateOpponentsRoadWheelHeightF(road_x + opponents_x_span, sz);
+
+#ifdef OPPONENT_SHADOW
+	shadow_front_left.y  = CalculateOpponentsRoadWheelHeightF(road_x - opponents_shadow_x_span, sz);
+	shadow_front_right.y = CalculateOpponentsRoadWheelHeightF(road_x + opponents_shadow_x_span, sz);
+
+	// Y co-ordinates need to be divided by 4 for display, but they're
+	// already /2 because are in Amiga format (i.e. not * PC_FACTOR).
+	// Also add 7 to y so that shadow is slightly above road and isn't clipped as much
+	D3DXVECTOR3 v1, v2, v3, v4;
+	v2 = D3DXVECTOR3( static_cast<float>(shadow_rear_left.x),   7 + static_cast<float>(shadow_rear_left.y/2),   static_cast<float>(shadow_rear_left.z) );
+	v3 = D3DXVECTOR3( static_cast<float>(shadow_rear_right.x),  7 + static_cast<float>(shadow_rear_right.y/2),  static_cast<float>(shadow_rear_right.z) );
+	v1 = D3DXVECTOR3( static_cast<float>(shadow_front_left.x),  7 + static_cast<float>(shadow_front_left.y/2),  static_cast<float>(shadow_front_left.z) );
+	v4 = D3DXVECTOR3( static_cast<float>(shadow_front_right.x), 7 + static_cast<float>(shadow_front_right.y/2), static_cast<float>(shadow_front_right.z) );
+
+	RemoveShadowTriangles();
+	if (draw_shadow)
+	{
+		StoreShadowTriangle(v2, v1, v3, 0);
+		StoreShadowTriangle(v1, v4, v3, 0);
+	}
+#else
+	(void)draw_shadow;
+	(void)shadow_front_left;
+	(void)shadow_front_right;
+#endif
+}
+
+
+/*	======================================================================================= */
+/*	Function:		ComputeOpponentRenderStateF												*/
+/*																							*/
+/*	Description:	The tail of OpponentBehaviour() -- centre point and orientation --		*/
+/*					computed from the continuous mirror. Implements the NEW_OPP_METHOD		*/
+/*					semantics only, which is what the integer path is built with.			*/
+/*	======================================================================================= */
+
+static void ComputeOpponentRenderStateF( long *x, long *y, long *z,
+										 float *x_angle, float *y_angle, float *z_angle )
+{
+	/*
+	 * Centre x, z
+	 */
+	double opponent_x = (oppf_front_left_road_pos.x + oppf_front_right_road_pos.x +
+						 oppf_rear_left_road_pos.x  + oppf_rear_right_road_pos.x) / 4.0;
+	double opponent_z = (oppf_front_left_road_pos.z + oppf_front_right_road_pos.z +
+						 oppf_rear_left_road_pos.z  + oppf_rear_right_road_pos.z) / 4.0;
+
+	/*
+	 * Centre y -- the car rides on whichever is higher, road or actual height
+	 */
+	double vis_rear_left_y  = (oppf_rear_left_road_pos.y  > oppf_act[REAR_LEFT])  ? oppf_rear_left_road_pos.y  : oppf_act[REAR_LEFT];
+	double vis_rear_right_y = (oppf_rear_right_road_pos.y > oppf_act[REAR_RIGHT]) ? oppf_rear_right_road_pos.y : oppf_act[REAR_RIGHT];
+	double vis_front_y      = (oppf_front_road_pos_y      > oppf_act[FRONT])      ? oppf_front_road_pos_y      : oppf_act[FRONT];
+
+	double rear_y = (vis_rear_left_y + vis_rear_right_y) / 2.0;
+	double opponent_y = (rear_y + vis_front_y) / 2.0;
+
+	// Raise the opponent slightly (to stop them sinking into road due to inaccurate heights)
+	opponent_y += 20.0;
+
+	/*
+	 * Angles
+	 */
+	// Along car's x axis, only use y and z components
+	// (y is halved because of unit differences between y and x,z)
+	double yd = (rear_y - vis_front_y) / 2.0;
+	double rear_x  = (oppf_rear_left_road_pos.x  + oppf_rear_right_road_pos.x)  / 2.0;
+	double rear_z  = (oppf_rear_left_road_pos.z  + oppf_rear_right_road_pos.z)  / 2.0;
+	double front_x = (oppf_front_left_road_pos.x + oppf_front_right_road_pos.x) / 2.0;
+	double front_z = (oppf_front_left_road_pos.z + oppf_front_right_road_pos.z) / 2.0;
+	double xd = rear_x - front_x;
+	double zd = rear_z - front_z;
+	double carzd = sqrt((xd*xd) + (zd*zd));
+	*x_angle = static_cast<float>(atan2(yd, carzd));
+
+	// Along car's y axis, only use x and z components
+	xd = oppf_rear_left_road_pos.x - oppf_rear_right_road_pos.x;
+	zd = oppf_rear_left_road_pos.z - oppf_rear_right_road_pos.z;
+	*y_angle = static_cast<float>(atan2(zd, -xd));
+
+	// Along car's z axis, only use x and y components
+	yd = (vis_rear_left_y - vis_rear_right_y) / 2.0;
+	double carxd = sqrt((xd*xd) + (zd*zd));
+	*z_angle = static_cast<float>(atan2(-yd, carxd));
+
+	/*
+	 * Output. Rounding happens only after the shift into world units, so the
+	 * sub-unit precision that the integer path threw away survives.
+	 */
+	*x = static_cast<long>(floor((opponent_x * (1 << LOG_PRECISION)) + 0.5));
+	*z = static_cast<long>(floor((opponent_z * (1 << LOG_PRECISION)) + 0.5));
+	*y = -static_cast<long>(floor((opponent_y * (1 << (LOG_PRECISION-3)) * LOCAL_Y_FACTOR) + 0.5));
 }

@@ -43,6 +43,18 @@
 #define COCKPIT_WRIGHT_Y_OFFSET     98.0f   // Widescreen right panel Y offset
 #define COCKPIT_WLEFT_Y_OFFSET      99.0f   // Widescreen left panel Y offset
 
+// Dashboard readout positions, in the Amiga's 320x200 screen space.  Each is the original's
+// print column/row scaled by the 7x8 font cell plus its fine.x/fine.y nudge - see
+// print.lap.boost.text, boost.print and display.opponents.distance in the 68k source.
+// The top-left grey box spans x 36..85, y 178..185; the one below it y 188..195.
+#define HUD_LAP_LABEL_X             37.0f   // 'L'   column 5, fine.x 2
+#define HUD_LAP_VALUE_X             45.0f   // digit column 6, fine.x 2 (+1 from print.dec.digit1)
+#define HUD_BOOST_LABEL_X           60.0f   // 'B'   column 8, fine.x 4
+#define HUD_BOOST_VALUE_X           68.0f   // digits column 9, fine.x 4 (+1)
+#define HUD_TOP_Y                  178.0f   // row 22, fine.y 2
+#define HUD_DIST_X                  44.0f   // sign + 4 digits, column 6, fine.x 1 (+1)
+#define HUD_DIST_Y                 188.0f   // row 23, fine.y 4
+
 /*	===================== */
 /*	Structure definitions */
 /*	===================== */

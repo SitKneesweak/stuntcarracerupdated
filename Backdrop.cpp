@@ -178,22 +178,9 @@ static void DrawHorizon( long viewpoint_y,
 		trans_x = (x * cos_z) - (y * sin_z);
 		trans_y = (x * sin_z) + (y * cos_z);
 
-		// perspective projection
-		z = trans_z >> LOG_FOCUS;
-
-		// debug stuff
-		if (z == 0)
-			{
-#if defined(DEBUG) || defined(_DEBUG)
-			fprintf(out, "7.  Preventing division by zero\n");
-			//Sleep(10);
-#endif
-
-			z = 1;
-			}
-
-		x = (trans_x / z) + screen_width/2;
-		y = (trans_y / z) + screen_height/2;
+		// perspective projection (shares its focal lengths with the projection matrix,
+		// so the horizon keeps sitting on the track's vanishing point - 3D_Engine.cpp)
+		ProjectToScreen(trans_x, trans_y, trans_z, &x, &y);
 
 		// store screen x and screen y
 		screen_coords[i].x = x;
@@ -943,22 +930,8 @@ static void DrawScenery( long viewpoint_y,
 			// could also eliminate scenery if selected points are outside the
 			// viewing pyramid, although the saving would probably be negligible
 
-			// perspective projection
-			z = trans_z >> LOG_FOCUS;
-
-			// debug stuff
-			if (z == 0)
-				{
-#if defined(DEBUG) || defined(_DEBUG)
-				fprintf(out, "8.  Preventing division by zero\n");
-				//Sleep(10);
-#endif
-
-				z = 1;
-				}
-
-			x = (trans_x / z) + screen_width/2;
-			y = (trans_y / z) + screen_height/2;
+			// perspective projection (see the note in DrawHorizon)
+			ProjectToScreen(trans_x, trans_y, trans_z, &x, &y);
 
 			// store screen x and screen y
 			screen_coords[i].x = x;
