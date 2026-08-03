@@ -130,6 +130,12 @@ void AmigaMenuFillRect( int x, int y, int w, int h, const AmigaPen &pen );
 /*	4:3 shape of the original 320x200 display.												*/
 void AmigaMenuPresent( IDirect3DDevice9 *pd3dDevice );
 
+/*	Where a rectangle of the 320x200 surface lands on screen, in the 640x480 / 800x480 base
+	space.  The track preview uses this to place the 3D view inside the picture window of
+	Bitmap/trackpreview.png.																*/
+void AmigaMenuGetScreenRect( int sx, int sy, int sw, int sh,
+							 float *out_x, float *out_y, float *out_w, float *out_h );
+
 /*	Drop cached textures/images (device teardown).											*/
 void AmigaMenuRelease( void );
 

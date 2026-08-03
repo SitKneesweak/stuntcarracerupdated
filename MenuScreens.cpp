@@ -56,13 +56,22 @@ static const int kMenuRows[4] = { 13, 16, 19, 22 };
 #define HEADING_ROW			9
 #define SELECT_ROW			11
 
+/*	R.58e7a passes d0=11 to R.58e30 before a race, so 'RACE  n of m' lands on row 11.		*/
+#define RACE_ROW			11
+
 /*	The portrait grid in heads.png.  Columns are divisions (leftmost is Division I) and		*/
 /*	rows are the three drivers in that division, so driver ID d is at (d/3, d%3) - which		*/
-/*	is exactly how the opening ladder is ordered.  Measured off the artwork's own borders.	*/
-static const int kHeadCellX[NUM_DIVISIONS] = { 0, 77, 157, 237 };
-static const int kHeadCellY[DRIVERS_PER_DIVISION] = { 13, 68, 123 };
-#define HEAD_CELL_W		79
-#define HEAD_CELL_H		55
+/*	is exactly how the opening ladder is ordered.											*/
+/*																							*/
+/*	These are the artwork's own cell rectangles, taken off the file a pixel at a time: each	*/
+/*	cell is bounded by a one-pixel white frame, columns starting at x 2/82/162/242 and rows	*/
+/*	at y 12/67/122, 74x54 including that frame.  Getting this wrong shows up on the fixture	*/
+/*	screen, where a cell that is too wide drags in the grey gutter on one side and clips		*/
+/*	the neighbour's frame off on the other.													*/
+static const int kHeadCellX[NUM_DIVISIONS] = { 2, 82, 162, 242 };
+static const int kHeadCellY[DRIVERS_PER_DIVISION] = { 12, 67, 122 };
+#define HEAD_CELL_W		74
+#define HEAD_CELL_H		54
 
 /*	The Hall of Fame heading - 'TRACK  DRIVER   LAP-TIME    DRIVER  RACE-TIME' at column	*/
 /*	0 - allows the track only six characters before the first DRIVER column, so that		*/
@@ -96,7 +105,7 @@ static const char *kTrackNames[8] =
 /*	State																					*/
 /*	======================================================================================= */
 
-static MenuScreenType gScreen     = MS_NAME_ENTRY;
+static MenuScreenType gScreen     = MS_MAIN;
 static bool			  gActive     = true;
 static int			  gSelection  = 0;
 static bool			  gRaceIsLeague = false;
@@ -107,6 +116,10 @@ static int  gNameLength     = 0;
 
 static char gPromoted[16]  = "";
 static char gRelegated[16] = "";
+
+/*	True when the Hall of Fame was picked off the menu, so ESC/fire returns to the menu		*/
+/*	rather than continuing the end-of-season run of screens.								*/
+static bool gHallFromMenu = false;
 
 /*	The times from the race just finished, for the RESULT screen.							*/
 static double gLastLapTime  = 0.0;
@@ -122,6 +135,7 @@ static int    gRecordRaceDriver[8];
 static void MenuScreensDraw( void );
 
 bool MenuScreensActive( void ) { return gActive; }
+void MenuScreensDeactivate( void ) { gActive = false; }
 bool MenuScreensRaceIsLeague( void ) { return gRaceIsLeague; }
 
 void MenuScreensGoto( MenuScreenType screen )
@@ -145,7 +159,7 @@ static void MenuScreensDumpAll( const char *prefix )
 	{
 	static const char *names[] =
 		{
-		"name-entry", "main", "select", "practise-track", "division", "fixture",
+		"name-entry", "opponents", "main", "select", "practise-track", "division", "fixture",
 		"result", "table", "championship", "changes", "super-league",
 		"hall-of-fame", "load-save", "link"
 		};
@@ -194,7 +208,10 @@ void MenuScreensInit( void )
 
 	gNameBuffer[0] = '\0';
 	gNameLength    = 0;
-	MenuScreensGoto(MS_NAME_ENTRY);
+	gHallFromMenu  = false;
+
+	/*	The Amiga puts the game-type menu up first and only then asks for a name.		*/
+	MenuScreensGoto(MS_MAIN);
 	}
 
 /*	======================================================================================= */
@@ -230,13 +247,60 @@ static void FormatTime( char *buffer, int size, double seconds )
 	snprintf(buffer, size, "%d:%02d.%02d", (total / 6000), (total / 100) % 60, total % 100);
 	}
 
-/*	Each portrait cell is a face with a name plate across the bottom ten pixels.				*/
-#define HEAD_NAME_H		10
-#define HEAD_NAME_Y		(HEAD_CELL_H - HEAD_NAME_H)
+/*	The 'Race Time:' / 'Best Lap :' strip along the bottom of the fixture screen, on its		*/
+/*	own green band (TEXT.5ec92's two strings, drawn by R.5f074).  Zero prints as the			*/
+/*	original's row of dashes, which is what a race that has not been run yet shows.			*/
+/*	The band is embossed rather than flat: lit along its top and left edges and shaded		*/
+/*	along the bottom and right, which is what gives it the raised look on the Amiga.			*/
+static const AmigaPen kTimesPanelPaper  = {  85, 170,  68 };
+static const AmigaPen kTimesPanelLight  = { 145, 215, 120 };
+static const AmigaPen kTimesPanelShadow = {  40, 105,  35 };
 
-/*	The name plate colours, sampled from the artwork.										*/
-static const AmigaPen kNamePlateInk   = { 255, 255, 255 };
-static const AmigaPen kNamePlatePaper = {  20,  20,  90 };
+#define TIMES_PANEL_Y	171
+#define TIMES_PANEL_H	24
+#define TIMES_ROW_1		22
+#define TIMES_ROW_2		23
+
+static void DrawTimesPanel( double raceTime, double lapTime )
+	{
+	const int x = AMIGA_PANEL_X;
+	const int y = TIMES_PANEL_Y;
+	const int w = AMIGA_PANEL_W;
+	const int h = TIMES_PANEL_H;
+
+	AmigaMenuFillRect(x, y, w, h, kTimesPanelPaper);
+
+	AmigaMenuFillRect(x, y,         w, 1, kTimesPanelLight);	// top
+	AmigaMenuFillRect(x, y,         1, h, kTimesPanelLight);	// left
+	AmigaMenuFillRect(x, y + h - 1, w, 1, kTimesPanelShadow);	// bottom
+	AmigaMenuFillRect(x + w - 1, y, 1, h, kTimesPanelShadow);	// right
+
+	char buffer[32];
+	AmigaMenuSetInk(AMIGA_INK_BLACK);
+	FormatTime(buffer, sizeof(buffer), raceTime);
+	AmigaMenuPrintF(6, TIMES_ROW_1, "Race Time: %s", buffer);
+	FormatTime(buffer, sizeof(buffer), lapTime);
+	AmigaMenuPrintF(6, TIMES_ROW_2, "Best Lap : %s", buffer);
+	AmigaMenuSetInk(AMIGA_INK_TEXT);
+	}
+
+/*	Each portrait cell is a face with a name plate across the bottom, inside the cell's		*/
+/*	white frame: nine rows starting 44 down the cell, spanning the 72 pixels between the		*/
+/*	frame's two edges.  Same rectangle every driver's plate occupies in the artwork.			*/
+#define HEAD_NAME_H		9
+#define HEAD_NAME_Y		44
+#define HEAD_NAME_X		1
+#define HEAD_NAME_W		(HEAD_CELL_W - 2)
+
+/*	Room for ten characters at the font's seven-pixel advance.  The baked-in names go up		*/
+/*	to twelve ("Jumpin' Jack") because the artist drew them in a six-wide hand-lettered		*/
+/*	face; printing with the game font, ten is what fits.									*/
+#define HEAD_NAME_MAX_CHARS		(HEAD_NAME_W / AMIGA_CHAR_WIDTH)
+
+/*	The name plate colours, sampled from the artwork: near-black paper, near-white ink -		*/
+/*	the same two the artist's own plates use, so the player's cell reads as one of the set.	*/
+static const AmigaPen kNamePlateInk   = { 242, 242, 242 };
+static const AmigaPen kNamePlatePaper = {  10,  10,  10 };
 
 static void DrawPortrait( int driver, int x, int y )
 	{
@@ -254,16 +318,35 @@ static void DrawPortrait( int driver, int x, int y )
 	/*	repaint it and print whatever name was entered.									*/
 	if (driver == PLAYER_DRIVER)
 		{
-		AmigaMenuFillRect(x, y + HEAD_NAME_Y, HEAD_CELL_W, HEAD_NAME_H, kNamePlatePaper);
+		AmigaMenuFillRect(x + HEAD_NAME_X, y + HEAD_NAME_Y, HEAD_NAME_W, HEAD_NAME_H,
+						  kNamePlatePaper);
 
-		const char *name = LeagueDriverName(PLAYER_DRIVER);
-		const int   len  = (int)strlen(name);
-		const int   textX = x + (HEAD_CELL_W - len * AMIGA_CHAR_WIDTH) / 2;
+		/*	Centred on the plate, and clipped to what the plate will hold rather than	*/
+		/*	allowed to run out over the frame and into the cell next door.				*/
+		char name[HEAD_NAME_MAX_CHARS + 1];
+		snprintf(name, sizeof(name), "%s", LeagueDriverName(PLAYER_DRIVER));
+
+		const int len   = (int)strlen(name);
+		const int textX = x + HEAD_NAME_X + (HEAD_NAME_W - len * AMIGA_CHAR_WIDTH) / 2;
 
 		AmigaMenuSetInk(kNamePlateInk);
 		AmigaMenuPrintPixel(textX, y + HEAD_NAME_Y + 1, name);
 		AmigaMenuSetInk(AMIGA_INK_TEXT);
 		}
+	}
+
+/*	R.645c6 - "clear.menu, then print the player's division at 31,15,9" - runs at the top	*/
+/*	of every screen the league puts up, which is why 'DIVISION 4' sits above the SELECT		*/
+/*	menu as well as above a fixture.  The super league form is 31,12,9,'SUPER DIVISION '.	*/
+static void DrawDivisionHeading( void )
+	{
+	const int division = LeaguePlayerDivision();
+
+	AmigaMenuSetInk(AMIGA_INK_TEXT);
+	if (gLeagueSuperLeague)
+		AmigaMenuPrintF(12, HEADING_ROW, "SUPER DIVISION %d", LeagueDivisionNumber(division));
+	else
+		AmigaMenuPrintF(15, HEADING_ROW, "DIVISION %d", LeagueDivisionNumber(division));
 	}
 
 /*	Row 23 is the last one that fits inside the panel: its glyphs occupy y 184..192 and		*/
@@ -291,25 +374,67 @@ static void DrawNameEntry( void )
 
 static void DrawMainMenu( void )
 	{
-	static const char *entries[4] =
+	/*	main.menu.selection passes d1=16, d2=2 to get.main.menu.selection, which picks		*/
+	/*	entries 16..18 of TAB.5bcd0 - offsets $0a/$1f/$71 into main.game.selection.text.		*/
+	/*	'Enter another driver' and 'Continue' are the multiplayer sub-menu, not this one.	*/
+	static const char *entries[3] =
 		{
 		"Single Player League",
 		"Multiplayer",
-		"Enter another driver",
-		"Continue"
+		"Computer Link"
 		};
-	DrawMenu(entries, 4, gSelection);
+	DrawMenu(entries, 3, gSelection);
 	}
 
 static void DrawSelectMenu( void )
 	{
-	static const char *entries[3] =
+	/*	R.5baea's menu, entries 0..2 of TAB.5bcd0 - offsets $ec/$0a/$14 into TEXT.5a69a.	*/
+	/*	Load/Save/Replay ($2c) is the next entry in the table; the disassembly's count		*/
+	/*	stops short of it, but the port has the screen so it stays on the menu.				*/
+	static const char *entries[4] =
 		{
+		"Hall of Fame",
 		"Practise",
 		"Start the Racing Season",
 		"Load/Save/Replay"
 		};
-	DrawMenu(entries, 3, gSelection);
+	DrawDivisionHeading();
+	DrawMenu(entries, 4, gSelection);
+	}
+
+/*	R.58888, "display opponents": the twelve drivers as one full-screen picture, four		*/
+/*	divisions across with each division's two tracks under it.  The 68k unpacked the		*/
+/*	people bitmap over the whole screen and then printed the twelve names from the current	*/
+/*	ladder into it, so a driver who has been promoted past you shows up in his new			*/
+/*	division.  Bitmap/heads.png already carries the artwork's own names, so only the cells	*/
+/*	whose driver has moved need repainting - plus the player's, which is blank in the		*/
+/*	original and scribbled over in this artwork.											*/
+static void DrawOpponents( void )
+	{
+	AmigaMenuClear(AMIGA_INK_BLACK);
+	AmigaMenuBlit("heads.png", 0, 0);
+
+	for (int position = 0; position < NUM_LEAGUE_DRIVERS; position++)
+		{
+		const int driver = gLeagueLadder[position];
+		if ((driver == position) && (driver != PLAYER_DRIVER))
+			continue;						// the baked-in name is still the right one
+
+		const int x = kHeadCellX[position / DRIVERS_PER_DIVISION];
+		const int y = kHeadCellY[position % DRIVERS_PER_DIVISION];
+
+		AmigaMenuFillRect(x, y + HEAD_NAME_Y, HEAD_CELL_W, HEAD_NAME_H, kNamePlatePaper);
+
+		const char *name  = LeagueDriverName(driver);
+		const int   textX = x + (HEAD_CELL_W - (int)strlen(name) * AMIGA_CHAR_WIDTH) / 2;
+
+		AmigaMenuSetInk(kNamePlateInk);
+		AmigaMenuPrintPixel(textX, y + HEAD_NAME_Y + 1, name);
+		}
+
+	/*	No prompt: the bottom of the picture is the divisions' track lists, and the		*/
+	/*	original just sat on wait.for.fire here.										*/
+	AmigaMenuSetInk(AMIGA_INK_TEXT);
 	}
 
 static void DrawPractiseTracks( void )
@@ -334,18 +459,15 @@ static void DrawDivision( void )
 	const int division = LeaguePlayerDivision();
 	const int first    = ((NUM_DIVISIONS - 1) - division) * DRIVERS_PER_DIVISION;
 
-	AmigaMenuSetInk(AMIGA_INK_TEXT);
-	if (gLeagueSuperLeague)
-		AmigaMenuPrintF(12, HEADING_ROW, "SUPER DIVISION %d", LeagueDivisionNumber(division));
-	else
-		AmigaMenuPrintF(15, HEADING_ROW, "DIVISION %d", LeagueDivisionNumber(division));
+	DrawDivisionHeading();
 
-	/*	The three drivers, with their portraits.  Three 79-wide cells across the			*/
-	/*	224-wide panel leaves a small gutter between them.								*/
+	/*	The three drivers, with their portraits.  Three 74-wide cells fill all but two	*/
+	/*	pixels of the 224-wide panel, so they sit edge to edge and their own white		*/
+	/*	frames do the separating.														*/
 	for (int i = 0; i < DRIVERS_PER_DIVISION; i++)
 		{
 		const int driver = gLeagueLadder[first + i];
-		DrawPortrait(driver, AMIGA_PANEL_X + 3 + i * 73, AMIGA_PANEL_Y + 26);
+		DrawPortrait(driver, AMIGA_PANEL_X + 1 + i * HEAD_CELL_W, AMIGA_PANEL_Y + 26);
 		}
 
 	AmigaMenuPrintF(6, 19, "Tracks in DIVISION %d", LeagueDivisionNumber(division));
@@ -361,21 +483,34 @@ static void DrawFixture( void )
 	if (fixture == NULL)
 		return;
 
-	AmigaMenuSetInk(AMIGA_INK_TEXT);
-	AmigaMenuPrintF(16, HEADING_ROW, "RACE  %d", gLeagueRace + 1);		// 31,14,13,'RACE  '
+	/*	R.58e7a's pre-race branch: the division heading, then R.58e30 with d0=11 for		*/
+	/*	'RACE  n of m' on row 11, the two heads, 'Track:  The ...' on row 20 (R.5eae0	*/
+	/*	with d2=20) and the empty race-time panel underneath.							*/
+	DrawDivisionHeading();
+	AmigaMenuPrintF(14, RACE_ROW, "RACE  %d of %d", gLeagueRace + 1, RACES_PER_SEASON);
 
 	/*	The two drivers head to head, with ' V ' in the gutter between them.				*/
-	const int portraitY = AMIGA_PANEL_Y + 26;
-	DrawPortrait(PLAYER_DRIVER,     AMIGA_PANEL_X + 16,  portraitY);
-	DrawPortrait(fixture->opponent, AMIGA_PANEL_X + 129, portraitY);
+	/*	R.58914 draws B.1ca27 first and B.1ca28 second - the opponent on the left and	*/
+	/*	the player on the right, which is the way round the Amiga screen shots show.		*/
+	/*	Sixteen pixels in from each end of the panel, which leaves the ' V ' gutter		*/
+	/*	between them - the spacing the Amiga screen shots show.							*/
+	#define FIXTURE_HEAD_INSET	16
+	const int portraitY = AMIGA_PANEL_Y + 46;
+	const int leftX     = AMIGA_PANEL_X + FIXTURE_HEAD_INSET;
+	const int rightX    = AMIGA_PANEL_X + AMIGA_PANEL_W - FIXTURE_HEAD_INSET - HEAD_CELL_W;
+
+	DrawPortrait(fixture->opponent, leftX,  portraitY);
+	DrawPortrait(PLAYER_DRIVER,     rightX, portraitY);
 
 	AmigaMenuSetInk(AMIGA_INK_RED);
-	AmigaMenuPrintPixel(AMIGA_PANEL_X + 105, portraitY + 22, "V");
+	AmigaMenuPrintPixel((leftX + HEAD_CELL_W + rightX) / 2 - (AMIGA_CHAR_WIDTH / 2),
+						portraitY + (HEAD_CELL_H / 2) - (AMIGA_CHAR_HEIGHT / 2), "V");
 	AmigaMenuSetInk(AMIGA_INK_TEXT);
 
 	AmigaMenuPrintF(6, 20, "Track:  The %s", kTrackNames[fixture->trackID]);
 
-	PressAnyKeyPrompt();
+	/*	The times the race is about to fill in, dashed out until it has.					*/
+	DrawTimesPanel(0.0, 0.0);
 	}
 
 static void DrawResult( void )
@@ -384,7 +519,7 @@ static void DrawResult( void )
 	const int index = (gLeagueRace > 0) ? (gLeagueRace - 1) : 0;
 	const LeagueFixture *fixture = &gLeagueFixtures[index];
 
-	AmigaMenuSetInk(AMIGA_INK_TEXT);
+	DrawDivisionHeading();
 	AmigaMenuPrintAt(17, 11, "RESULT");						// 31,17,15,'RESULT'
 
 	const int winner  = fixture->won     ? PLAYER_DRIVER : fixture->opponent;
@@ -393,14 +528,8 @@ static void DrawResult( void )
 	AmigaMenuPrintF(7, 14, "Race Winner: %s", LeagueDriverName(winner));
 	AmigaMenuPrintF(7, 16, "Fastest Lap: %s", LeagueDriverName(fastest));
 
-	/*	'Race Time: ' and 'Best Lap : ' from TEXT.5ec92 - the player's own times.		*/
-	char buffer[32];
-	FormatTime(buffer, sizeof(buffer), gLastRaceTime);
-	AmigaMenuPrintF(7, 19, "Race Time: %s", buffer);
-	FormatTime(buffer, sizeof(buffer), gLastLapTime);
-	AmigaMenuPrintF(7, 20, "Best Lap : %s", buffer);
-
-	PressAnyKeyPrompt();
+	/*	The same panel the fixture screen put up empty, now filled in.					*/
+	DrawTimesPanel(gLastRaceTime, gLastLapTime);
 	}
 
 static void DrawTable( void )
@@ -408,7 +537,7 @@ static void DrawTable( void )
 	const int division = LeaguePlayerDivision();
 	const int first    = ((NUM_DIVISIONS - 1) - division) * DRIVERS_PER_DIVISION;
 
-	AmigaMenuSetInk(AMIGA_INK_TEXT);
+	DrawDivisionHeading();
 	AmigaMenuPrintAt(14, 11, "RESULTS TABLE");					// 31,14,11,'RESULTS TABLE'
 	AmigaMenuPrintAt(6, 14, "DRIVER     RACED WIN LAP  PTS");	// 31,6,14,...
 
@@ -459,7 +588,7 @@ static void DrawChampionship( void )
 
 static void DrawChanges( void )
 	{
-	AmigaMenuSetInk(AMIGA_INK_TEXT);
+	DrawDivisionHeading();
 	AmigaMenuPrintF(13, 11, "DIVISION %d CHANGES",
 					LeagueDivisionNumber(LeaguePlayerDivision()));
 
@@ -551,11 +680,20 @@ static void DrawLink( void )
 /*	Build the current screen into the surface, without presenting it.						*/
 static void MenuScreensDraw( void )
 	{
+	/*	Two screens are drawn over the whole display rather than inside the menu frame:	*/
+	/*	the opponents picture and the Hall of Fame.  Both paint their own background.	*/
+	if (gScreen == MS_OPPONENTS)
+		{
+		DrawOpponents();
+		return;
+		}
+
 	AmigaMenuFrame();
 
 	switch (gScreen)
 		{
 		case MS_NAME_ENTRY:		DrawNameEntry();		break;
+		case MS_OPPONENTS:								break;	// handled above
 		case MS_MAIN:			DrawMainMenu();			break;
 		case MS_SELECT:			DrawSelectMenu();		break;
 		case MS_PRACTISE_TRACK:	DrawPractiseTracks();	break;
@@ -601,8 +739,8 @@ static int EntryCount( void )
 	{
 	switch (gScreen)
 		{
-		case MS_MAIN:			return 4;
-		case MS_SELECT:			return 3;
+		case MS_MAIN:			return 3;
+		case MS_SELECT:			return 4;
 		case MS_PRACTISE_TRACK:	return 8;
 		default:				return 0;
 		}
@@ -626,7 +764,10 @@ static void HandleNameEntry( int key )
 	if ((key == KEY_ENTER) && (gNameLength > 0))
 		{
 		LeagueNewCareer(gNameBuffer);
-		MenuScreensGoto(MS_MAIN);
+
+		/*	main.game.selection: get.players.name, jsr R.648b2 'display opponents',		*/
+		/*	then jsr R.5baea, the SELECT menu.  Nothing else in between.					*/
+		MenuScreensGoto(MS_OPPONENTS);
 		return;
 		}
 
@@ -636,8 +777,10 @@ static void HandleNameEntry( int key )
 		return;
 		}
 
-	/*	The original's name entry accepts the printable set its font can draw.			*/
-	if ((key >= ' ') && (key < 127) && (gNameLength < (int)sizeof(gNameBuffer) - 1))
+	/*	The original's name entry accepts the printable set its font can draw.  It		*/
+	/*	stopped at twelve characters; stop at ten instead, which is what the name plate	*/
+	/*	under the portrait holds, so a name is never taken and then shown truncated.		*/
+	if ((key >= ' ') && (key < 127) && (gNameLength < HEAD_NAME_MAX_CHARS))
 		{
 		char c = (char)key;
 		if ((c >= 'a') && (c <= 'z'))		// the Amiga stores names upper case
@@ -651,14 +794,15 @@ static void ActivateMain( void )
 	{
 	switch (gSelection)
 		{
-		case 0:	MenuScreensGoto(MS_SELECT);			break;	// Single Player League
-		case 1:	MenuScreensGoto(MS_LINK);			break;	// Multiplayer
-		case 2:												// Enter another driver
+		case 0:												// Single Player League
 			gNameBuffer[0] = '\0';
 			gNameLength    = 0;
 			MenuScreensGoto(MS_NAME_ENTRY);
 			break;
-		case 3:	MenuScreensGoto(MS_SELECT);			break;	// Continue
+
+		/*	Neither of these is offered by this port, so both land on the apology.		*/
+		case 1:	MenuScreensGoto(MS_LINK);			break;	// Multiplayer
+		case 2:	MenuScreensGoto(MS_LINK);			break;	// Computer Link
 		}
 	}
 
@@ -666,12 +810,18 @@ static void ActivateSelect( void )
 	{
 	switch (gSelection)
 		{
-		case 0:	MenuScreensGoto(MS_PRACTISE_TRACK);	break;	// Practise
-		case 1:												// Start the Racing Season
-			LeagueStartSeason();
-			MenuScreensGoto(MS_DIVISION);
+		case 0:												// Hall of Fame
+			gHallFromMenu = true;
+			MenuScreensGoto(MS_HALL_OF_FAME);
 			break;
-		case 2:	MenuScreensGoto(MS_LOADSAVE);		break;	// Load/Save/Replay
+		case 1:	MenuScreensGoto(MS_PRACTISE_TRACK);	break;	// Practise
+		case 2:												// Start the Racing Season
+			/*	mgs9 goes straight to the fixture screen (R.64664) and from there	*/
+			/*	into set.and.preview.road - there is no division screen in between.	*/
+			LeagueStartSeason();
+			MenuScreensGoto(MS_FIXTURE);
+			break;
+		case 3:	MenuScreensGoto(MS_LOADSAVE);		break;	// Load/Save/Replay
 		}
 	}
 
@@ -715,6 +865,9 @@ void MenuScreensKey( int key )
 		case MS_MAIN:			ActivateMain();		break;
 		case MS_SELECT:			ActivateSelect();	break;
 
+		/*	Shown after the name has been entered, and again once a season is over.	*/
+		case MS_OPPONENTS:		MenuScreensGoto(MS_SELECT);		break;
+
 		case MS_PRACTISE_TRACK:
 			gRaceIsLeague = false;
 			gRaceTrack    = gSelection;
@@ -722,7 +875,8 @@ void MenuScreensKey( int key )
 				gActive = false;
 			break;
 
-		case MS_DIVISION:		MenuScreensGoto(MS_FIXTURE);	break;
+		case MS_DIVISION:		MenuScreensGoto(MS_SELECT);		break;
+
 		case MS_FIXTURE:		StartLeagueRace();				break;
 		case MS_RESULT:			MenuScreensGoto(MS_TABLE);		break;
 
@@ -746,7 +900,18 @@ void MenuScreensKey( int key )
 
 		case MS_SUPER_LEAGUE:	MenuScreensGoto(MS_CHANGES);		break;
 		case MS_CHANGES:		MenuScreensGoto(MS_HALL_OF_FAME);	break;
-		case MS_HALL_OF_FAME:	MenuScreensGoto(MS_DIVISION);		break;
+		case MS_HALL_OF_FAME:
+			if (gHallFromMenu)
+				{
+				gHallFromMenu = false;
+				MenuScreensGoto(MS_SELECT);
+				}
+			else
+				/*	mgsd: R.646d6 (changes), R.5933a, then R.648b2 - the ladder	*/
+				/*	picture again, with the new order - and back to the menu.	*/
+				MenuScreensGoto(MS_OPPONENTS);
+			break;
+
 		case MS_LOADSAVE:		MenuScreensGoto(MS_SELECT);			break;
 		case MS_LINK:			MenuScreensGoto(MS_MAIN);			break;
 

@@ -38,6 +38,11 @@ extern long	VALUE1, VALUE2;
 /*	Global data */
 /*	=========== */
 extern GameModeType GameMode;
+
+/*	The Amiga preview screen draws the road the way the game does, lines and all - see		*/
+/*	DrawTrack.  The PC port's own preview and the track menu keep the plain flat road.		*/
+extern bool bAmigaTrackPreview;
+extern bool bAmigaPreviewScreen;
 extern long bTrackDrawMode;
 extern bool bSuperLeague;
 
@@ -2547,7 +2552,13 @@ void DrawTrack (IDirect3DDevice9 *pd3dDevice)
 
 	pd3dDevice->SetStreamSource( 0, pTrackVB, 0, sizeof(UTVERTEX) );
 	pd3dDevice->SetFVF( D3DFVF_UTVERTEX );
-	if ((GameMode == TRACK_MENU) || (GameMode == TRACK_PREVIEW))
+	/*	The Amiga's preview showed the road with its markings on - the loop reads as a	*/
+	/*	yellow-and-black ribbon in the arena, not a bare grey one - so it takes the game's	*/
+	/*	drawing path below.															*/
+	const bool bPlainRoad = (GameMode == TRACK_MENU) ||
+							((GameMode == TRACK_PREVIEW) && !(bAmigaTrackPreview && bAmigaPreviewScreen));
+
+	if (bPlainRoad)
 	{
 		/*
 		 * Draw track without road lines

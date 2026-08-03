@@ -76,6 +76,7 @@ IDirectSoundBuffer8 *EngineSoundBuffers[8] = {NULL};
 IDirect3DTexture9 *g_pAtlas = NULL;
 
 int wideScreen = 0;
+float gCustomScale = 0.0f;	// -s option, in points; 0 = auto-fit the window
 
 static long frameGap = DEFAULT_FRAME_GAP;
 static bool bFrameMoved = FALSE;
@@ -863,8 +864,152 @@ long radius = ((NUM_TRACK_CUBES - 2) * CUBE_SIZE)/PRECISION;
 
 #define NUM_PREVIEW_CAMERAS (9)
 
+/*	The Amiga's track preview (R.604b4, "Reference only/StuntCarRacer.s":13603) is not a
+	chase camera at all.  It is FOUR FIXED viewpoints, one at the middle of each edge of the
+	16 x 16 map, each looking straight in along its axis, and you cycle round them with fire.
+	No car is shown and nothing moves.
+
+	    TAB.60552	world.x	 = 4, 0, 4, 8		(bytes; see below)
+			world.z	 = 0, 4, 8, 4
+			y.angle	 = $00, $40, $80, $c0	(0, 90, 180, 270 degrees)
+
+	Those x/z bytes are written to the TOP byte of a longword world coordinate, and a map
+	square is $800000, so a byte of 4 means 8 map squares - i.e. the four positions are
+	(8,0), (0,8), (8,16), (16,8) in map squares, the mid-point of each edge of the map.
+
+	Height is players.world.y = $03f00000.  Amiga world y is up-positive with 0 at ground
+	level and a $0400 (1024) ceiling on the player - see "limit player's height" at
+	"Reference only/StuntCarRacer.s":15714 - so $03f0 = 1008 is as high as the world goes,
+	and at 128 per map square that is 7.875 map squares up.  Ours is the same scale but
+	y-DOWN, hence the negation.
+
+	Pitch: the preview sets y.shift = 1792 where the game's y.shift is -players.x.angle in
+	degrees*256, so the camera is tilted 7 degrees down.
+
+	Not reproduced: the preview also swaps in a different projection (calculate.screen.x /
+	calculate.screen.y at ":16684"), which halves x, quarters z and adds a large constant
+	depth, and scales y by 19483/32768.  That is a per-axis hack with a DIFFERENT depth for
+	x than for y - not a projective transform, so no single frustum can express it.  We keep
+	the game's field of view.									*/
+
+#define NUM_AMIGA_PREVIEW_VIEWS	(4)
+
+/*	Which of the four the preview is currently showing - the Amiga's B.1bb57 & 3.			*/
+long gTrackPreviewView = 0;
+
+/*	Off restores the PC port's own preview (a camera parked near the centre of the map,
+	locked onto the opponent's car as it drives round).									*/
+bool bAmigaTrackPreview = true;
+
+/*	========================================================================================
+	The Amiga's preview SCREEN.  The original decrunched a full-screen picture into chip RAM
+	(preview.crunched, set.and.preview.road at "Reference only/StuntCarRacer.s":10137) and
+	drew the road into a window cut out of it: a checkerboard-framed view of an arena with
+	mountains, grandstands and a dirt floor, with the course title on a panel underneath.
+
+	Bitmap/trackpreview.png is that picture, at the Amiga's own 320x200.  These are its
+	measurements in surface pixels.  (Bitmap/trackpreview_raw.png is the original grab it
+	was cleaned from - see tools/clean_trackpreview.py.)
+	======================================================================================== */
+
+#define PREVIEW_SCREEN_IMAGE	"trackpreview.png"
+
+/*	The picture window inside the checkerboard border, which the 3D road is drawn into.	*/
+#define PREVIEW_WINDOW_X		12
+#define PREVIEW_WINDOW_Y		10
+#define PREVIEW_WINDOW_W		296
+#define PREVIEW_WINDOW_H		134
+
+/*	The bevelled title panel below it, and the row the prompt line sits on.				*/
+#define PREVIEW_PANEL_X			80
+#define PREVIEW_PANEL_Y			168
+#define PREVIEW_PANEL_W			160
+#define PREVIEW_PANEL_H			16
+#define PREVIEW_PROMPT_COL		23
+#define PREVIEW_PROMPT_ROW		24
+
+/*	The dirt arena floor inside the picture, which is where the track has to end up.  The
+	painted floor runs from y=67 (behind the grandstands) to the bottom of the window at
+	y=143, and x=14 to x=307 at its widest; this is that area inset a little, so the track
+	sits on the dirt with a margin the way the original's does.  SetPreviewWindowProjection
+	fits the whole 16 x 16 map into this rectangle.										*/
+#define PREVIEW_FLOOR_X			22
+#define PREVIEW_FLOOR_Y			78
+#define PREVIEW_FLOOR_W			276
+#define PREVIEW_FLOOR_H			60
+
+bool bAmigaPreviewScreen = true;
+
+/*	How far back from the centre of the map the eye sits, in map squares.  The Amiga's own
+	viewpoints are ON the edge (8 squares out), which only works because its preview
+	projection quarters z and adds a large constant depth - the whole track is pushed away
+	and flattened into a long lens.  We cannot express that as a frustum, so we do the
+	geometric equivalent and stand the camera back instead.  The distance no longer sets the
+	framing (the projection is fitted to the arena floor, below); all it controls is how much
+	perspective there is, and 32 squares gives the flat, long-lens look the original's
+	quartered z does - the near edge of the map comes out 1.7x the far edge.				*/
+#define PREVIEW_EYE_DISTANCE	(32)
+
+/*	How steeply the eye looks down, in degrees.  The Amiga's is 44.5: players.world.y =
+	$03f00000 = 1008, and at 128 per map square that is 7.875 squares up, over the 8 squares
+	its viewpoints stand out from the centre (world y is up-positive there with 0 at ground
+	level - see the $0400 ceiling at "Reference only/StuntCarRacer.s":15714).  Steep enough
+	to look down ON the road rather than along it, which is what shows the loop as a loop;
+	the flattening that made the original look like a poster rather than a plan view comes
+	from the projection, not from lowering the eye.  Ours is a little shallower so the road
+	still reads as road.																	*/
+#define PREVIEW_EYE_ELEVATION	(38.0)
+
+static void CalcAmigaTrackPreviewViewpoint( void )
+{
+	// Which way the eye faces, from TAB.60552's y.angle bytes $00/$40/$80/$c0.  y_angle is
+	// atan2(dx, dz) here (see LockViewpointToTarget), so the heading is (sin, cos) and the
+	// eye stands back along the opposite of it.
+	static const long view_a[NUM_AMIGA_PREVIEW_VIEWS] = { 0, 64, 128, 192 };
+
+	const long view    = gTrackPreviewView & (NUM_AMIGA_PREVIEW_VIEWS - 1);
+	const long centre  = (NUM_TRACK_CUBES / 2) * CUBE_SIZE;
+
+	const double radians = (static_cast<double>(view_a[view]) * 2.0 * PI) / 256.0;
+	const char *dist_env = getenv("SCR_PREVIEW_DIST");
+	const double back    = static_cast<double>(dist_env ? atof(dist_env) : PREVIEW_EYE_DISTANCE) * static_cast<double>(CUBE_SIZE);
+
+	// Aim at the centre of the map, as the Amiga's four axis-aligned views all do.
+	target_x = centre;
+	target_y = 0;					// road level, as CalcTrackMenuViewpoint uses
+	target_z = centre;
+
+	const char *elev_env = getenv("SCR_PREVIEW_ELEV");
+	const double elevation = (elev_env ? atof(elev_env) : PREVIEW_EYE_ELEVATION) * PI / 180.0;
+
+	viewpoint1_x = centre - static_cast<long>(sin(radians) * back);
+	viewpoint1_z = centre - static_cast<long>(cos(radians) * back);
+	viewpoint1_y = -static_cast<long>(back * tan(elevation));
+
+	// Pitch and heading follow from the two points; the view matrix is built with LookAt, but
+	// DrawBackdrop reads these angles.
+	LockViewpointToTarget(viewpoint1_x,
+						  viewpoint1_y,
+						  viewpoint1_z,
+						  target_x,
+						  target_y,
+						  target_z,
+						  &viewpoint1_x_angle,
+						  &viewpoint1_y_angle);
+	viewpoint1_z_angle = 0;
+}
+
 static void CalcTrackPreviewViewpoint( void )
 {
+	if (bAmigaTrackPreview)
+	{
+		CalcAmigaTrackPreviewViewpoint();
+		if (getenv("SCR_PREVIEW_DEBUG"))
+			printf("preview viewpoint: %ld,%ld,%ld target %ld,%ld,%ld\n",
+				   viewpoint1_x, viewpoint1_y, viewpoint1_z, target_x, target_y, target_z);
+		return;
+	}
+
 	// Target orientation - opponent
 	target_x = opponent_x,
 	target_y = opponent_y,
@@ -1177,6 +1322,18 @@ D3DXMATRIX matRot, matTemp, matTrans;
 }
 
 
+/*	The Amiga track preview draws the road only.  The opponent's car is drawn unconditionally
+	by the render pass, so put it somewhere the camera can never see rather than adding a
+	branch to the renderer.																*/
+static void HideOpponentsCar( void )
+{
+	D3DXMatrixTranslation( &matWorldOpponentsCar,
+						   0.0f,
+						   static_cast<float>(1000 * NUM_TRACK_CUBES * (CUBE_SIZE>>LOG_PRECISION)),
+						   0.0f );
+}
+
+
 static void StopEngineSound( void )
 {
 	if (engineSoundPlaying)
@@ -1410,8 +1567,13 @@ static float lastFrame = 0.0f;
 		{
 			CalcTrackPreviewViewpoint();
 
-			// Set the car's world transform matrix
-			SetOpponentsCarWorldTransform();
+			// Set the car's world transform matrix.  The Amiga preview shows no cars at
+			// all - it draws the road and nothing else - so park the opponent out of
+			// sight rather than driving it round the track.
+			if (bAmigaTrackPreview)
+				HideOpponentsCar();
+			else
+				SetOpponentsCarWorldTransform();
 		}
 
 		// Set Direct3D transforms, ready for OnFrameRender
@@ -1518,10 +1680,16 @@ static float lastFrame = 0.0f;
 #define FIRSTMENU SDLK_1
 #define STARTMENU SDLK_s
 #define LEAGUEMENU SDLK_l
+#define PREVIEWVIEW SDLK_SPACE
+#define PREVIEWLEFT SDLK_LEFT
+#define PREVIEWRIGHT SDLK_RIGHT
 #else
 #define FIRSTMENU '1'
 #define STARTMENU 'S'
 #define LEAGUEMENU 'L'
+#define PREVIEWVIEW ' '
+#define PREVIEWLEFT VK_LEFT
+#define PREVIEWRIGHT VK_RIGHT
 #endif
 
 /*	======================================================================================= */
@@ -1631,6 +1799,8 @@ static void HandleTrackMenu( CDXUTTextHelper &txtHelper )
 /*	Description:	Output track preview text												*/
 /*	======================================================================================= */
 
+static void HandleTrackPreviewInput( void );
+
 static void HandleTrackPreview( CDXUTTextHelper &txtHelper )
 	{
 	// output instructions
@@ -1638,7 +1808,9 @@ static void HandleTrackPreview( CDXUTTextHelper &txtHelper )
 	float textScale = GetTextScale();
 	txtHelper.SetInsertionPos( static_cast<int>((2+(wideScreen?10:0)) * textScale), static_cast<int>(pd3dsdBackBuffer->Height-15*9*textScale) );
 	txtHelper.DrawFormattedTextLine( L"Selected track - " STRING L".  Press 'S' to start game", (TrackID == NO_TRACK ? L"None" : GetTrackName(TrackID)));
-	txtHelper.DrawTextLine( L"'M' for track menu, Escape to quit");
+	txtHelper.DrawTextLine( bAmigaTrackPreview
+							? L"'M' for track menu, steer to rotate view, Escape to quit"
+							: L"'M' for track menu, Escape to quit");
 	txtHelper.DrawTextLine( L"(Press F4 to change scenery, F9 / F10 to adjust frame rate)" );
 
 	txtHelper.SetInsertionPos( static_cast<int>((2+(wideScreen?10:0)) * textScale), static_cast<int>(pd3dsdBackBuffer->Height-15*6*textScale) );
@@ -1650,6 +1822,31 @@ static void HandleTrackPreview( CDXUTTextHelper &txtHelper )
 	#endif
 	txtHelper.DrawTextLine( L"  R = Point car in opposite direction, P = Pause, O = Unpause" );
 	txtHelper.DrawTextLine( L"  M = Back to track menu, Escape = Quit" );
+
+	HandleTrackPreviewInput();
+
+	return;
+	}
+
+/*	Preview keys, kept apart from the text above: the Amiga preview screen draws itself in
+	OnFrameRender and returns before RenderText is reached, so the input has to be reachable
+	from there too.																			*/
+static void HandleTrackPreviewInput( void )
+	{
+	// Amiga: "steer to rotate view or fire to continue" - R.604b4 is re-entered on each
+	// press, stepping B.1bb57 through the four fixed viewpoints
+	// ("Reference only/StuntCarRacer.s":13603).
+	if (bAmigaTrackPreview &&
+		((keyPress == PREVIEWLEFT) || (keyPress == PREVIEWRIGHT)))
+		{
+		gTrackPreviewView = (gTrackPreviewView + ((keyPress == PREVIEWLEFT) ? -1 : 1))
+							& (NUM_AMIGA_PREVIEW_VIEWS - 1);
+		keyPress = '\0';
+		}
+
+	// "Hit fire to continue" - fire (space) starts the race, as on the Amiga
+	if (bAmigaTrackPreview && (keyPress == PREVIEWVIEW))
+		keyPress = STARTMENU;
 
 	if (keyPress == STARTMENU)
 		{
@@ -2020,8 +2217,287 @@ D3DLIGHT9 light;
 #endif
 
 
+/*	======================================================================================= */
+/*	Function:		DrawAmigaPreviewScreen													*/
+/*																							*/
+/*	Description:	Put up the Amiga's preview picture and the course title under it.		*/
+/*					set.and.preview.road decrunched the picture, then called R.61260 to		*/
+/*					print the road title and printed 'Broken by QUARTEX...' underneath		*/
+/*					("Reference only/StuntCarRacer.s":10137).  We print the title and the	*/
+/*					prompt the original showed in its place.								*/
+/*	======================================================================================= */
+
+static void DrawAmigaPreviewScreen( IDirect3DDevice9 *pd3dDevice )
+	{
+	static const AmigaPen INK_YELLOW = { 240, 240, 0 };
+
+	AmigaMenuBlit(PREVIEW_SCREEN_IMAGE, 0, 0);
+
+	/*	The title goes in the bevelled panel.  Centre it there in pixels rather than on the	*/
+	/*	character grid - the panel does not sit on an 8-pixel row boundary.					*/
+	if (TrackID != NO_TRACK)
+		{
+		char name[64];
+		const WCHAR *wide = GetTrackName(TrackID);
+		int n = 0;
+		while (wide[n] && (n < (int)sizeof(name) - 1))
+			{
+			name[n] = (char)wide[n];
+			n++;
+			}
+		name[n] = '\0';
+
+		const int text_w = n * AMIGA_CHAR_WIDTH;
+
+		AmigaMenuSetInk(AMIGA_INK_WHITE);
+		AmigaMenuPrintPixel(PREVIEW_PANEL_X + (PREVIEW_PANEL_W - text_w) / 2,
+							PREVIEW_PANEL_Y + (PREVIEW_PANEL_H - AMIGA_CHAR_HEIGHT) / 2,
+							name);
+		}
+
+	AmigaMenuSetInk(INK_YELLOW);
+	AmigaMenuPrintAt(PREVIEW_PROMPT_COL, PREVIEW_PROMPT_ROW, "Hit fire to continue");
+
+	AmigaMenuPresent(pd3dDevice);
+	}
+
+
+/*	======================================================================================= */
+/*	Function:		SetPreviewWindowProjection / SetPreviewWindowClip						*/
+/*																							*/
+/*	Description:	Aim the 3D projection at the picture window rather than the whole		*/
+/*					screen, and clip to it.												*/
+/*																							*/
+/*					The game's own field of view cannot be used here.  The preview window is	*/
+/*					a 296 x 134 letterbox and the arena floor painted inside it is flatter	*/
+/*					still, so a 45 x 22.5-degree frustum shows a band across the middle of	*/
+/*					the map and throws the rest off the top and bottom of the window - which	*/
+/*					is exactly what the Amiga's own preview projection existed to avoid.  It	*/
+/*					halved x, quartered z and scaled y by 19483/32768 (calculate.screen.x /	*/
+/*					calculate.screen.y at "Reference only/StuntCarRacer.s":16684): a per-axis	*/
+/*					squash that flattened the whole map onto the arena floor.				*/
+/*																							*/
+/*					We do the same thing the honest way.  The four ground corners of the		*/
+/*					16 x 16 map are taken into camera space, and the frustum is built to		*/
+/*					land their bounding box exactly on the picture's dirt floor				*/
+/*					(PREVIEW_FLOOR_*).  x and y get their own focal lengths, so this is		*/
+/*					anamorphic in the same way the original was, and the framing is right by	*/
+/*					construction whatever eye distance or height is chosen.  Raised pieces	*/
+/*					stand above the fitted box, as they do on the original.					*/
+/*																							*/
+/*					The frustum still has to reach the edges of the render target, because	*/
+/*					that is what the viewport covers; the scissor is what actually confines	*/
+/*					the road to the window.												*/
+/*	======================================================================================= */
+
+#ifndef SCR_DEG_TO_RAD
+#define SCR_DEG_TO_RAD(d)	((d) * 3.14159265358979323846f / 180.0f)
+#endif
+
+static void SetPreviewWindowProjection( IDirect3DDevice9 *pd3dDevice )
+	{
+	long screen_width, screen_height;
+	GetScreenDimensions(&screen_width, &screen_height);
+
+	float floor_x, floor_y, floor_w, floor_h;
+	AmigaMenuGetScreenRect(PREVIEW_FLOOR_X, PREVIEW_FLOOR_Y,
+						   PREVIEW_FLOOR_W, PREVIEW_FLOOR_H,
+						   &floor_x, &floor_y, &floor_w, &floor_h);
+
+	/*	The camera basis, rebuilt from exactly the eye, look-at and up vector that the view	*/
+	/*	matrix was built from in OnFrameMove, so the two cannot disagree.					*/
+	const float eye[3]  = { (float)viewpoint1_x,
+							(float)(-viewpoint1_y >> LOG_PRECISION),
+							(float)viewpoint1_z };
+	const float look[3] = { (float)target_x - eye[0], (float)target_y - eye[1], (float)target_z - eye[2] };
+
+	const float look_len = sqrtf((look[0]*look[0]) + (look[1]*look[1]) + (look[2]*look[2]));
+	if (look_len < 1.0f)
+		return;
+	const float fwd[3] = { look[0]/look_len, look[1]/look_len, look[2]/look_len };
+
+	// right = forward x up, camera up = right x forward (vUpVec is (0,1,0)).
+	float right[3] = { -fwd[2], 0.0f, fwd[0] };			// fwd x (0,1,0)
+	const float right_len = sqrtf((right[0]*right[0]) + (right[2]*right[2]));
+	if (right_len < 0.0001f)
+		return;
+	right[0] /= right_len; right[2] /= right_len;
+
+	const float up[3] = { (right[1]*fwd[2]) - (right[2]*fwd[1]),
+						  (right[2]*fwd[0]) - (right[0]*fwd[2]),
+						  (right[0]*fwd[1]) - (right[1]*fwd[0]) };
+
+	/*	The map's ground corners, and the extent of their projection.  Ground level is y=0	*/
+	/*	in the space the view matrix works in (see the target_y negation in OnFrameMove).	*/
+	const float map = (float)((NUM_TRACK_CUBES * CUBE_SIZE) >> LOG_PRECISION);
+	float tan_x_min = 0.0f, tan_x_max = 0.0f, tan_y_min = 0.0f, tan_y_max = 0.0f;
+	float max_depth = 0.0f, min_depth = 0.0f;
+
+	for (int corner = 0; corner < 4; corner++)
+		{
+		const float p[3] = { (corner & 1) ? map : 0.0f, 0.0f, (corner & 2) ? map : 0.0f };
+		const float d[3] = { p[0] - eye[0], p[1] - eye[1], p[2] - eye[2] };
+
+		const float depth = (d[0]*fwd[0]) + (d[1]*fwd[1]) + (d[2]*fwd[2]);
+		if (depth < 1.0f)
+			return;								// the map is not wholly in front of the eye
+		if (depth > max_depth)
+			max_depth = depth;
+		if ((corner == 0) || (depth < min_depth))
+			min_depth = depth;
+
+		const float tx = ((d[0]*right[0]) + (d[1]*right[1]) + (d[2]*right[2])) / depth;
+		const float ty = ((d[0]*up[0])    + (d[1]*up[1])    + (d[2]*up[2]))    / depth;
+
+		if ((corner == 0) || (tx < tan_x_min)) tan_x_min = tx;
+		if ((corner == 0) || (tx > tan_x_max)) tan_x_max = tx;
+		if ((corner == 0) || (ty < tan_y_min)) tan_y_min = ty;
+		if ((corner == 0) || (ty > tan_y_max)) tan_y_max = ty;
+		}
+
+	if ((tan_x_max - tan_x_min < 0.0001f) || (tan_y_max - tan_y_min < 0.0001f))
+		return;
+
+	/*	Focal lengths that map that box onto the floor rectangle, and the principal point	*/
+	/*	that lands it in the right place.  Screen x grows with tan_x; screen y grows with	*/
+	/*	tan_y too, because of the b/t flip these frustums are built with.					*/
+	/*	The whole map is tens of squares away, so the near plane can be pushed right out to	*/
+	/*	meet it.  It has to be: the game's zn of 0.5 against a far plane out at the far side	*/
+	/*	of the map leaves the depth buffer with no resolution at all at this range, and the	*/
+	/*	far half of the track quietly fails the depth test against the cleared buffer.		*/
+	const float zn = min_depth * 0.25f;
+	const float focal_x = floor_w / (tan_x_max - tan_x_min);
+	const float focal_y = floor_h / (tan_y_max - tan_y_min);
+
+	const float centre_x = floor_x - (tan_x_min * focal_x);
+	const float centre_y = floor_y - (tan_y_min * focal_y);
+
+	// b/t follow D3DXMatrixPerspectiveFovLH's flipped y, as in SetSceneProjection.
+	const float l = -(centre_x / focal_x) * zn;
+	const float r =  (((float)screen_width  - centre_x) / focal_x) * zn;
+	const float b =  (centre_y / focal_y) * zn;
+	const float t = -(((float)screen_height - centre_y) / focal_y) * zn;
+
+	/*	The game's FURTHEST_Z is a draw distance for a car on a track, and the far side of	*/
+	/*	the map is well beyond it from here - left at that, most of the track is clipped		*/
+	/*	away and only the nearest few pieces are drawn.  Take the far plane from the map		*/
+	/*	instead, with room for the pieces standing above the ground corners.				*/
+	const float zf = max_depth * 1.5f;
+
+	if (getenv("SCR_PREVIEW_DEBUG"))
+		printf("preview eye (%.0f,%.0f,%.0f) fwd (%.3f,%.3f,%.3f) right (%.3f,%.3f,%.3f) up (%.3f,%.3f,%.3f) map %.0f\n",
+			   eye[0], eye[1], eye[2], fwd[0], fwd[1], fwd[2], right[0], right[1], right[2], up[0], up[1], up[2], map);
+	if (getenv("SCR_PREVIEW_DEBUG"))
+		printf("preview fit: floor base (%.1f,%.1f %.1fx%.1f) tanx %.3f..%.3f tany %.3f..%.3f "
+			   "focal %.1f,%.1f centre %.1f,%.1f zf %.0f\n",
+			   floor_x, floor_y, floor_w, floor_h,
+			   tan_x_min, tan_x_max, tan_y_min, tan_y_max,
+			   focal_x, focal_y, centre_x, centre_y, zf);
+
+	D3DXMATRIX matProj;
+	D3DXMatrixPerspectiveOffCenterLH( &matProj, l, r, b, t, zn, zf );
+	pd3dDevice->SetTransform( D3DTS_PROJECTION, &matProj );
+	}
+
+static void SetPreviewWindowClip( bool enable )
+	{
+#ifdef linux
+	if (!enable)
+		{
+		glDisable(GL_SCISSOR_TEST);
+		return;
+		}
+
+	// The frame's viewport is the whole 640x480 (or 800x480) base space, letterboxed into
+	// the drawable and vertically squashed to PAL's pixel aspect.  Read it back rather than
+	// recomputing it, so this cannot drift out of step with SetupViewport.
+	GLint vp[4];
+	glGetIntegerv(GL_VIEWPORT, vp);
+
+	long screen_width, screen_height;
+	GetScreenDimensions(&screen_width, &screen_height);
+
+	float win_x, win_y, win_w, win_h;
+	AmigaMenuGetScreenRect(PREVIEW_WINDOW_X, PREVIEW_WINDOW_Y,
+						   PREVIEW_WINDOW_W, PREVIEW_WINDOW_H,
+						   &win_x, &win_y, &win_w, &win_h);
+
+	const float sx = (float)vp[2] / (float)screen_width;
+	const float sy = (float)vp[3] / (float)screen_height;
+
+	// glScissor's origin is bottom left, base space's is top left.
+	glScissor(vp[0] + (GLint)(win_x * sx),
+			  vp[1] + (GLint)(((float)screen_height - win_y - win_h) * sy),
+			  (GLsizei)(win_w * sx + 0.5f),
+			  (GLsizei)(win_h * sy + 0.5f));
+	glEnable(GL_SCISSOR_TEST);
+#else
+	IDirect3DDevice9 *pd3dDevice = DXUTGetD3DDevice();
+	if (!enable)
+		{
+		pd3dDevice->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+		return;
+		}
+
+	float win_x, win_y, win_w, win_h;
+	AmigaMenuGetScreenRect(PREVIEW_WINDOW_X, PREVIEW_WINDOW_Y,
+						   PREVIEW_WINDOW_W, PREVIEW_WINDOW_H,
+						   &win_x, &win_y, &win_w, &win_h);
+
+	RECT rect;
+	rect.left   = (LONG)win_x;
+	rect.top    = (LONG)win_y;
+	rect.right  = (LONG)(win_x + win_w);
+	rect.bottom = (LONG)(win_y + win_h);
+	pd3dDevice->SetScissorRect(&rect);
+	pd3dDevice->SetRenderState(D3DRS_SCISSORTESTENABLE, TRUE);
+#endif
+	}
+
+
+#ifdef linux
+/*	Set by the SCR_PREVIEW_SHOT development aid below: the file the next completed preview
+	frame should be written to, before the program quits.									*/
+static const char *gPreviewShotDue = NULL;
+
+extern SDL_Window *window;
+
+static void WriteFramebufferPPM( const char *path )
+	{
+	GLint vp[4];
+	glGetIntegerv(GL_VIEWPORT, vp);
+
+	const int x = 0, y = 0;
+	int w = 0, h = 0;
+	SDL_GL_GetDrawableSize(window, &w, &h);
+	if ((w <= 0) || (h <= 0))
+		{
+		w = vp[2];
+		h = vp[3];
+		}
+
+	unsigned char *pixels = (unsigned char *)malloc((size_t)w * h * 3);
+	if (pixels == NULL)
+		return;
+
+	glPixelStorei(GL_PACK_ALIGNMENT, 1);
+	glReadPixels(x, y, w, h, GL_RGB, GL_UNSIGNED_BYTE, pixels);
+
+	FILE *f = fopen(path, "wb");
+	if (f != NULL)
+		{
+		fprintf(f, "P6\n%d %d\n255\n", w, h);
+		for (int row = h - 1; row >= 0; row--)		// glReadPixels is bottom-up
+			fwrite(pixels + (size_t)row * w * 3, 1, (size_t)w * 3, f);
+		fclose(f);
+		printf("preview shot: wrote %s (%dx%d)\n", path, w, h);
+		}
+	free(pixels);
+	}
+#endif
+
 //--------------------------------------------------------------------------------------
-// Render the scene 
+// Render the scene
 //--------------------------------------------------------------------------------------
 
 void CALLBACK OnFrameRender( IDirect3DDevice9 *pd3dDevice, double fTime, float fElapsedTime, void *pUserContext )
@@ -2033,6 +2509,28 @@ HRESULT hr;
 
     // Clear the zbuffer
     V( pd3dDevice->Clear(0, NULL, D3DCLEAR_ZBUFFER, 0, 1.0f, 0) );
+
+#ifdef linux
+	/*	SCR_PREVIEW_SHOT=<file.ppm> jumps straight into the track preview for the track in
+		SCR_PREVIEW_TRACK, grabs the framebuffer and quits.  A development aid for working
+		on the preview screen without driving the menus by hand.							*/
+	{
+	static const char *shotPath = getenv("SCR_PREVIEW_SHOT");
+	static long shotFrame = 0;
+	if (shotPath)
+		{
+		++shotFrame;
+		if (shotFrame == 3)
+			{
+			const char *t = getenv("SCR_PREVIEW_TRACK");
+			if (MenuStartTrack(t ? atoi(t) : 0))
+				MenuScreensDeactivate();
+			}
+		else if (shotFrame > 90)		// long enough for the ~8Hz world clock to run
+			gPreviewShotDue = shotPath;
+		}
+	}
+#endif
 
     // A finished race hands control straight back to the menus, which score it and put up
     // the RESULT screen.  MenuScreensRaceFinished reactivates them, so this fires once.
@@ -2061,9 +2559,65 @@ HRESULT hr;
         return;
     }
 
+	// The Amiga's preview screen: a picture with the road drawn into a window cut out of it.
+	// Nothing of the normal scene presentation applies - no backdrop (the picture has its own
+	// mountains and grandstands), no help text, and the road is clipped to the window.
+	const bool previewScreen = (GameMode == TRACK_PREVIEW) && bAmigaTrackPreview && bAmigaPreviewScreen;
+
+	// Normally DrawBackdrop covers every pixel, so the target is never cleared.  The preview
+	// picture is letterboxed, so the bands round it have to be wiped.
+	if (previewScreen)
+		V( pd3dDevice->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0) );
+
     // Render the scene
     if( SUCCEEDED( pd3dDevice->BeginScene() ) )
     {
+		if (previewScreen)
+		{
+			DrawAmigaPreviewScreen( pd3dDevice );
+
+			pd3dDevice->SetRenderState( D3DRS_ZENABLE, FALSE );
+			pd3dDevice->SetRenderState( D3DRS_CULLMODE, D3DCULL_NONE );
+
+			SetPreviewWindowProjection( pd3dDevice );
+			SetPreviewWindowClip( true );
+
+			// The whole map is 30-odd squares away here, deep into the haze, and the Amiga's
+			// preview had no distance shading at all - it drew the road in flat colour. Turn
+			// the fog off for it, or the track comes out as a grey silhouette.
+#ifdef SCR_FOG_SHADER
+			const bool savedFog = gFogEnabled;
+			gFogEnabled = false;
+#endif
+			// AmigaMenuBlit leaves the picture bound as texture 0 with a live colour op, and
+			// DrawTrack's preview path never sets one of its own, so without this the road
+			// comes out sampled from the preview picture instead of its own flat colours.
+			pd3dDevice->SetTextureStageState( 0, D3DTSS_COLOROP, D3DTOP_DISABLE );
+
+			pd3dDevice->SetTransform( D3DTS_WORLD, &matWorldTrack );
+			DrawTrack(pd3dDevice);
+#ifdef SCR_FOG_SHADER
+			gFogEnabled = savedFog;
+#endif
+
+			SetPreviewWindowClip( false );
+			pd3dDevice->SetRenderState( D3DRS_ZENABLE, TRUE );
+			pd3dDevice->EndScene();
+
+#ifdef linux
+			if (gPreviewShotDue)
+				{
+				WriteFramebufferPPM(gPreviewShotDue);
+				exit(0);
+				}
+#endif
+
+			// This path returns without reaching RenderText, so the preview keys
+			// ("hit fire to continue", steer to rotate) are handled here instead.
+			HandleTrackPreviewInput();
+			return;
+		}
+
 		// Cheap, and means the FOV toggle takes effect immediately
 		SetSceneProjection( pd3dDevice );
 
@@ -2480,6 +3034,14 @@ INT WINAPI WinMain( HINSTANCE, HINSTANCE, LPSTR, int )
 
 #else
 
+#ifdef USE_SDL2
+// Recompute the GL viewport from the window's current drawable size. Needed at
+// runtime as well as at startup: dragging the window between displays with
+// different backing scales (Retina <-> external) changes the drawable size
+// without any resize of our own, and a stale viewport stretches the raster.
+void ApplyViewport();
+#endif
+
 bool process_events()
 {
     SDL_Event event;
@@ -2761,6 +3323,17 @@ bool process_events()
 					break;
 				}
 			break;
+#ifdef USE_SDL2
+		case SDL_WINDOWEVENT:
+			switch(event.window.event) {
+			case SDL_WINDOWEVENT_SIZE_CHANGED:
+			case SDL_WINDOWEVENT_MOVED:
+			case SDL_WINDOWEVENT_EXPOSED:
+				ApplyViewport();
+				break;
+			}
+			break;
+#endif
         case SDL_QUIT:
             return false;
         }
@@ -2771,6 +3344,63 @@ bool process_events()
 IDirect3DDevice9 pd3dDevice;
 #ifdef USE_SDL2
 SDL_Window *window = NULL;
+
+void ApplyViewport()
+{
+	if(!window)
+		return;
+	int drawW = 0, drawH = 0, pointW = 0, pointH = 0;
+	SDL_GL_GetDrawableSize(window, &drawW, &drawH);
+	SDL_GetWindowSize(window, &pointW, &pointH);
+	if(drawW <= 0 || drawH <= 0)
+		return;
+	float dpiFactor = (pointW > 0) ? static_cast<float>(drawW) / static_cast<float>(pointW) : 1.0f;
+	if(dpiFactor <= 0.0f)
+		dpiFactor = 1.0f;
+
+	// automatic guess the scale or use custom scale
+	float screenScale;
+	if(gCustomScale > 0.0f) {
+		// Use custom scale factor, in points, so it matches the requested size
+		screenScale = gCustomScale * dpiFactor;
+	} else {
+		// Automatic scaling based on window size
+		screenScale = (drawW/640. < drawH/480.) ? drawW/640. : drawH/480.;
+	}
+	// is it a Wide screen ratio?
+	// Detect widescreen if width is significantly wider than 4:3 aspect ratio.
+	// Decided once, at startup: the whole 2D layout is built around it, so it
+	// must not flip when the window is dragged to another display.
+	static bool aspectChosen = false;
+	if(!aspectChosen) {
+		if((drawW/screenScale - 640)>=80)
+			wideScreen=1;
+		aspectChosen = true;
+	}
+	int viewW = static_cast<int>((wideScreen?800:640)*screenScale);
+	int fullH = static_cast<int>(480*screenScale);
+	int viewX = (drawW - viewW)/2;
+	int baseY = (drawH - fullH)/2;
+	// The 640x480 base holds the Amiga's 320x200 at (2.0, 2.4), i.e. 1.2x taller than wide.
+	// Undo that here, once, for the whole raster - geometry and 2D art alike - and replace it
+	// with PAL's own 1.0667, exactly as the monitor did on real hardware. 200 lines were
+	// letterboxed inside PAL's 256-line display window, so the black bands are authentic too.
+	// See SCR_PRESENT_SQUASH / AMIGA_PAL_PIXEL_ASPECT in 3D_Engine.h for the derivation.
+	int viewH = static_cast<int>(fullH * SCR_PRESENT_SQUASH + 0.5f);
+	int viewY = baseY + (fullH - viewH)/2;
+	static int lastW = 0, lastH = 0;
+	if(viewW != lastW || viewH != lastH) {
+		lastW = viewW; lastH = viewH;
+		printf("Display mode: %s, Scale: %.2f, Resolution: %dx%d (DPI factor %.2f)\n",
+			   wideScreen ? "Widescreen" : "Standard", screenScale, viewW, fullH, dpiFactor);
+	}
+	glViewport(viewX, viewY, viewW, viewH);
+	glMatrixMode(GL_PROJECTION);
+	glLoadIdentity();
+	glOrtho(0, wideScreen?800:640, 480, 0, 0, FURTHEST_Z);
+	glMatrixMode(GL_MODELVIEW);
+	glLoadIdentity();
+}
 #endif
 
 #ifdef __EMSCRIPTEN__
@@ -3088,6 +3718,14 @@ int main(int argc, const char** argv)
 	}
 	SDL_WM_SetCaption(maintitle, NULL);
 #endif
+#ifdef USE_SDL2
+	if(flags&SDL_WINDOW_FULLSCREEN || flags&SDL_WINDOW_FULLSCREEN_DESKTOP)
+		SDL_ShowCursor(SDL_DISABLE);
+	gCustomScale = customScale;
+	ApplyViewport();
+	screenH = 480;
+	screenW = wideScreen?800:640;
+#else
 	// automatic guess the scale or use custom scale
 	float screenScale = 1.;
 	if(customScale > 0.0f) {
@@ -3110,11 +3748,7 @@ int main(int argc, const char** argv)
 	screenH = 480*screenScale;
 	printf("Display mode: %s, Scale: %.2f, Resolution: %dx%d (DPI factor %.2f)\n",
 		   wideScreen ? "Widescreen" : "Standard", screenScale, screenW, screenH, dpiFactor);
-#ifdef USE_SDL2
-	if(flags&SDL_WINDOW_FULLSCREEN || flags&SDL_WINDOW_FULLSCREEN_DESKTOP)
-#else
 	if(flags&SDL_FULLSCREEN)
-#endif
 		SDL_ShowCursor(SDL_DISABLE);
 	// The 640x480 base holds the Amiga's 320x200 at (2.0, 2.4), i.e. 1.2x taller than wide.
 	// Undo that here, once, for the whole raster - geometry and 2D art alike - and replace it
@@ -3131,6 +3765,7 @@ int main(int argc, const char** argv)
 	glOrtho(0, screenW, screenH, 0, 0, FURTHEST_Z);
 	glMatrixMode(GL_MODELVIEW);
 	glLoadIdentity();
+#endif
 	glPixelStorei(GL_PACK_ALIGNMENT, 1);
 	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 

@@ -15,10 +15,11 @@
 enum MenuScreenType
 	{
 	MS_NAME_ENTRY = 0,	// 'NAME?'
+	MS_OPPONENTS,		// the twelve drivers, four divisions across - drawn full screen
 	MS_MAIN,			// 'SELECT' - Single Player League / Multiplayer / ...
 	MS_SELECT,			// 'SELECT' - Practise / Start the Racing Season / Load-Save-Replay
 	MS_PRACTISE_TRACK,	// pick any of the eight tracks
-	MS_DIVISION,		// 'DIVISION n' - the division's drivers and tracks
+	MS_DIVISION,		// 'DIVISION n' - the division's drivers and tracks (not in the flow)
 	MS_FIXTURE,			// 'RACE n' - The X V The Y, and the track
 	MS_RESULT,			// 'RESULT' - Race Winner / Fastest Lap
 	MS_TABLE,			// 'RESULTS TABLE'
@@ -38,6 +39,9 @@ void MenuScreensGoto( MenuScreenType screen );
 
 /*	True while the menus own the display and the keyboard.									*/
 bool MenuScreensActive( void );
+
+/*	Hand the display back to the 3D scene without going through a menu selection.			*/
+void MenuScreensDeactivate( void );
 
 /*	Feed a key press in (an SDL keysym under linux, a virtual key under Windows).			*/
 void MenuScreensKey( int key );

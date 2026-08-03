@@ -406,6 +406,36 @@ void AmigaMenuWritePPM( const char *path )
 	fclose(f);
 	}
 
+/*	Where a rectangle of the 320x200 surface lands on screen, in the 640x480 (or 800x480)
+	base space everything else is laid out in.  The surface is letterboxed into the window
+	at the 4:3 shape the original displayed at, so a widescreen window pillarboxes rather
+	than stretching.  The track preview needs this to know where to put the 3D view.		*/
+void AmigaMenuGetScreenRect( int sx, int sy, int sw, int sh,
+							 float *out_x, float *out_y, float *out_w, float *out_h )
+	{
+	long screen_width, screen_height;
+	GetScreenDimensions(&screen_width, &screen_height);
+
+	const float target = 4.0f / 3.0f;
+	float w = (float)screen_width;
+	float h = w / target;
+	if (h > (float)screen_height)
+		{
+		h = (float)screen_height;
+		w = h * target;
+		}
+	const float x0 = ((float)screen_width  - w) * 0.5f;
+	const float y0 = ((float)screen_height - h) * 0.5f;
+
+	const float scale_x = w / (float)AMIGA_SCREEN_WIDTH;
+	const float scale_y = h / (float)AMIGA_SCREEN_HEIGHT;
+
+	*out_x = x0 + (float)sx * scale_x;
+	*out_y = y0 + (float)sy * scale_y;
+	*out_w = (float)sw * scale_x;
+	*out_h = (float)sh * scale_y;
+	}
+
 void AmigaMenuPresent( IDirect3DDevice9 *pd3dDevice )
 	{
 	if (pMenuTexture == NULL)
@@ -433,21 +463,8 @@ void AmigaMenuPresent( IDirect3DDevice9 *pd3dDevice )
 			return;
 		}
 
-	/*	Letterbox the 320x200 surface into the window at the 4:3 shape the original			*/
-	/*	displayed at, so a widescreen window pillarboxes rather than stretching.				*/
-	long screen_width, screen_height;
-	GetScreenDimensions(&screen_width, &screen_height);
-
-	const float target = 4.0f / 3.0f;
-	float w = (float)screen_width;
-	float h = w / target;
-	if (h > (float)screen_height)
-		{
-		h = (float)screen_height;
-		w = h * target;
-		}
-	const float x0 = ((float)screen_width  - w) * 0.5f;
-	const float y0 = ((float)screen_height - h) * 0.5f;
+	float x0, y0, w, h;
+	AmigaMenuGetScreenRect(0, 0, AMIGA_SCREEN_WIDTH, AMIGA_SCREEN_HEIGHT, &x0, &y0, &w, &h);
 
 	MENUVERTEX *pVertices;
 	if (FAILED(pMenuVB->Lock(0, 0, (void **)&pVertices, 0)))
