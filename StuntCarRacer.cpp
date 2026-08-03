@@ -1282,6 +1282,32 @@ long x_offset, y_offset, z_offset;
 static D3DXMATRIX matWorldTrack, matWorldCar, matWorldOpponentsCar;
 
 
+/*	======================================================================================= */
+/*	Function:		WorldF																	*/
+/*																							*/
+/*	Description:	A position in world units, keeping its fraction.							*/
+/*																							*/
+/*					Positions carry LOG_PRECISION fractional bits, and everything feeding a	*/
+/*					transform used to throw them away with >>LOG_PRECISION - putting the		*/
+/*					eye point and the cars on a whole-unit lattice. A world unit is roughly	*/
+/*					a screen pixel in the near field, so the view snapped sideways a pixel	*/
+/*					at a time. On a straight that barely shows: the eye's x hardly changes,	*/
+/*					so its rounding sits still and the track edges hold their place. Through	*/
+/*					a corner x and z are both moving and both roundings toggle every frame	*/
+/*					or two, which is the shimmer along the edge of the road.					*/
+/*																							*/
+/*					The rotations were always continuous - only the translations were not.	*/
+/*					Division in double first: the fixed-point values reach ~2^29 near the	*/
+/*					far corner of the map, past what a float mantissa holds exactly.			*/
+/*	======================================================================================= */
+
+static inline float WorldF( long fixed_point_position )
+{
+	return static_cast<float>(static_cast<double>(fixed_point_position)
+							  / static_cast<double>(1L << LOG_PRECISION));
+}
+
+
 static void SetCarWorldTransform( void )
 {
 D3DXMATRIX matRot, matTemp, matTrans;
@@ -1299,7 +1325,7 @@ D3DXMATRIX matRot, matTemp, matTrans;
 	D3DXMatrixMultiply(&matRot, &matRot, &matTemp);
 	// Produce the translation matrix
 	// Position car slightly higher than wheel height (VCAR_HEIGHT/4) so wheels are fully visible
-	D3DXMatrixTranslation( &matTrans, static_cast<float>(player1_x>>LOG_PRECISION), static_cast<float>(-player1_y>>LOG_PRECISION)+VCAR_HEIGHT/3, static_cast<float>(player1_z>>LOG_PRECISION) );
+	D3DXMatrixTranslation( &matTrans, WorldF(player1_x), WorldF(-player1_y)+VCAR_HEIGHT/3, WorldF(player1_z) );
 	// Combine the rotation and translation matrices to complete the world matrix
 	D3DXMatrixMultiply(&matWorldCar, &matRot, &matTrans);
 }
@@ -1342,7 +1368,7 @@ D3DXMATRIX matRot, matTemp, matTrans;
 	D3DXMatrixMultiply(&matRot, &matRot, &matTemp);
 	// Produce the translation matrix
 	// Position car at wheel height (VCAR_HEIGHT/4)
-	D3DXMatrixTranslation( &matTrans, static_cast<float>(opponent_x>>LOG_PRECISION), static_cast<float>(-opponent_y>>LOG_PRECISION)+VCAR_HEIGHT/4, static_cast<float>(opponent_z>>LOG_PRECISION) );
+	D3DXMatrixTranslation( &matTrans, WorldF(opponent_x), WorldF(-opponent_y)+VCAR_HEIGHT/4, WorldF(opponent_z) );
 	// Combine the rotation and translation matrices to complete the world matrix
 	D3DXMatrixMultiply(&matWorldOpponentsCar, &matRot, &matTrans);
 }
@@ -1635,10 +1661,10 @@ static float lastFrame = 0.0f;
 	{
 		CalcGameViewpoint();
 
-		// Set Direct3D transforms, ready for OnFrameRender
-		viewpoint1_x >>= LOG_PRECISION;
-		// NOTE: viewpoint1_y must be preserved for use by DrawBackdrop
-		viewpoint1_z >>= LOG_PRECISION;
+		// The eye point keeps its fraction here -- see WorldF(). The track preview
+		// branch above still shifts in place because SetPreviewWindowProjection()
+		// rebuilds its camera basis from the shifted globals afterwards.
+		// NOTE: viewpoint1_y must be preserved unshifted for use by DrawBackdrop
 
 		// Set the track's world transform matrix
 		D3DXMatrixIdentity( &matWorldTrack );
@@ -1673,7 +1699,7 @@ static float lastFrame = 0.0f;
 		// Set the view transform matrix
 		//
 		// Produce the translation matrix
-		D3DXMatrixTranslation( &matTrans, static_cast<float>(-viewpoint1_x), static_cast<float>(viewpoint1_y>>LOG_PRECISION), static_cast<float>(-viewpoint1_z) );
+		D3DXMatrixTranslation( &matTrans, WorldF(-viewpoint1_x), WorldF(viewpoint1_y), WorldF(-viewpoint1_z) );
 		D3DXMatrixIdentity(&matRot);
 		float xa = ((static_cast<float>(-viewpoint1_x_angle) * 2 * D3DX_PI) / 65536.0f);
 		float ya = ((static_cast<float>(-viewpoint1_y_angle) * 2 * D3DX_PI) / 65536.0f);
@@ -1718,6 +1744,8 @@ static float lastFrame = 0.0f;
 #define STARTMENU SDLK_s
 #define LEAGUEMENU SDLK_l
 #define PREVIEWVIEW SDLK_SPACE
+#define PREVIEWENTER SDLK_RETURN
+#define PREVIEWENTER2 SDLK_KP_ENTER
 #define PREVIEWLEFT SDLK_LEFT
 #define PREVIEWRIGHT SDLK_RIGHT
 #else
@@ -1725,6 +1753,8 @@ static float lastFrame = 0.0f;
 #define STARTMENU 'S'
 #define LEAGUEMENU 'L'
 #define PREVIEWVIEW ' '
+#define PREVIEWENTER VK_RETURN
+#define PREVIEWENTER2 VK_RETURN
 #define PREVIEWLEFT VK_LEFT
 #define PREVIEWRIGHT VK_RIGHT
 #endif
@@ -1882,8 +1912,10 @@ static void HandleTrackPreviewInput( void )
 		keyPress = '\0';
 		}
 
-	// "Hit fire to continue" - fire (space) starts the race, as on the Amiga
-	if (bAmigaTrackPreview && (keyPress == PREVIEWVIEW))
+	// "Hit fire to continue" - fire (space) starts the race, as on the Amiga.
+	// Enter is accepted as well, since it's the natural "continue" key here.
+	if (bAmigaTrackPreview && ((keyPress == PREVIEWVIEW)
+							   || (keyPress == PREVIEWENTER) || (keyPress == PREVIEWENTER2)))
 		keyPress = STARTMENU;
 
 	if (keyPress == STARTMENU)
@@ -2738,7 +2770,7 @@ HRESULT hr;
 		DrawTrack(pd3dDevice);
 
 		// Ride heights for this frame, before either car is drawn
-		UpdateCarSuspension(pd3dDevice);
+		UpdateCarSuspension(pd3dDevice, fElapsedTime);
 
 		switch (GameMode)
 			{
@@ -3962,7 +3994,14 @@ int main(int argc, const char** argv)
 		if (scr::gUseFloatV2Physics && scr::gFloatV2Dt < renderStep)
 			renderStep = scr::gFloatV2Dt;
 
-		int32_t timetowait = (renderStep - (fTime-fLastTime))*1000;
+		// Sleep until this frame's deadline. (fTime-fLastTime) is the *previous*
+		// frame's start-to-start time, which the previous sleep had already padded
+		// out to renderStep - so subtracting it left roughly nothing to wait for,
+		// this frame ran short, and the frame after it over-slept to compensate.
+		// That alternation is what the physics accumulator sees as 0 steps one
+		// frame and 2 the next, and it shows up as judder in anything moving
+		// across the screen rather than with the camera.
+		int32_t timetowait = static_cast<int32_t>((fTime + renderStep - DXUTGetTime())*1000);
 		if (timetowait>0)
 			SDL_Delay(timetowait);
 

@@ -14,6 +14,19 @@
 #define	VCAR_LENGTH	256		// ((length 128 * segment length 256) / surface factor 256) * PC_FACTOR
 #define	VCAR_HEIGHT	162		// chosen to look ok with the above
 
+/*	How far the outer face of each wheel stands from the car's centre line. The car used to
+	be as wide as its road footprint at both ends (VCAR_WIDTH/2), and the opponent's shadow
+	is still built from that footprint - so these are what the shadow has to be scaled by to
+	sit under the car that is actually drawn. See the wheel size note in Car.cpp.		*/
+#define	WHEEL_REAR_OUTER	((17*VCAR_WIDTH)/40)	// 0.85 of the road footprint
+#define	WHEEL_FRONT_OUTER	((7*VCAR_WIDTH)/32)		// 0.44 - the fronts are tucked well in
+
+/*	The shadow floats this far above the road so it isn't clipped by it. The car is lifted
+	to match, so its wheels stand on the shadow's plane rather than hovering over it. The
+	car's y is in Amiga units, which are halved for display - hence the doubling.	*/
+#define	SHADOW_ABOVE_ROAD		7
+#define	CAR_LIFT_ABOVE_ROAD		(2 * SHADOW_ABOVE_ROAD)
+
 // Cockpit rendering constants (320x200 base space)
 #define COCKPIT_WIDESCREEN_OFFSET   40.0f   // Additional X offset for widescreen mode
 #define COCKPIT_WHEEL_WIDTH         24.0f   // Width of wheel graphic (half)
@@ -95,7 +108,7 @@ extern void FreeCarVertexBuffer (void);
 
 // Refills both cars' vertex buffers at their current suspension compression. Once per frame,
 // before either car is drawn - they ride at different heights so they cannot share a buffer.
-extern void UpdateCarSuspension (IDirect3DDevice9 *pd3dDevice);
+extern void UpdateCarSuspension (IDirect3DDevice9 *pd3dDevice, float fElapsedTime);
 
 extern void DrawCar (IDirect3DDevice9 *pd3dDevice);
 

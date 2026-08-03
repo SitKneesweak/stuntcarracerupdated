@@ -55,4 +55,6 @@ extern long CalculateOpponentsDistance (void);
 
 extern void GetOpponentWheelCompression( long *rear_left, long *rear_right, long *front );
 
+extern long GetOpponentZSpeed( void );
+
 #endif	/* _OPPONENT_BEHAVIOUR */

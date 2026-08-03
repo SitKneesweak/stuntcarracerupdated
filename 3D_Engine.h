@@ -53,8 +53,14 @@
 	arctangent by 3, z.rotate :16763 shifts it by 2 more and adds the (128,64) centre).
 	That is exactly 45 degrees horizontally and 22.5 degrees vertically.
 
-	Our cockpit art (Car.cpp DrawCockpit) leaves a window 476 x 328.8 wide in the 640x480 /
-	800x480 base space, so those are the angles that window has to subtend.
+	The number that actually matters is the angular scale, 360/2048 = 0.17578 degrees per
+	Amiga pixel, the same on both axes. 45 and 22.5 are that scale times the 256x128
+	playfield; they are not independent facts about the camera.
+
+	Our cockpit art (Car.cpp DrawCockpit) leaves a window 328.8 base units tall, i.e. 137
+	Amiga pixels, NOT the Amiga's 128 - so fitting that window to 22.5 degrees magnifies the
+	world by 137/128 = 5.6%. Drive the focal length off the per-pixel scale instead and the
+	window simply subtends the 24.08 degrees that 137 Amiga pixels are worth.
 	=========================================================================================	*/
 
 // Cockpit window, in base-resolution units. Must track the panel quads in DrawCockpit():
@@ -77,8 +83,21 @@
 #define	AMIGA_PLAYFIELD_WIDTH	256
 #define	AMIGA_PLAYFIELD_HEIGHT	128
 
-#define	AMIGA_HALF_FOV_X	22.5f	// degrees, across the cockpit window
-#define	AMIGA_HALF_FOV_Y	11.25f
+#define	AMIGA_HALF_FOV_X	22.5f	// degrees, across the Amiga's 256x128 playfield - kept for
+#define	AMIGA_HALF_FOV_Y	11.25f	// reference; the projection uses the per-pixel scale below
+
+// 2048 pixels per 360 degrees, both axes (StuntCarRacer.s: the arctangent is shifted by 3 in
+// calculate.screen.x/y and by 2 more in z.rotate, so 32 angle units of 65536 per pixel).
+#define	AMIGA_DEG_PER_PIXEL	(360.0f / 2048.0f)		// 0.17578; 45/256 == 22.5/128
+
+#ifndef SCR_DEG_TO_RAD
+#define SCR_DEG_TO_RAD(d)	((d) * 3.14159265358979323846f / 180.0f)
+#endif
+
+// One Amiga pixel is 2.4 base units tall (DrawCockpit's 320x200 -> 640x480 scale), so this is
+// the vertical focal length in base units. 782.3, against the 826.5 that fitting our 137-pixel
+// window to 22.5 degrees used to give.
+#define	AMIGA_FOCAL_Y_BASE	(2.4f / tanf(SCR_DEG_TO_RAD(AMIGA_DEG_PER_PIXEL)))
 
 // Pixel aspect (width:height) of one Amiga lores pixel on a PAL screen: 320 across the 4:3
 // active width, 256 down the 4:3 active height, so (4/3)/(320/256). Slightly WIDER than

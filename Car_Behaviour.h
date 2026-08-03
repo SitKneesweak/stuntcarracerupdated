@@ -65,6 +65,9 @@ extern long AmigaVolumeToDirectX (long amiga_volume);
 
 extern long CalculateDisplaySpeed (void);
 
+/*	The player's forward speed, raw - the renderer rolls the wheels at it.		*/
+extern long player_z_speed;
+
 extern void FramesWheelsEngine (IDirectSoundBuffer8 *engineSoundBuffers[]);
 extern void EngineSoundStopped (void);
 

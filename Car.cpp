@@ -14,6 +14,7 @@
 #include "3D_Engine.h"
 #include "Atlas.h"
 #include "Opponent_Behaviour.h"
+#include "Car_Behaviour.h"
 /*	===== */
 /*	Debug */
 /*	===== */
@@ -24,7 +25,12 @@ extern FILE *out;
 /*	========= */
 #define SCR_BASE_COLOUR	26
 
-#define	MAX_VERTICES_PER_CAR	(142*3)
+/*	The lofted body - six cross-sections, a cockpit tub and an axle beam - is under 90
+	triangles, and the seven detail boxes another 84. Then four cylinder wheels: each is
+	WHEEL_EDGES segments of four sidewall, two hub and two tread triangles, all stored
+	both ways round - 192 at 12 edges, so 768 for the wheels alone. The wheels had all
+	but filled the old 800.													*/
+#define	MAX_VERTICES_PER_CAR	(1000*3)
 
 /*	--- Visible suspension travel -------------------------------------------------------
 	The wheel quads are VCAR_HEIGHT/4 tall and welded to the body, so half that is about
@@ -629,44 +635,438 @@ D3DXVECTOR3 v1, v2, v3;//, edge1, edge2, surface_normal;
 }
 
 
+/*	Wheel as a cylinder on the axle rather than the Amiga's flat quad.
+
+	The quad the original drew lies in the x/y plane: its two x values are the wheel's
+	width across the axle, its two y values the wheel's height, and every corner shares
+	one z. So it was never a disc seen side-on - it was the tread band, drawn flat.
+	That is what made it read as a square block.
+
+	The four corners still define the wheel, so suspension travel and the car's footprint
+	are unchanged. From them: the axle runs along x from quad[0].x to quad[2].x, the wheel
+	radius is half the y span, and the centre sits on the quad's z. Round in the y/z plane
+	means the tyre now bulges half a radius past the car's nose and tail, as a real wheel
+	at the extremity of the wheelbase does.
+
+	Each side is a tyre sidewall annulus around a hub disc of alternating light and dark
+	wedges, which reads as spokes; between the two sides runs the tread band. The tyre is
+	flat-shaded off a fixed overhead light, quantised, so the barrel reads as round without
+	gouraud, while the hub stays unlit so it holds its contrast at any angle. Both windings
+	are stored for every triangle, as the quads did - the car is drawn with backface
+	culling on and the left and right wheels mirror.
+
+	The car's own base colour is palette entry 0, which is black, so the wheels take their
+	colours from the greys in the car block instead - shading black gets you black.	*/
+#define	WHEEL_EDGES			12		// segments round the tyre (also 6 spokes)
+#define	WHEEL_HUB_FRACTION	0.55	// hub disc radius, as a fraction of the tyre's
+#define	WHEEL_SIDE_SHADE	0.72f	// sidewall, flat - it points along the axle
+#define	WHEEL_TREAD_MIN		0.55f	// tread band, underside
+#define	WHEEL_TREAD_MAX		1.30f	// tread band, top
+
+#define	WHEEL_ROLL_PER_SPEED	0.00055		// radians per second per unit of z speed
+#define	WHEEL_ROLL_MAX			0.80		// radians per frame, below the aliasing point
+#define	WHEEL_ROLL_REAR_RATE	1.0
+#define	WHEEL_ROLL_FRONT_RATE	2.0			// smaller, lighter wheel - spins up well past it
+
+#define	WHEEL_TYRE_COLOUR	17					// {0x33,0x33,0x33} rubber
+#define	WHEEL_HUB_COLOUR	(SCR_BASE_COLOUR+14)	// {0xbb,0xbb,0xbb} bright rim
+#define	WHEEL_SPOKE_COLOUR	16					// {0x44,0x44,0x44} gap between spokes
+
+/*	Both facings of one triangle. */
+static void StoreCarTriangle2( const COORD_3D *c1, const COORD_3D *c2, const COORD_3D *c3,
+							   UTVERTEX *pVertices, DWORD colour )
+{
+	StoreCarTriangle(const_cast<COORD_3D*>(c1), const_cast<COORD_3D*>(c2),
+					 const_cast<COORD_3D*>(c3), pVertices, colour);
+	StoreCarTriangle(const_cast<COORD_3D*>(c3), const_cast<COORD_3D*>(c2),
+					 const_cast<COORD_3D*>(c1), pVertices, colour);
+}
+
+static void StoreCarWheel( const COORD_3D *quad, UTVERTEX *pVertices, double roll )
+{
+	// corners run (x0,ylow) (x0,yhigh) (x1,yhigh) (x1,ylow), all at the same z
+	long   x0 = quad[0].x, x1 = quad[2].x;
+	double cy = (static_cast<double>(quad[0].y) + static_cast<double>(quad[1].y)) / 2.0;
+	double r  = (static_cast<double>(quad[1].y) - static_cast<double>(quad[0].y)) / 2.0;
+	double cz = static_cast<double>(quad[0].z);
+	double rh = r * WHEEL_HUB_FRACTION;
+
+	COORD_3D axle0 = { x0, static_cast<long>(cy), static_cast<long>(cz) };
+	COORD_3D axle1 = { x1, static_cast<long>(cy), static_cast<long>(cz) };
+
+	DWORD side_colour  = SCRGBShaded(WHEEL_TYRE_COLOUR, WHEEL_SIDE_SHADE);
+	DWORD hub_colour   = SCRGB(WHEEL_HUB_COLOUR);
+	DWORD spoke_colour = SCRGB(WHEEL_SPOKE_COLOUR);
+
+	COORD_3D tyre0[WHEEL_EDGES], tyre1[WHEEL_EDGES];	// tyre rim, inner and outer side
+	COORD_3D hub0[WHEEL_EDGES],  hub1[WHEEL_EDGES];		// hub disc, same
+	double   ny[WHEEL_EDGES];		// y of the outward normal, for the tread shade
+
+	for (long i = 0; i < WHEEL_EDGES; i++)
+	{
+		double a = roll + (2.0 * PI * static_cast<double>(i)) / static_cast<double>(WHEEL_EDGES);
+		double c = cos(a), s = sin(a);
+
+		tyre0[i].x = x0;	tyre1[i].x = x1;
+		tyre0[i].y = tyre1[i].y = static_cast<long>(cy + r * c);
+		tyre0[i].z = tyre1[i].z = static_cast<long>(cz + r * s);
+
+		hub0[i].x = x0;		hub1[i].x = x1;
+		hub0[i].y = hub1[i].y = static_cast<long>(cy + rh * c);
+		hub0[i].z = hub1[i].z = static_cast<long>(cz + rh * s);
+
+		ny[i] = c;
+	}
+
+	for (long i = 0; i < WHEEL_EDGES; i++)
+	{
+		long j = (i + 1) % WHEEL_EDGES;
+
+		// sidewalls - the ring of rubber between hub and tread, one each side
+		StoreCarTriangle2(&hub0[i], &tyre0[i], &tyre0[j], pVertices, side_colour);
+		StoreCarTriangle2(&hub0[i], &tyre0[j], &hub0[j], pVertices, side_colour);
+		StoreCarTriangle2(&hub1[i], &tyre1[i], &tyre1[j], pVertices, side_colour);
+		StoreCarTriangle2(&hub1[i], &tyre1[j], &hub1[j], pVertices, side_colour);
+
+		// hub, alternating wedges so it reads as spokes
+		DWORD wedge = (i & 1) ? spoke_colour : hub_colour;
+		StoreCarTriangle2(&axle0, &hub0[i], &hub0[j], pVertices, wedge);
+		StoreCarTriangle2(&axle1, &hub1[i], &hub1[j], pVertices, wedge);
+
+		/*	Tread band. Light straight down, so the facing is the segment normal's y;
+			quantised to keep the flat-shaded look of everything else.			*/
+		double lit   = (ny[i] + ny[j]) / 2.0;					// -1 down, +1 up
+		float  shade = WHEEL_TREAD_MIN + (WHEEL_TREAD_MAX - WHEEL_TREAD_MIN)
+										  * static_cast<float>((lit + 1.0) / 2.0);
+		shade = static_cast<float>(static_cast<long>(shade * 8.0f + 0.5f)) / 8.0f;
+		DWORD tread_colour = SCRGBShaded(WHEEL_TYRE_COLOUR, shade);
+
+		StoreCarTriangle2(&tyre0[i], &tyre1[i], &tyre1[j], pVertices, tread_colour);
+		StoreCarTriangle2(&tyre0[i], &tyre1[j], &tyre0[j], pVertices, tread_colour);
+	}
+}
+
+
+/*	Wheel sizes. Fat rears, narrow tucked-in fronts.
+
+	Every wheel's bottom edge stays on -VCAR_HEIGHT/4: that is the ground, the height the
+	car is translated by when it is drawn (see StuntCarRacer.cpp), so a wheel that grows
+	downward puts the car in the road and one that shrinks leaves it hovering. The rears
+	therefore get their extra diameter upward, past the top of the body sides - which is
+	what a raised rear tyre does anyway.
+
+	Radius applies in z as well as y, so a bigger rear also stands further out past the
+	tail. The rears keep their inner face hard against the body side at VCAR_WIDTH/4,
+	which is as far inboard as anything can sit back there without disappearing into the
+	bodywork; their width is half what it was, which is still fat next to the fronts
+	without the barrel dominating the car from behind.
+
+	The fronts used to line up their inner face with the rears', for want of anywhere
+	else to put them - with a full width nose, inboard of VCAR_WIDTH/4 was inside the
+	body. The lofted nose is a tenth of the car's width, so that no longer applies and
+	the fronts pull in to half the rear track. A narrower front track is what the artwork
+	shows, it shortens the axle beam reaching out to them, and the fronts stay narrow
+	across the axle - they were never meant to match the rears for width.
+
+	WHEEL_REAR_OUTER and WHEEL_FRONT_OUTER live in Car.h, because the opponent's shadow is
+	scaled by them - it is built from the road footprint the car no longer fills.	*/
+#define	WHEEL_REAR_TOP		(VCAR_HEIGHT/16)		// above the axle line, so d = 50 not 40
+#define	WHEEL_REAR_INNER	(VCAR_WIDTH/4)			// unchanged - rear track stays wide
+#define	WHEEL_FRONT_TOP		0						// fronts keep the original 40 diameter
+#define	WHEEL_FRONT_INNER	(VCAR_WIDTH/8)			// pulled inboard of the rears' line
+
 /*	The car at rest. Wheels first, four vertices each, in the order rear left, rear right,
 	front left, front right - CreateCarInVB() leans on that layout to apply ride height,
-	so keep the four groups where they are.										*/
-static const COORD_3D car_rest[16+8] = {
-//x,				y,					z
-{-VCAR_WIDTH/2,		-VCAR_HEIGHT/4,		-VCAR_LENGTH/2},		// rear left wheel
-{-VCAR_WIDTH/2,		0,					-VCAR_LENGTH/2},
-{-VCAR_WIDTH/4,		0,					-VCAR_LENGTH/2},
-{-VCAR_WIDTH/4,		-VCAR_HEIGHT/4,		-VCAR_LENGTH/2},
+	so keep the four groups where they are. Within a group the corners run (inner, bottom)
+	(inner, top) (outer, top) (outer, bottom); StoreCarWheel() reads the axle and the
+	radius back out of that.													*/
+static const COORD_3D car_rest[16] = {
+//x,					y,					z
+{-WHEEL_REAR_OUTER,		-VCAR_HEIGHT/4,		-VCAR_LENGTH/2},		// rear left wheel
+{-WHEEL_REAR_OUTER,		WHEEL_REAR_TOP,		-VCAR_LENGTH/2},
+{-WHEEL_REAR_INNER,		WHEEL_REAR_TOP,		-VCAR_LENGTH/2},
+{-WHEEL_REAR_INNER,		-VCAR_HEIGHT/4,		-VCAR_LENGTH/2},
 
-{VCAR_WIDTH/4,		-VCAR_HEIGHT/4,		-VCAR_LENGTH/2},		// rear right wheel
-{VCAR_WIDTH/4,		0,					-VCAR_LENGTH/2},
-{VCAR_WIDTH/2,		0,					-VCAR_LENGTH/2},
-{VCAR_WIDTH/2,		-VCAR_HEIGHT/4,		-VCAR_LENGTH/2},
+{WHEEL_REAR_INNER,		-VCAR_HEIGHT/4,		-VCAR_LENGTH/2},		// rear right wheel
+{WHEEL_REAR_INNER,		WHEEL_REAR_TOP,		-VCAR_LENGTH/2},
+{WHEEL_REAR_OUTER,		WHEEL_REAR_TOP,		-VCAR_LENGTH/2},
+{WHEEL_REAR_OUTER,		-VCAR_HEIGHT/4,		-VCAR_LENGTH/2},
 
-{-VCAR_WIDTH/2,		-VCAR_HEIGHT/4,		VCAR_LENGTH/2},		// front left wheel
-{-VCAR_WIDTH/2,		0,					VCAR_LENGTH/2},
-{-VCAR_WIDTH/4,		0,					VCAR_LENGTH/2},
-{-VCAR_WIDTH/4,		-VCAR_HEIGHT/4,		VCAR_LENGTH/2},
+{-WHEEL_FRONT_OUTER,	-VCAR_HEIGHT/4,		VCAR_LENGTH/2},		// front left wheel
+{-WHEEL_FRONT_OUTER,	WHEEL_FRONT_TOP,	VCAR_LENGTH/2},
+{-WHEEL_FRONT_INNER,	WHEEL_FRONT_TOP,	VCAR_LENGTH/2},
+{-WHEEL_FRONT_INNER,	-VCAR_HEIGHT/4,		VCAR_LENGTH/2},
 
-{VCAR_WIDTH/4,		-VCAR_HEIGHT/4,		VCAR_LENGTH/2},		// front right wheel
-{VCAR_WIDTH/4,		0,					VCAR_LENGTH/2},
-{VCAR_WIDTH/2,		0,					VCAR_LENGTH/2},
-{VCAR_WIDTH/2,		-VCAR_HEIGHT/4,		VCAR_LENGTH/2},
+{WHEEL_FRONT_INNER,		-VCAR_HEIGHT/4,		VCAR_LENGTH/2},		// front right wheel
+{WHEEL_FRONT_INNER,		WHEEL_FRONT_TOP,	VCAR_LENGTH/2},
+{WHEEL_FRONT_OUTER,		WHEEL_FRONT_TOP,	VCAR_LENGTH/2},
+{WHEEL_FRONT_OUTER,		-VCAR_HEIGHT/4,		VCAR_LENGTH/2}};
 
-{-VCAR_WIDTH/4,		-VCAR_HEIGHT/8,		-VCAR_LENGTH/2},		// car rear points
-{-(3*VCAR_WIDTH)/16,	VCAR_HEIGHT/4,	-VCAR_LENGTH/2},
-{(3*VCAR_WIDTH)/16,	VCAR_HEIGHT/4,		-VCAR_LENGTH/2},
-{VCAR_WIDTH/4,		-VCAR_HEIGHT/8,		-VCAR_LENGTH/2},
 
-{-VCAR_WIDTH/4,		-VCAR_HEIGHT/8,		VCAR_LENGTH/2},		// car front points
-{-VCAR_WIDTH/4,		0,					VCAR_LENGTH/2},
-{VCAR_WIDTH/4,		0,					VCAR_LENGTH/2},
-{VCAR_WIDTH/4,		-VCAR_HEIGHT/8,		VCAR_LENGTH/2}};
+/*	The body.
 
-static void CreateCarInVB( UTVERTEX *pVertices, const CAR_SUSPENSION *susp )
+	It used to be a single wedge: one cross-section at the nose, one at the tail, lofted
+	between them. Six faces. That is why it read as a box on wheels rather than as the
+	buggy on the loading screen - a shape with no waist, no bonnet line and a roof over
+	a cockpit that should be open to the sky.
+
+	So the body is now a run of cross-sections down the z axis, each with its own width
+	at the floor and at the deck, lofted section to section: the nose narrows to a point
+	well inboard of the front wheels, the middle swells to full width for the cockpit,
+	and the tail stands up into the engine block. The old wedge's extremes are kept - the
+	body still spans the full VCAR_LENGTH and stops at VCAR_WIDTH/4 where the wheels
+	begin - so the car occupies exactly the space it always did. This is all cosmetic;
+	the physics has never used these vertices.
+
+	Sections run nose first. Front and rear are capped, and one segment is flagged as the
+	cockpit: instead of a deck it gets an open tub, which is what makes it a racing car
+	seen from above rather than a lid.											*/
+typedef struct
 {
-COORD_3D car[16+8];
+	long	z;
+	long	half_width_floor;	// the body's widest, at the underside
+	long	y_floor;
+	long	half_width_deck;	// tucked in above, so the sides slope
+	long	y_deck;
+} CAR_SECTION;
+
+#define	BODY_FLOOR	(-VCAR_HEIGHT/8)		// underside, as the wedge had it
+#define	BODY_SIDE	(VCAR_WIDTH/4)			// hard against the wheels' inner faces
+
+/*	Height is the thing to keep an eye on here. The body can never be wider than
+	2*BODY_SIDE, because that is where the wheels start, so every unit the deck gains
+	makes the car squarer in cross-section and squarer is what reads as clunky. The
+	engine block used to stand VCAR_HEIGHT/4 above the floor, which put its roof as far
+	above the ground as the body was wide - a cube. Halving that keeps the block clearly
+	the tallest thing on the car while leaving it wider than it is high, and the cockpit
+	deck comes down with it so the step up to the block is still worth seeing.	*/
+static const CAR_SECTION car_body[] = {
+//	z						floor half-width	floor y			deck half-width		deck y
+{	VCAR_LENGTH/2,			VCAR_WIDTH/10,		BODY_FLOOR,		VCAR_WIDTH/10,		-VCAR_HEIGHT/16		},	// nose tip
+{	(3*VCAR_LENGTH)/8,		VCAR_WIDTH/7,		BODY_FLOOR,		VCAR_WIDTH/8,		-VCAR_HEIGHT/24		},	// nose
+{	VCAR_LENGTH/10,			BODY_SIDE,			BODY_FLOOR,		(9*BODY_SIDE)/10,	VCAR_HEIGHT/40		},	// scuttle
+{	-VCAR_LENGTH/6,			BODY_SIDE,			BODY_FLOOR,		(9*BODY_SIDE)/10,	VCAR_HEIGHT/40		},	// back of the cockpit
+{	-VCAR_LENGTH/4,			BODY_SIDE,			BODY_FLOOR,		(17*BODY_SIDE)/20,	VCAR_HEIGHT/8		},	// engine bulkhead
+{	-VCAR_LENGTH/2,			BODY_SIDE,			BODY_FLOOR,		(3*BODY_SIDE)/4,	VCAR_HEIGHT/8		}};	// tail
+
+#define	BODY_SECTIONS		(sizeof(car_body) / sizeof(CAR_SECTION))
+#define	COCKPIT_SEGMENT		2			// the tub lies between section 2 and section 3
+#define	COCKPIT_RIM			(BODY_SIDE/4)	// bodywork left either side of the opening
+#define	COCKPIT_FLOOR		(-VCAR_HEIGHT/20)	// how deep the tub is cut into the deck
+
+/*	The front wheels sit a long way outboard of a nose this narrow, so without something
+	spanning them they hang in the air. A beam on the axle line is what the real thing
+	would have and what the artwork shows.										*/
+/*	Halfway between the front wheel's bottom (-VCAR_HEIGHT/4, the ground) and its top
+	(WHEEL_FRONT_TOP) is the axle line, and it lands on the body floor.			*/
+#define	AXLE_BEAM_Y			((-VCAR_HEIGHT/4 + WHEEL_FRONT_TOP) / 2)
+#define	AXLE_BEAM_THICK		(VCAR_HEIGHT/40)
+#define	AXLE_BEAM_LONG		(VCAR_LENGTH/40)
+
+/*	A quad, wound so that (v2-v1) x (v3-v2) points out of the car - the winding the wedge
+	used, and the one D3DCULL_CCW wants.										*/
+static void StoreCarQuad( const COORD_3D *a, const COORD_3D *b, const COORD_3D *c,
+						  const COORD_3D *d, UTVERTEX *pVertices, DWORD colour )
+{
+	StoreCarTriangle(const_cast<COORD_3D*>(a), const_cast<COORD_3D*>(b),
+					 const_cast<COORD_3D*>(c), pVertices, colour);
+	StoreCarTriangle(const_cast<COORD_3D*>(a), const_cast<COORD_3D*>(c),
+					 const_cast<COORD_3D*>(d), pVertices, colour);
+}
+
+/*	An axis-aligned box, all six faces outward. */
+static void StoreCarBox( long x0, long x1, long y0, long y1, long z0, long z1,
+						 UTVERTEX *pVertices, DWORD side, DWORD top, DWORD end )
+{
+	COORD_3D p[8];
+	for (long i = 0; i < 8; i++)
+	{
+		p[i].x = (i & 1) ? x1 : x0;
+		p[i].y = (i & 2) ? y1 : y0;
+		p[i].z = (i & 4) ? z1 : z0;
+	}
+	#define	P(xb,yb,zb)	(&p[(xb) | ((yb)<<1) | ((zb)<<2)])
+
+	StoreCarQuad(P(0,1,0), P(0,1,1), P(1,1,1), P(1,1,0), pVertices, top);	// top
+	StoreCarQuad(P(1,0,0), P(1,0,1), P(0,0,1), P(0,0,0), pVertices, top);	// bottom
+	StoreCarQuad(P(0,0,1), P(0,1,1), P(0,1,0), P(0,0,0), pVertices, side);	// left
+	StoreCarQuad(P(1,0,0), P(1,1,0), P(1,1,1), P(1,0,1), pVertices, side);	// right
+	StoreCarQuad(P(1,0,1), P(1,1,1), P(0,1,1), P(0,0,1), pVertices, end);	// front
+	StoreCarQuad(P(0,0,0), P(0,1,0), P(1,1,0), P(1,0,0), pVertices, end);	// rear
+	#undef P
+}
+
+/*	The same box on both flanks, given the right-hand one's x range. */
+static void StoreCarBoxPair( long x0, long x1, long y0, long y1, long z0, long z1,
+							 UTVERTEX *pVertices, DWORD side, DWORD top, DWORD end )
+{
+	StoreCarBox( x0,  x1, y0, y1, z0, z1, pVertices, side, top, end);
+	StoreCarBox(-x1, -x0, y0, y1, z0, z1, pVertices, side, top, end);
+}
+
+/*	Detail.
+
+	The lofted body is the right shape but every one of its faces is a big flat sheet,
+	and at this triangle count the eye has nothing to catch on - which is the other half
+	of looking clunky. These are the fittings the artwork hangs off that shape: a roll
+	hoop behind the driver's head, a pipe down each flank, a blade across the nose and an
+	intake standing on the engine deck. All are boxes, so all are 12 triangles, and all
+	sit proud of the bodywork rather than being cut into it - nothing here has to agree
+	with the section table, which leaves the body free to be retuned without breaking
+	them.
+
+	The pipes stop short of the rear wheel: the tyre reaches VCAR_LENGTH/2 minus its own
+	radius up the flank, and a pipe run into that is a pipe through the tyre.	*/
+#define	HOOP_Z_FRONT		(-(11*VCAR_LENGTH)/64)		// just behind the cockpit opening
+#define	HOOP_Z_REAR			(-(13*VCAR_LENGTH)/64)
+#define	HOOP_TOP			(VCAR_HEIGHT/5)				// stands above the engine deck
+#define	HOOP_OUTER			((4*BODY_SIDE)/5)
+#define	HOOP_INNER			((13*BODY_SIDE)/20)
+#define	HOOP_BAR_BOTTOM		((13*VCAR_HEIGHT)/80)
+
+#define	PIPE_Z_FRONT		(-VCAR_LENGTH/8)
+#define	PIPE_Z_REAR			(-(25*VCAR_LENGTH)/64)		// clear of the rear tyre
+#define	PIPE_INNER			((19*BODY_SIDE)/20)			// starts inside the bodywork
+#define	PIPE_OUTER			((23*BODY_SIDE)/20)			// and stands proud of it
+#define	PIPE_TOP			(-(3*VCAR_HEIGHT)/80)
+#define	PIPE_BOTTOM			(-(7*VCAR_HEIGHT)/80)
+
+#define	BLADE_HALF_WIDTH	((3*VCAR_WIDTH)/20)			// wider than the nose it caps
+#define	BLADE_TOP			(-VCAR_HEIGHT/20)
+#define	BLADE_BOTTOM		(-(7*VCAR_HEIGHT)/80)
+#define	BLADE_Z_FRONT		(VCAR_LENGTH/2 + VCAR_LENGTH/64)
+#define	BLADE_Z_REAR		(VCAR_LENGTH/2 - VCAR_LENGTH/64)
+
+#define	INTAKE_HALF_WIDTH	(BODY_SIDE/2)
+#define	INTAKE_TOP			((7*VCAR_HEIGHT)/40)
+#define	INTAKE_Z_FRONT		(-(19*VCAR_LENGTH)/64)
+#define	INTAKE_Z_REAR		(-(29*VCAR_LENGTH)/64)
+
+static void StoreCarDetail( UTVERTEX *pVertices, DWORD side_colour, DWORD deck_colour )
+{
+	DWORD metal = SCRGB(SCR_BASE_COLOUR+14);			// bright, as the wheel rims are
+	DWORD shade = SCRGBShaded(SCR_BASE_COLOUR+14, 0.7f);	// its sides, to give the boxes an edge
+
+	// roll hoop: an upright each side of the cockpit and a bar across the top
+	StoreCarBoxPair(HOOP_INNER, HOOP_OUTER, car_body[COCKPIT_SEGMENT+1].y_deck, HOOP_TOP,
+					HOOP_Z_REAR, HOOP_Z_FRONT, pVertices, shade, metal, shade);
+	StoreCarBox(-HOOP_OUTER, HOOP_OUTER, HOOP_BAR_BOTTOM, HOOP_TOP,
+				HOOP_Z_REAR, HOOP_Z_FRONT, pVertices, shade, metal, shade);
+
+	// exhaust down each flank
+	StoreCarBoxPair(PIPE_INNER, PIPE_OUTER, PIPE_BOTTOM, PIPE_TOP,
+					PIPE_Z_REAR, PIPE_Z_FRONT, pVertices, metal, shade, shade);
+
+	// blade across the nose
+	StoreCarBox(-BLADE_HALF_WIDTH, BLADE_HALF_WIDTH, BLADE_BOTTOM, BLADE_TOP,
+				BLADE_Z_REAR, BLADE_Z_FRONT, pVertices, shade, shade, metal);
+
+	// intake standing on the engine deck
+	StoreCarBox(-INTAKE_HALF_WIDTH, INTAKE_HALF_WIDTH,
+				car_body[BODY_SECTIONS-1].y_deck, INTAKE_TOP,
+				INTAKE_Z_REAR, INTAKE_Z_FRONT, pVertices, side_colour, deck_colour, side_colour);
+}
+
+static void StoreCarBody( UTVERTEX *pVertices )
+{
+	DWORD side_colour, end_colour, floor_colour;
+	DWORD deck_colour = SCRGB(SCR_BASE_COLOUR+15);
+	DWORD tub_colour  = SCRGBShaded(WHEEL_TYRE_COLOUR, 0.9f);	// shadowed cockpit
+
+	if (bSuperLeague)
+	{
+		side_colour  = SCRGB(SCR_BASE_COLOUR+21);
+		end_colour   = SCRGB(SCR_BASE_COLOUR+20);
+		floor_colour = SCRGB(SCR_BASE_COLOUR+19);
+	}
+	else
+	{
+		side_colour  = SCRGB(SCR_BASE_COLOUR+12);
+		end_colour   = SCRGB(SCR_BASE_COLOUR+10);
+		floor_colour = SCRGB(SCR_BASE_COLOUR+9);
+	}
+
+	/*	Each section's four corners: left and right, at the floor and at the deck. */
+	COORD_3D lf[BODY_SECTIONS], rf[BODY_SECTIONS], ld[BODY_SECTIONS], rd[BODY_SECTIONS];
+
+	for (long i = 0; i < static_cast<long>(BODY_SECTIONS); i++)
+	{
+		const CAR_SECTION *s = &car_body[i];
+
+		lf[i].x = -s->half_width_floor;	lf[i].y = s->y_floor;	lf[i].z = s->z;
+		rf[i].x =  s->half_width_floor;	rf[i].y = s->y_floor;	rf[i].z = s->z;
+		ld[i].x = -s->half_width_deck;	ld[i].y = s->y_deck;	ld[i].z = s->z;
+		rd[i].x =  s->half_width_deck;	rd[i].y = s->y_deck;	rd[i].z = s->z;
+	}
+
+	// nose and tail caps
+	StoreCarQuad(&rf[0], &rd[0], &ld[0], &lf[0], pVertices, end_colour);
+	long t = static_cast<long>(BODY_SECTIONS) - 1;
+	StoreCarQuad(&lf[t], &ld[t], &rd[t], &rf[t], pVertices, end_colour);
+
+	for (long f = 0; f < t; f++)		// f is the front section of the pair, r the rear
+	{
+		long r = f + 1;
+
+		StoreCarQuad(&lf[f], &ld[f], &ld[r], &lf[r], pVertices, side_colour);	// left
+		StoreCarQuad(&rf[r], &rd[r], &rd[f], &rf[f], pVertices, side_colour);	// right
+		StoreCarQuad(&rf[r], &rf[f], &lf[f], &lf[r], pVertices, floor_colour);	// underside
+
+		if (f != COCKPIT_SEGMENT)
+		{
+			StoreCarQuad(&ld[r], &ld[f], &rd[f], &rd[r], pVertices, deck_colour);
+			continue;
+		}
+
+		/*	The cockpit. A rim of deck is left down each side and across each end, and
+			the opening between them drops to a tub floor. The tub's walls face inward
+			so they are stored both ways round - a face you are meant to see the back
+			of is the one case backface culling gets wrong.						*/
+		COORD_3D il[2], ir[2], tl[2], tr[2];	// opening edge, then tub floor, front/rear
+
+		for (long e = 0; e < 2; e++)
+		{
+			long s = e ? r : f;
+			long inner_x = car_body[s].half_width_deck - COCKPIT_RIM;
+			long inner_z = car_body[s].z - (e ? -COCKPIT_RIM : COCKPIT_RIM);
+
+			il[e].x = -inner_x;	il[e].y = car_body[s].y_deck;	il[e].z = inner_z;
+			ir[e].x =  inner_x;	ir[e].y = car_body[s].y_deck;	ir[e].z = inner_z;
+			tl[e] = il[e];	tl[e].y = COCKPIT_FLOOR;
+			tr[e] = ir[e];	tr[e].y = COCKPIT_FLOOR;
+		}
+
+		// deck left around the opening: down each side, then across the nose and tail ends
+		StoreCarQuad(&ld[r], &ld[f], &il[0], &il[1], pVertices, deck_colour);
+		StoreCarQuad(&ir[1], &ir[0], &rd[f], &rd[r], pVertices, deck_colour);
+		StoreCarQuad(&il[0], &ld[f], &rd[f], &ir[0], pVertices, deck_colour);
+		StoreCarQuad(&ld[r], &il[1], &ir[1], &rd[r], pVertices, deck_colour);
+
+		// the tub: four walls and a floor
+		StoreCarTriangle2(&il[0], &il[1], &tl[1], pVertices, tub_colour);
+		StoreCarTriangle2(&il[0], &tl[1], &tl[0], pVertices, tub_colour);
+		StoreCarTriangle2(&ir[0], &ir[1], &tr[1], pVertices, tub_colour);
+		StoreCarTriangle2(&ir[0], &tr[1], &tr[0], pVertices, tub_colour);
+		StoreCarTriangle2(&il[0], &ir[0], &tr[0], pVertices, tub_colour);
+		StoreCarTriangle2(&il[0], &tr[0], &tl[0], pVertices, tub_colour);
+		StoreCarTriangle2(&il[1], &ir[1], &tr[1], pVertices, tub_colour);
+		StoreCarTriangle2(&il[1], &tr[1], &tl[1], pVertices, tub_colour);
+		StoreCarTriangle2(&tl[0], &tl[1], &tr[1], pVertices, tub_colour);
+		StoreCarTriangle2(&tl[0], &tr[1], &tr[0], pVertices, tub_colour);
+	}
+
+	// front axle beam, spanning the gap the narrowed nose leaves out to the wheels
+	StoreCarBox(-WHEEL_FRONT_INNER, WHEEL_FRONT_INNER,
+				AXLE_BEAM_Y - AXLE_BEAM_THICK, AXLE_BEAM_Y + AXLE_BEAM_THICK,
+				VCAR_LENGTH/2 - AXLE_BEAM_LONG, VCAR_LENGTH/2 + AXLE_BEAM_LONG,
+				pVertices, floor_colour, side_colour, floor_colour);
+
+	StoreCarDetail(pVertices, side_colour, deck_colour);
+}
+
+static void CreateCarInVB( UTVERTEX *pVertices, const CAR_SUSPENSION *susp, double roll )
+{
+COORD_3D car[16];
 
 	memcpy(car, car_rest, sizeof(car));
 
@@ -679,84 +1079,25 @@ COORD_3D car[16+8];
 		car[12+i].y += susp->front_right;
 	}
 
-	// rear left wheel
-	DWORD colour = SCRGB(SCR_BASE_COLOUR+0);
-/**/
-	#define vertices pVertices
-	// viewing from back
-	StoreCarTriangle(&car[0], &car[1], &car[2], vertices, colour);
-	StoreCarTriangle(&car[0], &car[2], &car[3], vertices, colour);
-	// viewing from front
-	StoreCarTriangle(&car[3], &car[2], &car[1], vertices, colour);
-	StoreCarTriangle(&car[3], &car[1], &car[0], vertices, colour);
+	/*	Fronts and rears are different sizes now, so the same road speed turns them at
+		different rates - the smaller front wheel spins faster, as it should.	*/
+	double rear_roll  = roll * WHEEL_ROLL_REAR_RATE;
+	double front_roll = roll * WHEEL_ROLL_FRONT_RATE;
 
-	// rear right wheel
-	// viewing from back
-	StoreCarTriangle(&car[0+4], &car[1+4], &car[2+4], vertices, colour);
-	StoreCarTriangle(&car[0+4], &car[2+4], &car[3+4], vertices, colour);
-	// viewing from front
-	StoreCarTriangle(&car[3+4], &car[2+4], &car[1+4], vertices, colour);
-	StoreCarTriangle(&car[3+4], &car[1+4], &car[0+4], vertices, colour);
-/**/
-/**/
-	// front left wheel
-	// viewing from back
-	StoreCarTriangle(&car[0+8], &car[1+8], &car[2+8], vertices, colour);
-	StoreCarTriangle(&car[0+8], &car[2+8], &car[3+8], vertices, colour);
-	// viewing from front
-	StoreCarTriangle(&car[3+8], &car[2+8], &car[1+8], vertices, colour);
-	StoreCarTriangle(&car[3+8], &car[1+8], &car[0+8], vertices, colour);
-
-	// front right wheel
-	// viewing from back
-	StoreCarTriangle(&car[0+12], &car[1+12], &car[2+12], vertices, colour);
-	StoreCarTriangle(&car[0+12], &car[2+12], &car[3+12], vertices, colour);
-	// viewing from front
-	StoreCarTriangle(&car[3+12], &car[2+12], &car[1+12], vertices, colour);
-	StoreCarTriangle(&car[3+12], &car[1+12], &car[0+12], vertices, colour);
+	StoreCarWheel(&car[0],  pVertices, rear_roll);		// rear left
+	StoreCarWheel(&car[4],  pVertices, rear_roll);		// rear right
+	StoreCarWheel(&car[8],  pVertices, front_roll);		// front left
+	StoreCarWheel(&car[12], pVertices, front_roll);		// front right
 /**/
 
-	// car left side
-	if(bSuperLeague)
-		colour = SCRGB(SCR_BASE_COLOUR+21);
-	else
-		colour = SCRGB(SCR_BASE_COLOUR+12);
-	StoreCarTriangle(&car[4+16], &car[5+16], &car[1+16], vertices, colour);
-	StoreCarTriangle(&car[4+16], &car[1+16], &car[0+16], vertices, colour);
-	// car right side
-	StoreCarTriangle(&car[3+16], &car[2+16], &car[6+16], vertices, colour);
-	StoreCarTriangle(&car[3+16], &car[6+16], &car[7+16], vertices, colour);
-
-	// car back
-	if(bSuperLeague)
-		colour = SCRGB(SCR_BASE_COLOUR+20);
-	else
-		colour = SCRGB(SCR_BASE_COLOUR+10);
-	StoreCarTriangle(&car[0+16], &car[1+16], &car[2+16], vertices, colour);
-	StoreCarTriangle(&car[0+16], &car[2+16], &car[3+16], vertices, colour);
-	// car front
-	StoreCarTriangle(&car[7+16], &car[6+16], &car[5+16], vertices, colour);
-	StoreCarTriangle(&car[7+16], &car[5+16], &car[4+16], vertices, colour);
-
-	// car top
-	colour = SCRGB(SCR_BASE_COLOUR+15);
-	StoreCarTriangle(&car[1+16], &car[5+16], &car[6+16], vertices, colour);
-	StoreCarTriangle(&car[1+16], &car[6+16], &car[2+16], vertices, colour);
-	// car bottom
-	if(bSuperLeague)
-		colour = SCRGB(SCR_BASE_COLOUR+19);
-	else
-		colour = SCRGB(SCR_BASE_COLOUR+9);
-	StoreCarTriangle(&car[3+16], &car[7+16], &car[4+16], vertices, colour);
-	StoreCarTriangle(&car[3+16], &car[4+16], &car[0+16], vertices, colour);
-	#undef vertices
+	StoreCarBody(pVertices);
 }
 
 /*	Rebuild one car into its buffer. The two cars are drawn in the same frame at different
-	ride heights, so they cannot share a buffer - hence the pair. The mesh is 142 triangles
-	at most, so refilling both every frame is nothing.								*/
+	ride heights and wheel angles, so they cannot share a buffer - hence the pair. The mesh
+	is 780 triangles at most, so refilling both every frame is nothing.				*/
 static HRESULT RebuildCarVB( IDirect3DDevice9 *pd3dDevice, IDirect3DVertexBuffer9 **ppVB,
-							 const CAR_SUSPENSION *susp )
+							 const CAR_SUSPENSION *susp, double roll )
 {
 	if (*ppVB == NULL)
 	{
@@ -775,7 +1116,7 @@ static HRESULT RebuildCarVB( IDirect3DDevice9 *pd3dDevice, IDirect3DVertexBuffer
 		return E_FAIL;
 	}
 	numCarVertices = 0;
-	CreateCarInVB(pVertices, susp);
+	CreateCarInVB(pVertices, susp, roll);
 	(*ppVB)->Unlock();
 	return S_OK;
 }
@@ -786,8 +1127,8 @@ HRESULT CreateCarVertexBuffer (IDirect3DDevice9 *pd3dDevice)
 	// Both cars start at rest; UpdateCarSuspension() takes over from the first frame
 	static const CAR_SUSPENSION rest = {0, 0, 0, 0};
 
-	if (RebuildCarVB(pd3dDevice, &pCarVB, &rest) != S_OK) return E_FAIL;
-	if (RebuildCarVB(pd3dDevice, &pOpponentCarVB, &rest) != S_OK) return E_FAIL;
+	if (RebuildCarVB(pd3dDevice, &pCarVB, &rest, 0.0) != S_OK) return E_FAIL;
+	if (RebuildCarVB(pd3dDevice, &pOpponentCarVB, &rest, 0.0) != S_OK) return E_FAIL;
 	return S_OK;
 }
 
@@ -841,10 +1182,44 @@ static void BuildSuspension( CAR_SUSPENSION *susp, long free_left, long free_rig
 }
 
 
-void UpdateCarSuspension (IDirect3DDevice9 *pd3dDevice)
+/*	Turn a car's forward speed into how far its wheels advance this frame.
+
+	A truly correct rate - road distance over wheel radius - is far too fast to draw: at
+	racing speed the wheel turns most of a revolution per frame, and a 12 sided rim with
+	spokes on it under a 50Hz sample just strobes, or appears to run backwards. So the
+	rate is proportional to speed but scaled down and then capped below the point where
+	the pattern starts to alias, which is a segment or so per frame. Wagon wheels in films
+	have the same problem and no fix; the eye reads "spinning fast" long before the rate
+	is right, so this is tuned by look rather than by arithmetic.
+
+	The rate is per second and scaled by the frame time, because this runs off the render
+	loop rather than the 50Hz physics clock - otherwise the wheels would spin faster on a
+	faster machine. The cap, though, is per frame: aliasing is a property of how far the
+	pattern jumps between two drawn images, not of how long that took. It is divided by the
+	front rate because the fronts are the fastest thing on the car: cap the shared angle at
+	the limit and the fronts would jump twice it.
+
+	The angle is kept as a double and never wrapped by the caller - it is fed to cos/sin,
+	which is happy with any magnitude, and a long race is nowhere near losing precision.	*/
+static double AdvanceWheelRoll( double angle, long z_speed, float fElapsedTime )
+{
+	double step = static_cast<double>(z_speed) * WHEEL_ROLL_PER_SPEED
+											   * static_cast<double>(fElapsedTime);
+
+	double limit = WHEEL_ROLL_MAX / WHEEL_ROLL_FRONT_RATE;
+
+	if (step >  limit) step =  limit;
+	if (step < -limit) step = -limit;
+
+	return angle + step;
+}
+
+
+void UpdateCarSuspension (IDirect3DDevice9 *pd3dDevice, float fElapsedTime)
 {
 CAR_SUSPENSION susp;
 long rear_left, rear_right, front;
+static double player_roll = 0.0, opponent_roll = 0.0;
 
 #define	PLAYER_TRAVEL(v)	SuspensionTravel((v), SUSP_PLAYER_REST, \
 											 SUSP_PLAYER_DROOP, SUSP_PLAYER_LOAD)
@@ -857,7 +1232,8 @@ long rear_left, rear_right, front;
 					PLAYER_TRAVEL(front_right_amount_below_road),
 					PLAYER_TRAVEL(rear_amount_below_road),
 					true);
-	RebuildCarVB(pd3dDevice, &pCarVB, &susp);
+	player_roll = AdvanceWheelRoll(player_roll, player_z_speed, fElapsedTime);
+	RebuildCarVB(pd3dDevice, &pCarVB, &susp, player_roll);
 
 	// Opponent: the other way round - the rear pair are free, the front wheels share
 	GetOpponentWheelCompression(&rear_left, &rear_right, &front);
@@ -866,7 +1242,8 @@ long rear_left, rear_right, front;
 					OPPONENT_TRAVEL(rear_right),
 					OPPONENT_TRAVEL(front),
 					false);
-	RebuildCarVB(pd3dDevice, &pOpponentCarVB, &susp);
+	opponent_roll = AdvanceWheelRoll(opponent_roll, GetOpponentZSpeed(), fElapsedTime);
+	RebuildCarVB(pd3dDevice, &pOpponentCarVB, &susp, opponent_roll);
 }
 
 

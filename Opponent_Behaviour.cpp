@@ -16,6 +16,7 @@
 #include "Opponent_Behaviour.h"
 #include "Car_Behaviour.h"
 #include "Track.h"
+#include "Car.h"		// visible car dimensions, which the shadow is built to match
 #include "3D_Engine.h"
 #include "Physics_FloatV2.h"
 
@@ -1239,6 +1240,14 @@ long height_adjust, touching_road, total_diff, i, acceleration, speed;
 	before its height_adjust bias and clamping - the raw travel, which is what the
 	suspension wants to draw. Both the legacy and FloatV2 paths keep opp_actual_height[]
 	current (OppFloatV2Sync writes it), so this reads correctly under either.		*/
+/*	The opponent's forward speed, in the same units as the player's player_z_speed, for the
+	renderer to roll its wheels at.												*/
+long GetOpponentZSpeed( void )
+{
+	return opponents_z_speed;
+}
+
+
 void GetOpponentWheelCompression( long *rear_left, long *rear_right, long *front )
 {
 	*rear_left  = opp_rear_left_road_pos.y  - opp_actual_height[REAR_LEFT];
@@ -2714,14 +2723,47 @@ static void OpponentStepFloatV2( double dt )
 
 	OppFloatV2Sync();
 
-	// Steering: take the integer step the AI would have made and spread it
-	// across the timestep.
+	/*	Steering. The integer AI still takes its whole step, so the globals the interaction
+		and collision code read stay Amiga-exact; what the drawn car follows is gOppF.roadX,
+		advanced here (the Sync below writes it straight back over the integer value, so
+		there is still only one source of truth).
+
+		Spreading that step across the timestep is not enough on its own. When the car is
+		chasing opponents_suggested_road_x_position, the Amiga steers at a flat 9 per frame
+		and stops the moment it is within 16 of the target - and the target itself is only
+		recomputed on a frame boundary, 10 times a second. So the lateral drift runs at full
+		rate for a step or two and then stops dead until the next decision. At the Amiga's
+		8.3Hz that was invisible, because everything moved in jumps; at 60Hz it is the only
+		thing that does, and it reads as the opponent stuttering its way round a corner,
+		where the suggested position is moving fastest.
+
+		So close the last 16 continuously instead: same 9-per-frame rate, but easing onto
+		the target rather than stopping short of it.									*/
 	{
 		long before = opponents_road_x_position & 0xff;
 		SteerTowardSuggested();
 		long after = opponents_road_x_position & 0xff;
-		signed char delta = static_cast<signed char>(after - before);
-		gOppF.roadX += static_cast<double>(delta) * dtRatio;
+		double step = static_cast<double>(static_cast<signed char>(after - before)) * dtRatio;
+
+		// B1bbbd == 0 is the branch that chases the suggested position; non-zero is the
+		// random steering wobble, which is open loop and already moves every frame.
+		if ((B1bbbd == 0) && opp_touching_road)
+		{
+			const double rate  = 9.0 * dtRatio;
+			double       error = static_cast<double>(opponents_suggested_road_x_position)
+							   - gOppF.roadX;
+
+			step = (error >  rate) ?  rate
+				 : (error < -rate) ? -rate
+				 : error;
+
+			// The integer path's edge guards, applied to where this would land.
+			double dest = gOppF.roadX + step;
+			if ((dest < 32.0) || (dest >= 225.0))
+				step = 0.0;
+		}
+
+		gOppF.roadX += step;
 	}
 
 	OppFloatV2Sync();
@@ -2863,6 +2905,17 @@ bool draw_shadow = TRUE;
 		? ((opponents_x_span * base_width) / slope_width)
 		: opponents_x_span;
 
+	/*	The footprint above is the car's road width - what the wheels ran on when the car
+		was as wide as its contact patch at both ends. The drawn car isn't: the rears are
+		pulled in a little and the fronts a long way, so a shadow of that footprint spills
+		out from under the car, worst at the nose. Narrow each end to the wheels that are
+		actually there and the shadow becomes the car's own outline: a trapezium, wide at
+		the back, tucked in at the front.											*/
+	double shadow_span_rear  = opponents_shadow_x_span
+							 * (2.0 * WHEEL_REAR_OUTER)  / static_cast<double>(VCAR_WIDTH);
+	double shadow_span_front = opponents_shadow_x_span
+							 * (2.0 * WHEEL_FRONT_OUTER) / static_cast<double>(VCAR_WIDTH);
+
 	double sx, sz;
 	sz = distance - (floor(distance / 256.0) * 256.0);	// z position of rear wheels
 
@@ -2875,7 +2928,7 @@ bool draw_shadow = TRUE;
 	oppf_rear_left_road_pos.z = left_side_z + ((sx * zd) / 256.0);
 
 	// Rear left shadow co-ordinate
-	sx = road_x - opponents_shadow_x_span;
+	sx = road_x - shadow_span_rear;
 	shadow_rear_left.y = CalculateOpponentsRoadWheelHeightF(sx, sz);
 	shadow_rear_left.x = left_side_x + ((sx * xd) / 256.0);
 	shadow_rear_left.z = left_side_z + ((sx * zd) / 256.0);
@@ -2887,7 +2940,7 @@ bool draw_shadow = TRUE;
 	oppf_rear_right_road_pos.z = left_side_z + ((sx * zd) / 256.0);
 
 	// Rear right shadow co-ordinate
-	sx = road_x + opponents_shadow_x_span;
+	sx = road_x + shadow_span_rear;
 	shadow_rear_right.y = CalculateOpponentsRoadWheelHeightF(sx, sz);
 	shadow_rear_right.x = left_side_x + ((sx * xd) / 256.0);
 	shadow_rear_right.z = left_side_z + ((sx * zd) / 256.0);
@@ -2915,15 +2968,23 @@ bool draw_shadow = TRUE;
 	oppf_front_right_road_pos.x = oppf_rear_right_road_pos.x - zdiff;
 	oppf_front_right_road_pos.z = oppf_rear_right_road_pos.z + xdiff;
 
-	// Front left and right shadow x,z co-ordinates
-	diff = shadow_rear_right.x - shadow_rear_left.x;
-	xdiff = diff * 1.5;
-	diff = shadow_rear_right.z - shadow_rear_left.z;
-	zdiff = diff * 1.5;
-	shadow_front_left.x  = shadow_rear_left.x  - zdiff;
-	shadow_front_left.z  = shadow_rear_left.z  + xdiff;
-	shadow_front_right.x = shadow_rear_right.x - zdiff;
-	shadow_front_right.z = shadow_rear_right.z + xdiff;
+	// Front left and right shadow x,z co-ordinates. The wheelbase is 1.5 times the car's
+	// full width, not the narrowed rear track, so the length still comes off the footprint
+	// - only the width at each end is the drawn car's.
+	double footprint_x = (2.0 * opponents_shadow_x_span * xd) / 256.0;
+	double footprint_z = (2.0 * opponents_shadow_x_span * zd) / 256.0;
+	xdiff = footprint_x * 1.5;
+	zdiff = footprint_z * 1.5;
+
+	double half_front_x = (shadow_span_front * xd) / 256.0;
+	double half_front_z = (shadow_span_front * zd) / 256.0;
+	double front_mid_x = ((shadow_rear_left.x + shadow_rear_right.x) / 2.0) - zdiff;
+	double front_mid_z = ((shadow_rear_left.z + shadow_rear_right.z) / 2.0) + xdiff;
+
+	shadow_front_left.x  = front_mid_x - half_front_x;
+	shadow_front_left.z  = front_mid_z - half_front_z;
+	shadow_front_right.x = front_mid_x + half_front_x;
+	shadow_front_right.z = front_mid_z + half_front_z;
 
 	// Add 128 to get z of opponent's front
 	distance += 128.0;
@@ -2955,17 +3016,18 @@ bool draw_shadow = TRUE;
 	oppf_front_right_road_pos.y = CalculateOpponentsRoadWheelHeightF(road_x + opponents_x_span, sz);
 
 #ifdef OPPONENT_SHADOW
-	shadow_front_left.y  = CalculateOpponentsRoadWheelHeightF(road_x - opponents_shadow_x_span, sz);
-	shadow_front_right.y = CalculateOpponentsRoadWheelHeightF(road_x + opponents_shadow_x_span, sz);
+	shadow_front_left.y  = CalculateOpponentsRoadWheelHeightF(road_x - shadow_span_front, sz);
+	shadow_front_right.y = CalculateOpponentsRoadWheelHeightF(road_x + shadow_span_front, sz);
 
 	// Y co-ordinates need to be divided by 4 for display, but they're
 	// already /2 because are in Amiga format (i.e. not * PC_FACTOR).
-	// Also add 7 to y so that shadow is slightly above road and isn't clipped as much
+	// SHADOW_ABOVE_ROAD keeps the shadow off the road so it isn't clipped as much
 	D3DXVECTOR3 v1, v2, v3, v4;
-	v2 = D3DXVECTOR3( static_cast<float>(shadow_rear_left.x),   7 + static_cast<float>(shadow_rear_left.y/2),   static_cast<float>(shadow_rear_left.z) );
-	v3 = D3DXVECTOR3( static_cast<float>(shadow_rear_right.x),  7 + static_cast<float>(shadow_rear_right.y/2),  static_cast<float>(shadow_rear_right.z) );
-	v1 = D3DXVECTOR3( static_cast<float>(shadow_front_left.x),  7 + static_cast<float>(shadow_front_left.y/2),  static_cast<float>(shadow_front_left.z) );
-	v4 = D3DXVECTOR3( static_cast<float>(shadow_front_right.x), 7 + static_cast<float>(shadow_front_right.y/2), static_cast<float>(shadow_front_right.z) );
+	const float lift = static_cast<float>(SHADOW_ABOVE_ROAD);
+	v2 = D3DXVECTOR3( static_cast<float>(shadow_rear_left.x),   lift + static_cast<float>(shadow_rear_left.y/2),   static_cast<float>(shadow_rear_left.z) );
+	v3 = D3DXVECTOR3( static_cast<float>(shadow_rear_right.x),  lift + static_cast<float>(shadow_rear_right.y/2),  static_cast<float>(shadow_rear_right.z) );
+	v1 = D3DXVECTOR3( static_cast<float>(shadow_front_left.x),  lift + static_cast<float>(shadow_front_left.y/2),  static_cast<float>(shadow_front_left.z) );
+	v4 = D3DXVECTOR3( static_cast<float>(shadow_front_right.x), lift + static_cast<float>(shadow_front_right.y/2), static_cast<float>(shadow_front_right.z) );
 
 	RemoveShadowTriangles();
 	if (draw_shadow)
@@ -3010,8 +3072,11 @@ static void ComputeOpponentRenderStateF( long *x, long *y, long *z,
 	double rear_y = (vis_rear_left_y + vis_rear_right_y) / 2.0;
 	double opponent_y = (rear_y + vis_front_y) / 2.0;
 
-	// Raise the opponent slightly (to stop them sinking into road due to inaccurate heights)
-	opponent_y += 20.0;
+	/*	Raise the opponent slightly, so it doesn't sink into the road. The integer path uses
+		20 because its heights are coarse; these are not, so lift the car by exactly what the
+		shadow is lifted by. The two then share a plane - the wheels stand on their own
+		shadow instead of hovering a third of a wheel above it.						*/
+	opponent_y += static_cast<double>(CAR_LIFT_ABOVE_ROAD);
 
 	/*
 	 * Angles

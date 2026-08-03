@@ -135,8 +135,11 @@ void GetProjectionTangents( float *tan_half_x, float *tan_half_y )
 											: static_cast<float>(BASE_WIDTH_STANDARD);
 		const float base_height = static_cast<float>(BASE_HEIGHT);
 
-		// Focal lengths in base units, so the stretch is expressed exactly once.
-		const float focal_y = (SCR_WINDOW_HEIGHT * 0.5f) / tanf(SCR_DEG_TO_RAD(AMIGA_HALF_FOV_Y));
+		// Focal lengths in base units, so the stretch is expressed exactly once. The vertical
+		// one comes from the Amiga's 0.17578 degrees per pixel, NOT from fitting our cockpit
+		// window to 22.5 degrees - our window is 137 Amiga pixels tall where the Amiga's
+		// playfield was 128, and fitting it magnified the whole world by 5.6%.
+		const float focal_y = AMIGA_FOCAL_Y_BASE;
 		const float focal_x = focal_y / gAmigaFovStretch;
 
 		// The cockpit window is centred in both modes (82..558 of 640, 162..638 of 800),
