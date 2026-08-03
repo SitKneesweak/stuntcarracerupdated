@@ -80,6 +80,8 @@ extern void UpdateLapData (double elapsedSeconds);
 extern double currentLapTime;		// clock for the lap being driven
 extern double lastLapTime;			// the lap just completed
 extern double bestLapTime;			// fastest lap so far, valid only if bBestLapTimeSet
+extern double oppBestLapTime;		// the opponent's, valid only if bOppBestLapTimeSet
+extern bool   bOppBestLapTimeSet;	// (used to award the league's Best Lap point)
 extern bool   bBestLapTimeSet;
 extern double lapTimeHoldRemaining;	// >0 while the readout is frozen on lastLapTime
 

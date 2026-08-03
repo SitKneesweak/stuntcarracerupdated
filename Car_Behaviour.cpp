@@ -5541,6 +5541,13 @@ double bestLapTime = 0.0;
 bool   bBestLapTimeSet = false;
 double lapTimeHoldRemaining = 0.0;
 
+// The opponent's clock.  The Amiga never displays this, but the league awards a point for
+// the fastest lap of a race ("Winner 2pts     Best Lap 1pt"), so the two have to be
+// comparable.  Timed exactly as the player's is, just without the readout or the hold.
+double oppCurrentLapTime = 0.0;
+double oppBestLapTime = 0.0;
+bool   bOppBestLapTimeSet = false;
+
 void ResetLapData (long car)
 {
 	raceFinished = raceWon = FALSE;
@@ -5550,6 +5557,9 @@ void ResetLapData (long car)
 	currentLapTime = lastLapTime = bestLapTime = 0.0;
 	bBestLapTimeSet = false;
 	lapTimeHoldRemaining = 0.0;
+
+	oppCurrentLapTime = oppBestLapTime = 0.0;
+	bOppBestLapTimeSet = false;
 }
 
 void UpdateLapData (double elapsedSeconds)
@@ -5567,6 +5577,13 @@ void UpdateLapData (double elapsedSeconds)
 
 	if (lapTimeHoldRemaining > 0.0)
 		lapTimeHoldRemaining -= elapsedSeconds;
+
+	if (!raceFinished)
+	{
+		oppCurrentLapTime += elapsedSeconds;
+		if (oppCurrentLapTime > LAP_TIME_MAX_SECONDS)
+			oppCurrentLapTime = LAP_TIME_MAX_SECONDS;
+	}
 
 	for (car = OPPONENT; car < NUM_CARS; car++)
 	{
@@ -5601,6 +5618,19 @@ void UpdateLapData (double elapsedSeconds)
 				}
 
 				currentLapTime = 0.0;
+			}
+			else
+			{
+				if (lapNumber[OPPONENT] > 1)
+				{
+					if (!bOppBestLapTimeSet || (oppCurrentLapTime < oppBestLapTime))
+					{
+						oppBestLapTime = oppCurrentLapTime;
+						bOppBestLapTimeSet = true;
+					}
+				}
+
+				oppCurrentLapTime = 0.0;
 			}
 		}
 	}

@@ -13,6 +13,7 @@
 #include "StuntCarRacer.h"
 #include "3D_Engine.h"
 #include "Atlas.h"
+#include "Opponent_Behaviour.h"
 /*	===== */
 /*	Debug */
 /*	===== */
@@ -24,6 +25,42 @@ extern FILE *out;
 #define SCR_BASE_COLOUR	26
 
 #define	MAX_VERTICES_PER_CAR	(142*3)
+
+/*	--- Visible suspension travel -------------------------------------------------------
+	The wheel quads are VCAR_HEIGHT/4 tall and welded to the body, so half that is about
+	as far as one can ride up before it parts company with the arch.
+
+	Compression is measured in each car's own height units, and the two differ. The
+	player's is amount.below.road, which rests at 0 and is clamped at 0x1200; the units
+	note above CalcAmigaYPerspectiveShift() in StuntCarRacer.cpp fixes it at 32 of those
+	units to one model unit. The opponent's is road height minus actual height, straight
+	out of CalculateWheelDifference(), which also rests at 0 but is 4x coarser - its
+	opponent_y is only shifted by (LOG_PRECISION-3), so 8 units to one model unit.
+
+	The shifts below are therefore 2 apart, which keeps the two cars articulating by the
+	same amount for the same body movement. They are one step softer than a true 1:1 (a
+	model unit of travel per 2 of body drop) so that ordinary driving uses most of the
+	range and only real impacts reach the clamp.									*/
+#define	SUSP_MAX_TRAVEL			(VCAR_HEIGHT/8)
+#define	SUSP_PLAYER_SHIFT		6
+#define	SUSP_OPPONENT_SHIFT		3
+
+/*	The physics is a tripod but the car has four wheels, and the two cars share a
+	different axle: the player averages its rear pair (rear_amount_below_road), the
+	opponent its front (FRONT). Left alone, that axle would sit dead while the other
+	worked. So split the shared value by the roll the free axle is showing, at half
+	strength. The original had no such term - this is invention - but a dead axle reads
+	worse on screen than a slightly overstated live one.							*/
+#define	SUSP_ROLL_SHARE_NUM		1
+#define	SUSP_ROLL_SHARE_DEN		2
+
+/*	Wheel ride heights, in model units, positive meaning compressed - the body has sunk,
+	so the wheel sits higher in its arch. Body roll and pitch are already in the world
+	matrix, so these are purely what the suspension adds on top of it.				*/
+typedef struct
+{
+	long rear_left, rear_right, front_left, front_right;
+} CAR_SUSPENSION;
 
 extern bool bSuperLeague;
 extern int wideScreen;
@@ -526,7 +563,11 @@ static void DrawCarLeftWheelTread( long offset )	// offset into co-ordinates
 /*	Description:	Draw the car using the supplied viewpoint								*/
 /*	======================================================================================= */
 static IDirect3DVertexBuffer9 *pCarVB = NULL;
+static IDirect3DVertexBuffer9 *pOpponentCarVB = NULL;
 static long numCarVertices = 0;
+
+// Per-wheel suspension compression, written by both the legacy and FloatV2 physics paths
+extern long front_left_amount_below_road, front_right_amount_below_road, rear_amount_below_road;
 
 static void StoreCarTriangle( COORD_3D *c1, COORD_3D *c2, COORD_3D *c3, UTVERTEX *pVertices, DWORD colour )
 {
@@ -566,11 +607,10 @@ D3DXVECTOR3 v1, v2, v3;//, edge1, edge2, surface_normal;
 }
 
 
-static void CreateCarInVB( UTVERTEX *pVertices )
-{
-static long first_time = TRUE;
-// car co-ordinates
-static COORD_3D car[16+8] = {
+/*	The car at rest. Wheels first, four vertices each, in the order rear left, rear right,
+	front left, front right - CreateCarInVB() leans on that layout to apply ride height,
+	so keep the four groups where they are.										*/
+static const COORD_3D car_rest[16+8] = {
 //x,				y,					z
 {-VCAR_WIDTH/2,		-VCAR_HEIGHT/4,		-VCAR_LENGTH/2},		// rear left wheel
 {-VCAR_WIDTH/2,		0,					-VCAR_LENGTH/2},
@@ -602,21 +642,20 @@ static COORD_3D car[16+8] = {
 {VCAR_WIDTH/4,		0,					VCAR_LENGTH/2},
 {VCAR_WIDTH/4,		-VCAR_HEIGHT/8,		VCAR_LENGTH/2}};
 
-	/*
-	if (first_time)
-		{
-		first_time = FALSE;
-		// temporarily reduce car size at runtime
-		// eventually car size will be decided and this code can be removed
-		long i, reduce = 2;
-		for (i = 0; i < (sizeof(car) / sizeof(COORD_3D)); i++)
-			{
-			car[i].x /= reduce;
-			car[i].y /= reduce;
-			car[i].z /= reduce;
-			}
-		}
-	*/
+static void CreateCarInVB( UTVERTEX *pVertices, const CAR_SUSPENSION *susp )
+{
+COORD_3D car[16+8];
+
+	memcpy(car, car_rest, sizeof(car));
+
+	// Ride the four wheel groups up into their arches by the current compression
+	for (long i = 0; i < 4; i++)
+	{
+		car[ 0+i].y += susp->rear_left;
+		car[ 4+i].y += susp->rear_right;
+		car[ 8+i].y += susp->front_left;
+		car[12+i].y += susp->front_right;
+	}
 
 	// rear left wheel
 	DWORD colour = SCRGB(SCR_BASE_COLOUR+0);
@@ -691,12 +730,16 @@ static COORD_3D car[16+8] = {
 	#undef vertices
 }
 
-HRESULT CreateCarVertexBuffer (IDirect3DDevice9 *pd3dDevice)
+/*	Rebuild one car into its buffer. The two cars are drawn in the same frame at different
+	ride heights, so they cannot share a buffer - hence the pair. The mesh is 142 triangles
+	at most, so refilling both every frame is nothing.								*/
+static HRESULT RebuildCarVB( IDirect3DDevice9 *pd3dDevice, IDirect3DVertexBuffer9 **ppVB,
+							 const CAR_SUSPENSION *susp )
 {
-	if (pCarVB == NULL)
+	if (*ppVB == NULL)
 	{
 		if( FAILED( pd3dDevice->CreateVertexBuffer( MAX_VERTICES_PER_CAR*sizeof(UTVERTEX),
-				D3DUSAGE_WRITEONLY, D3DFVF_UTVERTEX, D3DPOOL_DEFAULT, &pCarVB, NULL ) ) )
+				D3DUSAGE_WRITEONLY|D3DUSAGE_DYNAMIC, D3DFVF_UTVERTEX, D3DPOOL_DEFAULT, ppVB, NULL ) ) )
 		{
 			OutputDebugStringW(L"ERROR: Failed to create car vertex buffer\n");
 			return E_FAIL;
@@ -704,32 +747,112 @@ HRESULT CreateCarVertexBuffer (IDirect3DDevice9 *pd3dDevice)
 	}
 
 	UTVERTEX *pVertices;
-	if( FAILED( pCarVB->Lock( 0, 0, (void**)&pVertices, 0 ) ) )
+	if( FAILED( (*ppVB)->Lock( 0, 0, (void**)&pVertices, D3DLOCK_DISCARD ) ) )
 	{
 		OutputDebugStringW(L"ERROR: Failed to lock car vertex buffer\n");
 		return E_FAIL;
 	}
 	numCarVertices = 0;
-	CreateCarInVB(pVertices);
-	pCarVB->Unlock();
+	CreateCarInVB(pVertices, susp);
+	(*ppVB)->Unlock();
 	return S_OK;
+}
+
+
+HRESULT CreateCarVertexBuffer (IDirect3DDevice9 *pd3dDevice)
+{
+	// Both cars start at rest; UpdateCarSuspension() takes over from the first frame
+	static const CAR_SUSPENSION rest = {0, 0, 0, 0};
+
+	if (RebuildCarVB(pd3dDevice, &pCarVB, &rest) != S_OK) return E_FAIL;
+	if (RebuildCarVB(pd3dDevice, &pOpponentCarVB, &rest) != S_OK) return E_FAIL;
+	return S_OK;
+}
+
+
+/*	Clamp to the travel limit and split the shared axle by the roll the free axle shows.
+	'shared' is the single compression both wheels of that axle run on; 'free_left' and
+	'free_right' are the independent pair at the other end.							*/
+static void BuildSuspension( CAR_SUSPENSION *susp, long free_left, long free_right,
+							 long shared, bool shared_axle_is_rear )
+{
+	long roll = ((free_left - free_right) / 2) * SUSP_ROLL_SHARE_NUM / SUSP_ROLL_SHARE_DEN;
+
+	if (shared_axle_is_rear)
+	{
+		susp->front_left  = free_left;
+		susp->front_right = free_right;
+		susp->rear_left   = shared + roll;
+		susp->rear_right  = shared - roll;
+	}
+	else
+	{
+		susp->rear_left   = free_left;
+		susp->rear_right  = free_right;
+		susp->front_left  = shared + roll;
+		susp->front_right = shared - roll;
+	}
+
+	long *wheel[4] = { &susp->rear_left, &susp->rear_right, &susp->front_left, &susp->front_right };
+	for (long i = 0; i < 4; i++)
+	{
+		if (*wheel[i] >  SUSP_MAX_TRAVEL) *wheel[i] =  SUSP_MAX_TRAVEL;
+		if (*wheel[i] < -SUSP_MAX_TRAVEL) *wheel[i] = -SUSP_MAX_TRAVEL;
+	}
+}
+
+
+void UpdateCarSuspension (IDirect3DDevice9 *pd3dDevice)
+{
+CAR_SUSPENSION susp;
+long rear_left, rear_right, front;
+
+	// Player: the free pair is at the front, the rear pair share rear_amount_below_road
+	BuildSuspension(&susp,
+					front_left_amount_below_road  >> SUSP_PLAYER_SHIFT,
+					front_right_amount_below_road >> SUSP_PLAYER_SHIFT,
+					rear_amount_below_road        >> SUSP_PLAYER_SHIFT,
+					true);
+	RebuildCarVB(pd3dDevice, &pCarVB, &susp);
+
+	// Opponent: the other way round - the rear pair are free, the front wheels share
+	GetOpponentWheelCompression(&rear_left, &rear_right, &front);
+	BuildSuspension(&susp,
+					rear_left  >> SUSP_OPPONENT_SHIFT,
+					rear_right >> SUSP_OPPONENT_SHIFT,
+					front      >> SUSP_OPPONENT_SHIFT,
+					false);
+	RebuildCarVB(pd3dDevice, &pOpponentCarVB, &susp);
 }
 
 
 void FreeCarVertexBuffer (void)
 {
 	if (pCarVB) pCarVB->Release(), pCarVB = NULL;
+	if (pOpponentCarVB) pOpponentCarVB->Release(), pOpponentCarVB = NULL;
+}
+
+
+static void DrawCarVB (IDirect3DDevice9 *pd3dDevice, IDirect3DVertexBuffer9 *pVB)
+{
+	pd3dDevice->SetRenderState( D3DRS_ZENABLE, TRUE );
+	pd3dDevice->SetRenderState( D3DRS_CULLMODE, D3DCULL_CCW );
+
+	pd3dDevice->SetStreamSource( 0, pVB, 0, sizeof(UTVERTEX) );
+	pd3dDevice->SetFVF( D3DFVF_UTVERTEX );
+	pd3dDevice->DrawPrimitive( D3DPT_TRIANGLELIST, 0, numCarVertices/3 );	// 3 points per triangle
 }
 
 
 void DrawCar (IDirect3DDevice9 *pd3dDevice)
 {
-	pd3dDevice->SetRenderState( D3DRS_ZENABLE, TRUE );
-	pd3dDevice->SetRenderState( D3DRS_CULLMODE, D3DCULL_CCW );
+	DrawCarVB(pd3dDevice, pCarVB);
+}
 
-	pd3dDevice->SetStreamSource( 0, pCarVB, 0, sizeof(UTVERTEX) );
-	pd3dDevice->SetFVF( D3DFVF_UTVERTEX );
-	pd3dDevice->DrawPrimitive( D3DPT_TRIANGLELIST, 0, numCarVertices/3 );	// 3 points per triangle
+
+void DrawOpponentCar (IDirect3DDevice9 *pd3dDevice)
+{
+	DrawCarVB(pd3dDevice, pOpponentCarVB);
 }
 
 struct TRANSFORMEDTEXVERTEX
@@ -752,7 +875,6 @@ static int old_speedbar = -1;
 static int old_leftwheel = -1, old_rightwheel = -1;
 
 extern IDirect3DTexture9 *g_pAtlas;
-extern long front_left_amount_below_road, front_right_amount_below_road;
 extern long leftwheel_angle, rightwheel_angle;
 extern long boost_activated;
 extern long new_damage;

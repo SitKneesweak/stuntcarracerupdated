@@ -29,7 +29,7 @@
 #define ROAD_TEX_HEIGHT			256		// texels along the road in one tile
 #define ROAD_NOISE_BLOCK		8		// texels per noise sample; 1 = one sample per texel
 #define ROAD_NOISE_LEVELS		4		// grey steps the noise is quantised to (Amiga-ish)
-#define ROAD_NOISE_CONTRAST		0.06f	// +/- fraction of the base colour at the extremes
+#define ROAD_NOISE_CONTRAST		0.03f	// +/- fraction of the base colour at the extremes
 #define ROAD_NOISE_SEED			0x5ca1ab1eu
 
 IDirect3DTexture9 *g_pRoadTexture[eLAST] = {NULL};

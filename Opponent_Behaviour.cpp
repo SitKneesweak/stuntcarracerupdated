@@ -1219,6 +1219,19 @@ long height_adjust, touching_road, total_diff, i, acceleration, speed;
 }
 
 
+/*	How far each wheel has been pushed up into its arch, for the renderer. This is the
+	same road height minus actual height that CalculateWheelDifference() opens with,
+	before its height_adjust bias and clamping - the raw travel, which is what the
+	suspension wants to draw. Both the legacy and FloatV2 paths keep opp_actual_height[]
+	current (OppFloatV2Sync writes it), so this reads correctly under either.		*/
+void GetOpponentWheelCompression( long *rear_left, long *rear_right, long *front )
+{
+	*rear_left  = opp_rear_left_road_pos.y  - opp_actual_height[REAR_LEFT];
+	*rear_right = opp_rear_right_road_pos.y - opp_actual_height[REAR_RIGHT];
+	*front      = opp_front_road_pos_y      - opp_actual_height[FRONT];
+}
+
+
 static void CalculateWheelDifference( long road_height,
 									  long actual_height,
 									  long height_adjust,

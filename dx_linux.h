@@ -766,6 +766,10 @@ typedef struct D3DRECT {
 #define D3DCLEAR_ZBUFFER  4
 
 #define D3DUSAGE_WRITEONLY 1
+// Buffers here are plain malloc'd memory, so both of these are ignored - they exist
+// only so the buffers refilled every frame (the cars' suspension) can ask properly.
+#define D3DUSAGE_DYNAMIC   0x200
+#define D3DLOCK_DISCARD    0x2000
 
 #define D3DFVF_DIFFUSE    (1   )
 #define D3DFVF_NORMAL     (1<<1)

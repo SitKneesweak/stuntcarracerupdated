@@ -22,6 +22,9 @@
 #include "wavefunctions.h"
 #include "Atlas.h"
 #include "RoadTexture.h"
+#include "AmigaMenu.h"
+#include "MenuScreens.h"
+#include "League.h"
 #include "version.h"
 
 #ifdef linux
@@ -1143,7 +1146,7 @@ static void DrawOpponentsCar( IDirect3DDevice9 *pd3dDevice )
 	gFogMaxAmount = OPPONENT_MAX_FOG;
 #endif
 
-	DrawCar(pd3dDevice);
+	DrawOpponentCar(pd3dDevice);
 
 #ifdef SCR_FOG_SHADER
 	gFogMaxAmount = savedFogMax;
@@ -1521,6 +1524,43 @@ static float lastFrame = 0.0f;
 #define LEAGUEMENU 'L'
 #endif
 
+/*	======================================================================================= */
+/*	Function:		MenuStartTrack															*/
+/*																							*/
+/*	Description:	Called by the Amiga menus when a race is chosen: convert the track,		*/
+/*					build its vertex buffer and drop into the track preview, exactly as		*/
+/*					the old text track menu did.  Also picks up the Super League setting		*/
+/*					from the career, since that changes the car and the track colours.		*/
+/*	======================================================================================= */
+
+bool MenuStartTrack( int trackID )
+	{
+	if (bSuperLeague != gLeagueSuperLeague)
+		{
+		bSuperLeague = gLeagueSuperLeague;
+		CreateCarVertexBuffer(DXUTGetD3DDevice());		// recreate car in league colours
+		}
+
+	if (! ConvertAmigaTrack(trackID))
+		{
+		OutputDebugStringW(L"ERROR: Failed to convert track\n");
+		return false;
+		}
+
+	if (CreateTrackVertexBuffer(DXUTGetD3DDevice()) != S_OK)
+		{
+		OutputDebugStringW(L"ERROR: Failed to create track vertex buffer\n");
+		return false;
+		}
+
+	bNewGame = TRUE;		// resets the opponent's car, shown during the preview
+	ResetPlayer();
+	GameMode = TRACK_PREVIEW;
+	bPlayerPaused = bOpponentPaused = FALSE;
+	keyPress = '\0';
+	return true;
+	}
+
 static void HandleTrackMenu( CDXUTTextHelper &txtHelper )
 	{
 	long i, track_number;
@@ -1756,7 +1796,10 @@ void RenderText( double fTime )
 	switch (GameMode)
 		{
 		case TRACK_MENU:
-			HandleTrackMenu(txtHelper);
+			// The Amiga menus draw themselves over the whole display in OnFrameRender;
+			// the old text track menu is only reached if they are somehow not up.
+			if (!MenuScreensActive())
+				HandleTrackMenu(txtHelper);
 			txtHelper.End();
 			break;
 
@@ -1991,6 +2034,33 @@ HRESULT hr;
     // Clear the zbuffer
     V( pd3dDevice->Clear(0, NULL, D3DCLEAR_ZBUFFER, 0, 1.0f, 0) );
 
+    // A finished race hands control straight back to the menus, which score it and put up
+    // the RESULT screen.  MenuScreensRaceFinished reactivates them, so this fires once.
+    if ((GameMode == GAME_OVER) && !MenuScreensActive())
+    {
+        const bool playerBestLap = bBestLapTimeSet &&
+                                   (!bOppBestLapTimeSet || (bestLapTime < oppBestLapTime));
+        const double raceTime = (gameEndTime > gameStartTime) ? (gameEndTime - gameStartTime) : 0.0;
+
+        GameMode = TRACK_MENU;
+        MenuScreensRaceFinished( raceWon != FALSE, playerBestLap,
+                                 bBestLapTimeSet ? bestLapTime : 0.0, raceTime );
+    }
+
+    // The Amiga menus replace the display entirely, exactly as they did on the Amiga, so
+    // when they are up none of the scene is drawn.
+    if (MenuScreensActive())
+    {
+        V( pd3dDevice->Clear(0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER,
+                             D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0) );
+        if( SUCCEEDED( pd3dDevice->BeginScene() ) )
+        {
+            MenuScreensRender( pd3dDevice );
+            pd3dDevice->EndScene();
+        }
+        return;
+    }
+
     // Render the scene
     if( SUCCEEDED( pd3dDevice->BeginScene() ) )
     {
@@ -2009,6 +2079,9 @@ HRESULT hr;
 		// Draw Track
 		pd3dDevice->SetTransform( D3DTS_WORLD, &matWorldTrack );
 		DrawTrack(pd3dDevice);
+
+		// Ride heights for this frame, before either car is drawn
+		UpdateCarSuspension(pd3dDevice);
 
 		switch (GameMode)
 			{
@@ -2215,6 +2288,8 @@ void CALLBACK KeyboardProc( UINT nChar, bool bKeyDown, bool bAltDown, void *pUse
 
 				// reset all animated objects
 				ResetDrawBridge();
+
+				MenuScreensAbandonRace();
 			}
             break;
 
@@ -2426,6 +2501,18 @@ bool process_events()
 				case 231:				keyPress = SDLK_9; break;
 				case 224:				keyPress = SDLK_0; break;
 			}
+
+			// While the Amiga menus are up they own the keyboard: navigation, name entry
+			// and menu selection all go to them, and none of the in-game keys apply.
+			if (MenuScreensActive())
+			{
+				if (keyPress == SDLK_ESCAPE)
+					return false;			// quit, as the menus always allowed
+				MenuScreensKey( keyPress );
+				keyPress = '\0';
+				break;
+			}
+
             switch( keyPress ) {
 #if defined(DEBUG) || defined(_DEBUG)
 				case SDLK_F1:
@@ -2579,6 +2666,8 @@ bool process_events()
 
 						// reset all animated objects
 						ResetDrawBridge();
+
+						MenuScreensAbandonRace();
 					}
 					break;
 
@@ -3060,6 +3149,9 @@ int main(int argc, const char** argv)
 
 	CreateFonts();
 	LoadTextures();
+
+	// Bring up the Amiga menus, starting at the name entry screen
+	MenuScreensInit();
 
 	if (!InitialiseData()) {
 		printf("Error initialising data\n");

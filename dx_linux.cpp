@@ -1146,10 +1146,11 @@ HRESULT IDirect3DDevice9::Clear(DWORD Count, const D3DRECT *pRects,DWORD Flags, 
 	}
 	if(Flags&D3DCLEAR_TARGET) {
 		float r,g,b,a;
-		a = ((Color>>0 )&0xff)/255.0f;
-		b = ((Color>>8 )&0xff)/255.0f;
-		g = ((Color>>16)&0xff)/255.0f;
-		r = ((Color>>24)&0xff)/255.0f;
+		// D3DCOLOR is ARGB: 0xaarrggbb.
+		b = ((Color>>0 )&0xff)/255.0f;
+		g = ((Color>>8 )&0xff)/255.0f;
+		r = ((Color>>16)&0xff)/255.0f;
+		a = ((Color>>24)&0xff)/255.0f;
 		glClearColor(r, g, b, a);
 		clearval |= GL_COLOR_BUFFER_BIT;
 	}

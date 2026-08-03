@@ -28,4 +28,6 @@ extern long CalculateIfWinning( long start_finish_piece );
 
 extern long CalculateOpponentsDistance (void);
 
+extern void GetOpponentWheelCompression( long *rear_left, long *rear_right, long *front );
+
 #endif	/* _OPPONENT_BEHAVIOUR */

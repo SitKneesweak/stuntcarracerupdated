@@ -82,7 +82,13 @@ extern HRESULT CreateCarVertexBuffer (IDirect3DDevice9 *pd3dDevice);
 
 extern void FreeCarVertexBuffer (void);
 
+// Refills both cars' vertex buffers at their current suspension compression. Once per frame,
+// before either car is drawn - they ride at different heights so they cannot share a buffer.
+extern void UpdateCarSuspension (IDirect3DDevice9 *pd3dDevice);
+
 extern void DrawCar (IDirect3DDevice9 *pd3dDevice);
+
+extern void DrawOpponentCar (IDirect3DDevice9 *pd3dDevice);
 
 extern HRESULT CreateCockpitVertexBuffer (IDirect3DDevice9 *pd3dDevice);
 
