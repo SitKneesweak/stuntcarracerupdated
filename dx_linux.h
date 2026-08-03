@@ -345,6 +345,12 @@ class IDirect3DTexture9 {
   IDirect3DTexture9() {texID = 0; w=h=w2=h2=0; wf=hf=1.0f;}
   ~IDirect3DTexture9() {if (texID) glDeleteTextures(1, &texID);}
   void LoadTexture(const char* name);
+  // Upload pixels the game generated itself rather than a file.  nearest selects point
+  // sampling (chunky Amiga-style texels instead of the blur GL_LINEAR gives), and repeatV
+  // makes the texture tile along V while staying clamped across U - which is what a road
+  // surface wants: tile down its length, don't wrap its painted side lines round the edges.
+  void CreateFromMemory(const unsigned char* pixels, int width, int height, int channels,
+                        bool nearest, bool repeatV);
   void Bind() {glBindTexture(GL_TEXTURE_2D, texID);}
   void UnBind() {glBindTexture(GL_TEXTURE_2D, 0);}
   int  Width()  const {return w2;}	// what the sampler sees (== w, we never pad to POT)
@@ -857,6 +863,22 @@ extern float gFogMaxAmount;		// upper clamp on the fog blend, 1.0 = no limit.
 
 #ifdef SCR_SHARP_PIXEL
 extern bool gSharpPixelEnabled;	// toggled with Y
+#endif
+
+/*	--------------------------------------------------------------------------------------- */
+/*	Procedural road surface texture (RoadTexture.cpp).										*/
+/*																							*/
+/*	The road cells in atlas.png are a flat colour with the coloured side lines painted into	*/
+/*	their outer texels, and the track vertices sampled a single row of one - so the road		*/
+/*	surface itself was untextured no matter how far you drove. This replaces those cells		*/
+/*	with generated textures that carry the same colours and side lines plus quantised grey	*/
+/*	noise, tiling along the road's length.													*/
+/*																							*/
+/*	Only needs GL 1.1 (no shaders), but it does rely on non-power-of-two texture widths and	*/
+/*	point sampling, so it stays off for the GLES1 targets.									*/
+/*	--------------------------------------------------------------------------------------- */
+#if !defined(HAVE_GLES)
+#define SCR_ROAD_TEXTURE 1
 #endif
 
 class IDirect3DDevice9

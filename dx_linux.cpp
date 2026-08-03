@@ -71,6 +71,36 @@ void IDirect3DTexture9::LoadTexture(const char* name)
 	if (img) free(img);
 }
 
+void IDirect3DTexture9::CreateFromMemory(const unsigned char* pixels, int width, int height,
+                                         int channels, bool nearest, bool repeatV)
+{
+	if (texID) glDeleteTextures(1, &texID);
+	glGenTextures(1, &texID);
+
+	GLenum fmt = GL_RGBA;
+	switch (channels) {
+	case 1: fmt = GL_ALPHA; break;
+	case 3: fmt = GL_RGB;   break;
+	case 4: fmt = GL_RGBA;  break;
+	}
+
+	w2 = w = width;
+	h2 = h = height;
+	wf = hf = 1.0f;
+
+	Bind();
+	const GLint filter = nearest ? GL_NEAREST : GL_LINEAR;
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, repeatV ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+	// Rows are tightly packed and the width isn't necessarily a multiple of 4.
+	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+	glTexImage2D(GL_TEXTURE_2D, 0, channels, width, height, 0, fmt, GL_UNSIGNED_BYTE, pixels);
+	glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+	UnBind();
+}
+
 
 struct sound_buffer_t {
 	ALuint id;

@@ -17,6 +17,7 @@
 #include "StuntCarRacer.h"
 #include "3D_Engine.h"
 #include "Atlas.h"
+#include "RoadTexture.h"
 
 /*	===== */
 /*	Debug */
@@ -1781,6 +1782,95 @@ static long numShadowVertices;
 static long PieceFirstVertex[NUM_TRACK_FACES][MAX_PIECES_PER_TRACK];
 static long SegmentRoadTexture[MAX_PIECES_PER_TRACK * MAX_SEGMENTS_PER_PIECE];
 
+#ifdef SCR_ROAD_TEXTURE
+/*
+ * Texture V at the near edge of each segment, accumulated along the track so the generated
+ * road texture (RoadTexture.cpp) tiles continuously instead of restarting per segment - a
+ * per-segment 0..1 would make the grain stretch and snap as segment lengths change.
+ * One extra entry holds the far edge of the last segment.
+ */
+static float SegmentTexV[MAX_PIECES_PER_TRACK * MAX_SEGMENTS_PER_PIECE + 1];
+
+// Set either side of each road quad by the ROAD cases of the two CreateUpdatePieceInVB
+// functions, so the vertex-storing helpers below don't need another two arguments.
+static float roadTexVNear = 0.0f, roadTexVFar = 1.0f;
+
+static void SetSegmentTexCoords (void)
+{
+long  piece, s, numSegments, segment = 0;
+double distance = 0.0, roadWidth = 0.0;
+
+	if (NumTrackPieces <= 0)
+		return;
+
+	/*
+	 * 1) Walk the track accumulating the world-space distance along it.  A segment's length
+	 *    is the gap between the midpoints of its near (coords 0,1) and far (coords 4,5)
+	 *    edges; the piece origin is common to both so it cancels and can be ignored.
+	 */
+	for (piece = 0; piece < NumTrackPieces; piece++)
+	{
+		numSegments = Track[piece].numSegments;
+
+		for (s = 0; s < numSegments; s++)
+		{
+			const long o = s * 4;
+			const COORD_3D *c = Track[piece].coords;
+
+			// y is divided by 4 for display (see GetPieceVertex), so do the same here or
+			// steep sections would stretch the grain.
+			const double nx = (double)(c[o+0].x + c[o+1].x) * 0.5;
+			const double ny = (double)(c[o+0].y + c[o+1].y) * 0.5 * 0.25;
+			const double nz = (double)(c[o+0].z + c[o+1].z) * 0.5;
+			const double fx = (double)(c[o+4].x + c[o+5].x) * 0.5;
+			const double fy = (double)(c[o+4].y + c[o+5].y) * 0.5 * 0.25;
+			const double fz = (double)(c[o+4].z + c[o+5].z) * 0.5;
+
+			const double dx = fx - nx, dy = fy - ny, dz = fz - nz;
+
+			SegmentTexV[segment] = (float)distance;
+			distance += sqrt(dx*dx + dy*dy + dz*dz);
+
+			if (roadWidth == 0.0)
+			{
+				const double wx = (double)(c[o+1].x - c[o+0].x);
+				const double wy = (double)(c[o+1].y - c[o+0].y) * 0.25;
+				const double wz = (double)(c[o+1].z - c[o+0].z);
+				roadWidth = sqrt(wx*wx + wy*wy + wz*wz);
+			}
+
+			segment++;
+		}
+	}
+	SegmentTexV[segment] = (float)distance;
+
+	if ((distance <= 0.0) || (roadWidth <= 0.0) || (GetRoadTextureWidth() <= 0))
+		return;
+
+	/*
+	 * 2) Convert distance to tiles.  One tile spans as much road length as it does width,
+	 *    scaled by its own texel dimensions, which keeps the generated texels square.
+	 */
+	const double worldPerTexel = roadWidth / (double)GetRoadTextureWidth();
+	double tileLength = worldPerTexel * (double)GetRoadTextureHeight();
+	if (tileLength <= 0.0)
+		return;
+
+	/*
+	 * 3) The track is a loop, so the last segment's far edge is the first segment's near
+	 *    edge.  Stretch the tile length very slightly so a whole number of tiles fits and
+	 *    the grain doesn't jump at the start line.
+	 */
+	double tiles = distance / tileLength;
+	double wholeTiles = floor(tiles + 0.5);
+	if (wholeTiles >= 1.0)
+		tileLength = distance / wholeTiles;
+
+	for (long i = 0; i <= segment; i++)
+		SegmentTexV[i] = (float)((double)SegmentTexV[i] / tileLength);
+}
+#endif	// SCR_ROAD_TEXTURE
+
 static void SetSegmentTextures (void)
 {
 long piece, rlc, s, numSegments, t;
@@ -1859,6 +1949,29 @@ D3DXVECTOR3 v;
 }
 
 
+/*
+ * Texture coordinates for one corner of a road quad.  uRight picks the far side of the road
+ * across its width, vFar the far end along its length.
+ *
+ * With the generated road texture the quad maps the whole texture across its width and takes
+ * V from distance along the track, so the surface grain tiles continuously.  Without it we
+ * keep the original behaviour: the atlas road cell is only there to draw the side lines, so
+ * every corner samples the same single row of it (atlas_ty1) and the surface stays flat.
+ */
+static void SetRoadVertexUV( UTVERTEX *pVertex, long piece, long s, bool uRight, bool vFar )
+{
+#ifdef SCR_ROAD_TEXTURE
+	pVertex->tu = uRight ? 1.0f : 0.0f;
+	pVertex->tv = vFar ? roadTexVFar : roadTexVNear;
+#else
+	const long t = SegmentRoadTexture[Track[piece].firstSegment+s];
+	pVertex->tu = uRight ? atlas_tx2[t] : atlas_tx1[t];
+	pVertex->tv = atlas_ty1[t];
+	(void)vFar;
+#endif
+}
+
+
 static void StorePieceTriangle( long piece, long piece_x, long piece_y, long piece_z, long offset1, long offset2, long offset3, UTVERTEX *pVertices, DWORD colour, short txind, long s )
 {
 D3DXVECTOR3 v1, v2, v3;//, edge1, edge2, surface_normal;
@@ -1877,46 +1990,23 @@ D3DXVECTOR3 v1, v2, v3;//, edge1, edge2, surface_normal;
 	pVertices[trackVertices].pos = v1;
 //	pVertices[trackVertices].normal = surface_normal;
 	pVertices[trackVertices].color = colour;//D3DCOLOR_XRGB(255,255,255);
-	if (txind == 1)
-	{
-		pVertices[trackVertices].tu = atlas_tx1[SegmentRoadTexture[Track[piece].firstSegment+s]]; //0.0f;
-		pVertices[trackVertices].tv = atlas_ty1[SegmentRoadTexture[Track[piece].firstSegment+s]]; //1.0f;
-	}
-	else if (txind == 2)
-	{
-		pVertices[trackVertices].tu = atlas_tx1[SegmentRoadTexture[Track[piece].firstSegment+s]]; //0.0f;
-		pVertices[trackVertices].tv = atlas_ty1[SegmentRoadTexture[Track[piece].firstSegment+s]]; //1.0f;
-	}
+	// triangle 1 is (near left, far left, far right), triangle 2 (near left, far right, near right)
+	if (txind != 0)
+		SetRoadVertexUV( &pVertices[trackVertices], piece, s, false, false );
 	++trackVertices;
 
 	pVertices[trackVertices].pos = v2;
 //	pVertices[trackVertices].normal = surface_normal;
 	pVertices[trackVertices].color = colour;//D3DCOLOR_XRGB(255,255,255);
-	if (txind == 1)
-	{
-		pVertices[trackVertices].tu = atlas_tx1[SegmentRoadTexture[Track[piece].firstSegment+s]]; //0.0f;
-		pVertices[trackVertices].tv = atlas_ty1[SegmentRoadTexture[Track[piece].firstSegment+s]]; //0.0f;
-	}
-	else if (txind == 2)
-	{
-		pVertices[trackVertices].tu = atlas_tx2[SegmentRoadTexture[Track[piece].firstSegment+s]]; //1.0f;
-		pVertices[trackVertices].tv = atlas_ty1[SegmentRoadTexture[Track[piece].firstSegment+s]]; //0.0f;
-	}
+	if (txind != 0)
+		SetRoadVertexUV( &pVertices[trackVertices], piece, s, (txind == 2), true );
 	++trackVertices;
 
 	pVertices[trackVertices].pos = v3;
 //	pVertices[trackVertices].normal = surface_normal;
 	pVertices[trackVertices].color = colour;//D3DCOLOR_XRGB(255,255,255);
-	if (txind == 1)
-	{
-		pVertices[trackVertices].tu = atlas_tx2[SegmentRoadTexture[Track[piece].firstSegment+s]]; //1.0f;
-		pVertices[trackVertices].tv = atlas_ty1[SegmentRoadTexture[Track[piece].firstSegment+s]]; //0.0f;
-	}
-	else if (txind == 2)
-	{
-		pVertices[trackVertices].tu = atlas_tx2[SegmentRoadTexture[Track[piece].firstSegment+s]]; //1.0f;
-		pVertices[trackVertices].tv = atlas_ty1[SegmentRoadTexture[Track[piece].firstSegment+s]]; //1.0f;
-	}
+	if (txind != 0)
+		SetRoadVertexUV( &pVertices[trackVertices], piece, s, true, (txind == 1) );
 	++trackVertices;
 }
 
@@ -1940,16 +2030,11 @@ D3DXVECTOR3 v1;//, v2, v3, edge1, edge2, surface_normal;
 	pVertices[trackVertices].pos = v1;
 //	pVertices[trackVertices].normal = surface_normal;
 	pVertices[trackVertices].color = colour;
-	if (txind == 1)
-	{
-		pVertices[trackVertices].tu = atlas_tx1[SegmentRoadTexture[Track[piece].firstSegment+s]]; //0.0f;
-		pVertices[trackVertices].tv = atlas_ty1[SegmentRoadTexture[Track[piece].firstSegment+s]]; //0.0f;
-	}
-	else if (txind == 2)
-	{
-		pVertices[trackVertices].tu = atlas_tx2[SegmentRoadTexture[Track[piece].firstSegment+s]]; //1.0f;
-		pVertices[trackVertices].tv = atlas_ty1[SegmentRoadTexture[Track[piece].firstSegment+s]]; //0.0f;
-	}
+	// Strip mode stores one vertex at a time; the road ones are always a far-edge corner,
+	// txind picking which side of the road (except for the strip's two priming vertices,
+	// where the caller points roadTexVFar at the near edge instead - see below).
+	if (txind != 0)
+		SetRoadVertexUV( &pVertices[trackVertices], piece, s, (txind == 2), true );
 	++trackVertices;
 }
 
@@ -2036,6 +2121,10 @@ static void CreateUpdatePieceInVBMode1( long piece, long face, UTVERTEX *pVertic
 			roadColourIndex = Track[piece].roadColour[s];
 
 			colour = SCRGB(roadColourIndex);
+#ifdef SCR_ROAD_TEXTURE
+			roadTexVNear = SegmentTexV[Track[piece].firstSegment + s];
+			roadTexVFar  = SegmentTexV[Track[piece].firstSegment + s + 1];
+#endif
 			// triangle 1 (offsets 0,4,5)
 			StorePieceTriangle(piece, piece_x, piece_y, piece_z, offset, offset+4, offset+5, pVertices, colour, 1, s);
 			// triangle 2 (offsets 0,5,1)
@@ -2104,6 +2193,11 @@ static void CreateUpdatePieceInVBMode2( long piece, long face, UTVERTEX *pVertic
 		{
 			roadColourIndex = Track[piece].roadColour[0];
 			colour = SCRGB(roadColourIndex);
+#ifdef SCR_ROAD_TEXTURE
+			// These two prime the strip with the near edge of the very first segment, so
+			// point the "far" V that StorePieceVertex1 uses at the start of the track.
+			roadTexVFar = SegmentTexV[0];
+#endif
 			// triangle 1 (offsets 1,0,5)
 			StorePieceVertex1(piece, piece_x, piece_y, piece_z, 1, 0, 5, pVertices, colour, 2, 0);
 			StorePieceVertex1(piece, piece_x, piece_y, piece_z, 0, 5, 1, pVertices, colour, 1, 0);
@@ -2146,6 +2240,9 @@ static void CreateUpdatePieceInVBMode2( long piece, long face, UTVERTEX *pVertic
 			}
 
 			colour = SCRGB(roadColourIndex);
+#ifdef SCR_ROAD_TEXTURE
+			roadTexVFar = SegmentTexV[Track[piece].firstSegment + s + 1];
+#endif
 			// store last vertex of triangle 1 (offsets 1,0,5) i.e. offset 5
 			StorePieceVertex1(piece, piece_x, piece_y, piece_z, offset+5, offset+1, offset, pVertices, colour, 2, s);
 			// store last vertex of triangle 2 (offsets 0,5,4) i.e. offset 4
@@ -2343,6 +2440,9 @@ HRESULT CreateTrackVertexBuffer (IDirect3DDevice9 *pd3dDevice)
 	}
 
 	SetSegmentTextures();
+#ifdef SCR_ROAD_TEXTURE
+	SetSegmentTexCoords();
+#endif
 
 	long face, piece;
 	// convert each piece of track in turn
@@ -2473,7 +2573,10 @@ void DrawTrack (IDirect3DDevice9 *pd3dDevice)
 		 * Draw track with road lines
 		 */
 		D3DPRIMITIVETYPE primitiveType;
-		long verticesPerSegment, firstTexturedSegment, lastTexturedSegment, i, count, s, v;
+		long verticesPerSegment, s, v;
+#ifndef SCR_ROAD_TEXTURE
+		long firstTexturedSegment, lastTexturedSegment, i, count;
+#endif
 
 		if (bTrackDrawMode == 0)		// Use D3DPT_TRIANGLELIST
 		{
@@ -2501,6 +2604,33 @@ void DrawTrack (IDirect3DDevice9 *pd3dDevice)
 		v = PieceFirstVertex[RIGHT_SIDE][0];	// first right side vertex
 		pd3dDevice->DrawPrimitive( primitiveType, v, NumTrackSegments*2 );	// 2 side triangles per segment
 
+#ifdef SCR_ROAD_TEXTURE
+		/*
+		 * 2) Draw the whole road textured.
+		 *
+		 * The original only textured the segments around the player (see the #else below),
+		 * which was invisible when the texture was flat colour plus side lines but would
+		 * show as a hard band of grain sliding towards you now that it carries a surface.
+		 * The colour variant alternates per segment so consecutive segments rarely share a
+		 * texture anyway - batching wouldn't buy much, and these are two triangles each.
+		 */
+		pd3dDevice->SetTextureStageState( 0, D3DTSS_COLOROP,   D3DTOP_SELECTARG1 );
+		pd3dDevice->SetTextureStageState( 0, D3DTSS_COLORARG1, D3DTA_TEXTURE );
+		pd3dDevice->SetTextureStageState( 0, D3DTSS_COLORARG2, D3DTA_DIFFUSE );
+		pd3dDevice->SetTextureStageState( 0, D3DTSS_ALPHAOP,   D3DTOP_DISABLE );
+		pd3dDevice->SetTextureStageState( 1, D3DTSS_COLOROP,   D3DTOP_DISABLE );
+
+		v = PieceFirstVertex[ROAD][0];	// first road vertex
+		for (s = 0; s < NumTrackSegments; s++, v += verticesPerSegment)
+		{
+			IDirect3DTexture9 *pTexture = g_pRoadTexture[SegmentRoadTexture[s]];
+			pd3dDevice->SetTexture( 0, pTexture ? pTexture : g_pAtlas );
+			pd3dDevice->DrawPrimitive( primitiveType, v, 2 );	// 2 road triangles per segment
+		}
+
+		pd3dDevice->SetTextureStageState( 0, D3DTSS_COLOROP, D3DTOP_DISABLE );
+		(void)segmentsRendered;
+#else
 		/*
 		 * 2) Draw first part of road untextured (up to where road lines begin, in region surrounding player)
 		 */
@@ -2567,6 +2697,7 @@ void DrawTrack (IDirect3DDevice9 *pd3dDevice)
 			s = NumTrackSegments - segmentsRendered;
 			pd3dDevice->DrawPrimitive( primitiveType, v, s*2 );	// 2 road triangles per segment
 		}
+#endif	// SCR_ROAD_TEXTURE
 	}
 
 	/* Draw the start/finish line on top of the road */

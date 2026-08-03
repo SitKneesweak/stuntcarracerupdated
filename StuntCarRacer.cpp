@@ -21,6 +21,7 @@
 #include "Opponent_Behaviour.h"
 #include "wavefunctions.h"
 #include "Atlas.h"
+#include "RoadTexture.h"
 #include "version.h"
 
 #ifdef linux
@@ -790,6 +791,10 @@ void LoadTextures()
 	if (!g_pAtlas) g_pAtlas = new IDirect3DTexture9();
 	g_pAtlas->LoadTexture("Bitmap/atlas.png");
 	InitAtlasCoord();
+#ifdef SCR_ROAD_TEXTURE
+	// Reads the road cells back out of atlas.png, so it has to follow InitAtlasCoord()
+	CreateRoadTextures();
+#endif
 	printf("Texture loaded\n");
 }
 void CreateBuffers(IDirect3DDevice9 *pd3dDevice)
@@ -1631,6 +1636,17 @@ static void HandleTrackPreview( CDXUTTextHelper &txtHelper )
 		boostUnit = 0;
 		bPlayerPaused = bOpponentPaused = FALSE;
 		keyPress = '\0';
+
+		// Hang the car on the chains now, not on the first physics step: CarBehaviour
+		// only runs when a step is due, so the first render frame (or two) of the race
+		// would otherwise still be drawn from the track preview's car position, and the
+		// car would appear to be sitting on the ground and then snap up onto the crane.
+		PlaceCarOnChainsForNewGame(&player1_x,
+								   &player1_y,
+								   &player1_z,
+								   &player1_x_angle,
+								   &player1_y_angle,
+								   &player1_z_angle);
 		}
 
 	return;
@@ -1689,6 +1705,21 @@ static void DrawLapTime( CDXUTTextHelper &txtHelper, double timeSeconds, float r
 
 void RenderText( double fTime )
 {
+	// SCR_AUTOSTART=1 drives the menus for a non-interactive run: track 1, select, go.
+	{
+	static long autostart = -1;
+	static long frames = 0;
+	if (autostart < 0)
+		autostart = (getenv("SCR_AUTOSTART") != NULL) ? 1 : 0;
+	if (autostart)
+		{
+		++frames;
+		if (frames == 60)  keyPress = FIRSTMENU;
+		if (frames == 120) keyPress = STARTMENU;
+		if (frames == 180) keyPress = STARTMENU;
+		}
+	}
+
     // The helper object simply helps keep track of text position, and color
     // and then it calls pFont->DrawText( m_pSprite, strMsg, -1, &rc, DT_NOCLIP, m_clr );
     // If NULL is passed in as the sprite object, then it will work fine however the 
@@ -2284,6 +2315,9 @@ void CALLBACK OnLostDevice( void *pUserContext )
 	FreeCockpitVertexBuffer();
 
 	if (g_pAtlas) g_pAtlas->Release(), g_pAtlas = NULL;
+#ifdef SCR_ROAD_TEXTURE
+	FreeRoadTextures();
+#endif
 }
 
 

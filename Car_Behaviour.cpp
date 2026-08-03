@@ -218,6 +218,12 @@ static double chain_frame_phase = 0.0;
 	// that is stopped for exactly as long as the car is hanging.
 static long chain_frame_fraction = 0;
 
+	// Release guard, see lift.car.stage3.  The Amiga lets go the instant its random
+	// timer expires; this port additionally refuses to let go while the car is out
+	// over the edge of the road, for a bounded number of frames.
+static long chain_release_hold = 0;
+static long chain_last_road_x  = -1;
+
 static long player_distance_off_road;	// used to determine the value below
 static long off_map_status = 0;	// not set exactly like Amiga StuntCarRacer
 
@@ -465,6 +471,8 @@ void ResetPlayer (void)
 	chain_fire_pressed = FALSE;
 	chain_frame_phase = 0.0;
 	chain_frame_fraction = 0;
+	chain_release_hold = 0;
+	chain_last_road_x = -1;
 
 	// calculated
 	player_distance_off_road = 0;
@@ -563,6 +571,60 @@ extern long HalfALapPiece;
 long INITIALISE_PLAYER = TRUE;
 
 
+// Set once PlaceCarOnChainsForNewGame has hung the car on the chains, so that
+// CarBehaviour's own bNewGame reset does not immediately do it all again (which
+// would throw away the crane frames that have run in the meantime).
+static long new_game_placement_done = FALSE;
+
+
+/*	======================================================================================= */
+/*	Function:		PlaceCarOnChainsForNewGame												*/
+/*																							*/
+/*	Description:	The new-game reset, pulled out of CarBehaviour so it can be done at		*/
+/*					the moment the race starts rather than on the first physics step.		*/
+/*																							*/
+/*					CarBehaviour only runs when a physics step is due, and the render		*/
+/*					frame that starts the race is neither guaranteed to run one nor even	*/
+/*					to call FrameMove (the 60fps cap can skip it).  That left the first		*/
+/*					frame or two of the race drawn from the track preview's car position -	*/
+/*					on the ground, beside the start piece - before the car snapped up onto	*/
+/*					the crane.																*/
+/*	======================================================================================= */
+
+void PlaceCarOnChainsForNewGame (long *x,
+								 long *y,
+								 long *z,
+								 long *x_angle,
+								 long *y_angle,
+								 long *z_angle)
+	{
+	ResetPlayer();
+
+	ResetDrawBridge();
+	ReplayFinished = FALSE;
+
+	// A start-of-race drop start, not a re-lift: from high up, on a timer.
+	drop_start_done = FALSE;
+	PositionCarAbovePiece(PlayersStartPiece);
+
+	off_track_count = 0;
+	new_game_placement_done = TRUE;
+
+	// The car is where it is going to be, so CarBehaviour must not overwrite it
+	// from the values passed in.
+	INITIALISE_PLAYER = FALSE;
+
+	*x = player_x;
+	*y = -(player_y * LOCAL_Y_FACTOR);
+	*z = player_z;
+
+	// Same angle conventions as CarBehaviour's output block below.
+	*x_angle = (-player_x_angle & (MAX_ANGLE - 1));
+	*y_angle = (player_y_angle & (MAX_ANGLE - 1));
+	*z_angle = (-player_z_angle & (MAX_ANGLE - 1));
+	}
+
+
 void CarBehaviour (DWORD input,
 				   long *x,
 				   long *y,
@@ -596,9 +658,14 @@ void CarBehaviour (DWORD input,
 	if (scr::gUseFloatV2Physics && (scr::gFloatV2Dt > 0.0))
 		off_track_limit = lround(OFF_TRACK_LIMIT * (0.02 / scr::gFloatV2Dt));
 
-	// reset player and control action replay as required
+	if (! bNewGame)
+		new_game_placement_done = FALSE;
+
+	// reset player and control action replay as required.  A new game whose car has
+	// already been hung on the chains (PlaceCarOnChainsForNewGame, at the moment the
+	// race started) is skipped here - redoing it would restart the crane sequence.
 	if ((off_track_count > off_track_limit) ||
-	    (bNewGame) ||
+	    (bNewGame && ! new_game_placement_done) ||
 		(ReplayRequested))
 		{
 		ResetPlayer();
@@ -1242,7 +1309,12 @@ static void UpdateOffMapStatus (void)
 		smaller_limit_required = FALSE;
 		}
 
-	if ((off_map_status != 0) && (touching_road) && (player_y < 0x1000000))
+	// Not while the crane has the car.  The drop start leaves it sitting on the ground
+	// beside an elevated track - off the map by this test, and touching the ground -
+	// so without this the off-track timer runs out mid-hoist and craning it back on
+	// interrupts the drop start.  The Amiga skips the whole off-map countdown while
+	// car.on.chains.countdown is set (race.loop, StuntCarRacer.s:10375).
+	if ((! ON_CHAINS) && (off_map_status != 0) && (touching_road) && (player_y < 0x1000000))
 		{
 		off_track_count++;
 		smaller_limit_required = TRUE;
@@ -2802,12 +2874,34 @@ static long SwingCar (long adjust)
 	// the lift it writes into car_collision_y_acceleration is a whole frame's impulse
 	// (FloatV2 divides those by dtRatio precisely so that one step delivers the lot),
 	// so running it per physics step would multiply the lift by the step count.
+
 static void LiftCarOntoTrack (void)
 	{
 	long d1 = car_on_chains_countdown;
 
 	if (d1 == 0)
 		return;								// car.not.on.chains
+
+	// SCR_CRANE_TRACE=1 dumps one line per crane frame.
+	{
+	static long trace = -1;
+	if (trace < 0)
+		{
+		const char *env = getenv("SCR_CRANE_TRACE");
+		trace = ((env != NULL) && (atol(env) != 0)) ? 1 : 0;
+		}
+	if (trace)
+		printf("crane rrh=%7ld rah=%7ld cd=%3ld y=%08lx smaller=%6ld req=%6ld target=%6ld yspeed=%8ld touch=%ld "
+			   "| roadx=%5ld xoff=%5ld zang=%6ld swing=%6ld xspd=%7ld x=%09lx\n",
+			   rear_road_height, rear_actual_height,
+			   d1, player_y, PlayersSmallerY(), required_raise_height,
+			   required_raise_height + ((d1 == 229) ? (3 << 8) : (d1 == 228 ? (4 << 8) : (2 << 8))),
+			   player_world_y_speed, touching_road,
+			   players_road_x_position,
+			   players_road_x_position - (ROAD_WIDTH/2),
+			   player_z_angle, swing_magnitude,
+			   player_world_x_speed, player_x);
+	}
 
 	if (d1 >= 230)
 		{
@@ -2838,7 +2932,13 @@ static void LiftCarOntoTrack (void)
 		if (! SwingCar(-1))
 			return;
 
-		// Settled.  The hang before the drop is random: 160..191, released once the
+		// The roll has decayed, so start the hang - as the Amiga does.  The swing
+		// itself is still moving at this point; stage 3 decides where in that swing
+		// it is safe to let go.
+		chain_release_hold = 0;
+		chain_last_road_x  = -1;
+
+		// The hang before the drop is random: 160..191, released once the
 		// byte reads positive again, so 33..64 Amiga frames.  (The Amiga used a fixed
 		// 0x8c in practice mode; this port has no practice mode.)
 		car_on_chains_countdown = 160 + (rand() & 0x1f);
@@ -2873,6 +2973,56 @@ static void LiftCarOntoTrack (void)
 			return;
 		}
 
+	/*
+	 * The timer says let go.  On the Amiga it would, at whatever phase of the swing
+	 * the car happens to be in.
+	 *
+	 * swing.car writes players.z.angle = swing.magnitude - (x.offset << 5), so once
+	 * the magnitude stops decaying the roll is a position servo: the car hangs
+	 * tilted towards the road, the crane's lift (which acts along the car's own y
+	 * axis, not the world's) drags it sideways, and it comes to rest where the tilt
+	 * reaches zero - x.offset = +/-4096/32 = +/-128, about two thirds of the way
+	 * from the road centre to the edge.  That is where the Amiga's drop start puts
+	 * you.
+	 *
+	 * player.to.side.of.road starts the car at x.offset 320, well beyond the road
+	 * edge, so the servo has half a road width to travel and arrives with momentum.
+	 * The resulting oscillation is only lightly damped (the chain drag is $6000 >> 3)
+	 * and still has roughly +/-40 road units of amplitude when the timer expires.
+	 * Caught on the way out it lets go at x.offset ~180 with the car still drifting
+	 * outwards; the outer wheel sits 32 road units further out again and the edge is
+	 * at ROAD_WIDTH/2 == 192, so the car lands on the lip of the track and falls off.
+	 *
+	 * So rather than wait for the swing to die - which costs seconds the Amiga does
+	 * not spend - hold the release for the part of the swing where the drop is safe:
+	 * inside the band, and not still travelling outwards.  Bounded, because a piece
+	 * where the servo cannot reach its own null (a steep bank, say) must not leave
+	 * the car hanging for ever.
+	 */
+	{
+	#define	CHAIN_SAFE_X_OFFSET		144		// outer wheel then lands 16 short of the edge
+	#define	CHAIN_MAX_RELEASE_HOLD	40		// two swing periods or so
+
+	long x_offset = players_road_x_position - (ROAD_WIDTH/2);
+	long drift    = ((chain_last_road_x < 0) ? 0 : (players_road_x_position - chain_last_road_x));
+
+	chain_last_road_x = players_road_x_position;
+
+	// Measure both towards the side the car hangs on, so the test is one-sided.
+	if (x_offset < 0)
+		{
+		x_offset = -x_offset;
+		drift    = -drift;
+		}
+
+	if (((x_offset > CHAIN_SAFE_X_OFFSET) || (drift > 2))
+		&& (++chain_release_hold < CHAIN_MAX_RELEASE_HOLD))
+		return;
+
+	chain_release_hold = 0;
+	chain_last_road_x  = -1;
+	}
+
 	// car.off.chains
 	car_on_chains_countdown = 0;
 	off_map_status = 0;
@@ -2883,6 +3033,7 @@ static void LiftCarOntoTrack (void)
 
 
 	// Drives the crane from the FloatV2 step, which runs at some other rate.
+
 static void LiftCarOntoTrackFloatV2 (double dt)
 	{
 	if (! ON_CHAINS)
@@ -4434,6 +4585,37 @@ static void PositionCarAbovePiece (long piece)
 	 * starts from just above the road.  required_raise_height is the height the
 	 * crane holds it at either way, and is in players_smaller_y units.
 	 */
+	/*
+	 * How high the crane holds the car.
+	 *
+	 * The Amiga writes required.raise.height = rear.road.height >> 2, and places the
+	 * car above the piece at (rear.road.height << 9) + $180000.  Both are a factor of
+	 * two larger than the road itself, which sits at world.y = road height << 8:
+	 * calculate.actual.wheel.heights (StuntCarRacer.s:15873) takes the wheel heights as
+	 * world.y >> 8, and the collision compares those against the road heights directly.
+	 *
+	 * The two are consistent with each other, so the crane does hold the car steady -
+	 * but at 2 * road height + 0x1800 instead of 0x1800 above the road, so the higher
+	 * the piece, the further above it the car hangs.  (players.smaller.y is world.y >> 11,
+	 * so one of its units is eight of road height's, and the servo settles 488 of them
+	 * below its target - lift is 256 - d3/8 clamped at 512, gravity is CAR.WEIGHT 317.)
+	 * On track 1's start piece, road height 10240 with the off-road floor at 0x1000,
+	 * the car is released 10432 above the road - two thirds of the whole drop from the
+	 * road down to the floor.
+	 *
+	 * Reading the shift as >> 3 instead holds the car a fixed 0x1800 above the road,
+	 * the constant the Amiga itself pairs it with, and the height the pre-crane PC port
+	 * dropped the car from.  Compared side by side against the Amiga, that is the one
+	 * that looks right - the transcribed >> 2 visibly hoists the car too far up - so it
+	 * is the default, and SCR_CRANE_HOLD=amiga selects the literal shift for comparison.
+	 */
+	static long hold_shift = 0;
+	if (hold_shift == 0)
+		{
+		const char *env = getenv("SCR_CRANE_HOLD");
+		hold_shift = ((env != NULL) && (strcmp(env, "amiga") == 0)) ? 2 : 3;
+		}
+
 	if (! drop_start_done)
 		{
 		player_y = 0x100000;					// players.world.y = 16 << 16
@@ -4441,14 +4623,19 @@ static void PositionCarAbovePiece (long piece)
 		}
 	else
 		{
-		// (rear.road.height << 9) + $180000.  The doubling is not a typo: it is what
-		// makes this height come out exactly at the crane's hold height, i.e. what
-		// makes stage 1's raise.car.off.ground(3) return zero on the first frame.
-		player_y = (height + 0xc00) * 512;
+		// (rear.road.height << 9) + $180000.  Placed so that stage 1's
+		// raise.car.off.ground(3) returns zero on the first frame, which is how the
+		// crane knows it has taken hold - so it follows the shift above.
+		player_y = ((height << (11 - hold_shift)) + 0x180000);
 		car_on_chains_countdown = 230;
 		}
 
-	required_raise_height = (height >> 2);
+	required_raise_height = (height >> hold_shift);
+
+	if (getenv("SCR_CRANE_TRACE") != NULL)
+		printf("PositionCarAbovePiece piece=%ld drop_start_done=%ld road height=%ld (0x%lx) "
+			   "ground player_y would be 0x%lx, set player_y=0x%lx, required=%ld\n",
+			   piece, drop_start_done, height, height, (height << 8), player_y, required_raise_height);
 
 	swing_magnitude = 0;
 	chain_frame_phase = 0.0;
@@ -4489,10 +4676,30 @@ static void PositionCarAbovePiece (long piece)
 	 */
 	long side = (swing_from_left ? -160 : 160);
 
+	// The Amiga's arithmetic (ptsor1, StuntCarRacer.s:8070) is
+	// (160 << 7) * trig * 2 >> 16 << 6, i.e. 160 * trig / 4 world units.  Its
+	// sin/cos table is full scale 32768 (get.sin, :20112, ends on lsr.w #1 of an
+	// unsigned 0..$ffff entry), so that is the 160 * 8192 the routine's own comment
+	// quotes: 20/128 of a map cube.  That is far enough that the car hangs beyond the
+	// edge of the road - road half width is 384 in piece coords, this is 640 - and so
+	// ends up on the ground beside the track rather than on the road surface.
+	//
+	// Our Sin_Cos[] is PRECISION (16384) full scale, half the Amiga's, and player_x/z
+	// are 8x the Amiga's world units, so the same shift is (160 * 4) * cos here.
+	//
+	// SCR_SIDE_OFFSET overrides the 4 while the distance is being matched against the
+	// Amiga by eye; unset (or 0) keeps the transcribed value.
+	static long scale = 0;
+	if (scale == 0)
+		{
+		const char *env = getenv("SCR_SIDE_OFFSET");
+		scale = ((env != NULL) && (atol(env) > 0)) ? atol(env) : 4;
+		}
+
 	short sin_y, cos_y;
 	GetSinCos(player_y_angle, &sin_y, &cos_y);
-	player_x += (side * static_cast<long>(cos_y));
-	player_z -= (side * static_cast<long>(sin_y));
+	player_x += (side * scale * static_cast<long>(cos_y));
+	player_z -= (side * scale * static_cast<long>(sin_y));
 }
 
 

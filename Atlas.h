@@ -45,6 +45,16 @@ enum eAtlas {
 
 extern float atlas_tx1[eLAST], atlas_tx2[eLAST], atlas_ty1[eLAST], atlas_ty2[eLAST];
 
+// The cells' raw pixel rects within atlas.png, kept alongside the UVs above so code that
+// needs to read the authored artwork (see RoadTexture.cpp) doesn't have to undo the UV
+// normalisation, the linux V flip and the road line inset to get back to texel space.
+extern int atlas_px[eLAST], atlas_py[eLAST], atlas_pw[eLAST], atlas_ph[eLAST];
+
+// Width of the red/yellow road side lines as authored into the atlas, in texels out of
+// the road cells' 400, and the width actually wanted on screen.  See Atlas.cpp.
+#define ROAD_ATLAS_LINE_TEXELS  9.0f
+#define ROAD_LINE_WIDTH_TEXELS  5.0f
+
 void InitAtlasCoord();
 
 #endif //__ATLAS_H_

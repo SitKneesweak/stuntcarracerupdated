@@ -44,6 +44,13 @@ typedef enum
 /*	============================== */
 extern void ResetPlayer (void);
 
+extern void PlaceCarOnChainsForNewGame (long *x,
+										long *y,
+										long *z,
+										long *x_angle,
+										long *y_angle,
+										long *z_angle);
+
 extern void CarBehaviour (DWORD input,
 						  long *x,
 						  long *y,
