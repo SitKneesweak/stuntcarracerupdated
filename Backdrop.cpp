@@ -188,7 +188,7 @@ static void DrawHorizon( long viewpoint_y,
 		}
 
 	// remember the unclipped horizon line so that DrawScenery can rest the
-	// scenery silhouettes exactly on it (see SnapSceneryBaseToHorizon)
+	// scenery silhouettes exactly on it (see GetHorizonDownDirection)
 	horizon_line[0] = screen_coords[0];
 	horizon_line[1] = screen_coords[1];
 	horizon_line_valid = TRUE;
@@ -437,60 +437,98 @@ static void DrawHorizon( long viewpoint_y,
 	}
 
 /*	======================================================================================= */
-/*	Function:		SnapSceneryBaseToHorizon												*/
+/*	Function:		GetHorizonDownDirection													*/
 /*																							*/
-/*	Description:	Slide a projected scenery base vertex down onto the horizon line		*/
+/*	Description:	Screen-space direction of "world down" for scenery						*/
 /*	======================================================================================= */
 
 // DrawHorizon approximates the horizon with a single line through two points at
 // z = 0x00010000, whereas DrawScenery places every object on a circle of that same
 // radius.  The two only agree near the centre of the screen, so as the viewpoint
-// pitches and rolls a scenery object's base can end up above the horizon line, leaving
-// a band of sky between the silhouette and the ground.  The original code hid this with
-// a fixed downward fudge (the +2 * SCENERY_X_Y_SCALE_FACTOR below), which is worth about
-// a pixel and is not enough at this resolution.
+// pitches and rolls a scenery object's base drifts off the horizon line, leaving either
+// a band of sky between the silhouette and the ground or a skirt hanging down over the
+// ground.  The original code hid this with a fixed downward fudge (the
+// +2 * SCENERY_X_Y_SCALE_FACTOR below), which is worth about a pixel and is not enough
+// at this resolution.
 //
 // Distant scenery stands *at* the horizon by definition, so rather than guess at a fudge
-// we rest each base vertex directly on the horizon line, and only ever push a vertex
-// down - a vertex already below the line is left where the original code put it.
+// we rest each object's base on the horizon line - but the whole object has to be slid
+// as one piece.  Moving only the y == 0 vertices and leaving the peaks where they were
+// stretches the silhouette instead of repositioning it, which is why the mountains used
+// to shrink upwards on one side of the screen and grow on the other as the car rolled.
 
 #define	HORIZON_OVERLAP	1.0		// pixels to sink the base below the line, to close the seam
 
-static void SnapSceneryBaseToHorizon( COORD_2D *point,
-									  short sin_z,
-									  short cos_z,
-									  short cos_x )
+static void GetHorizonDownDirection( short sin_z,
+									 short cos_z,
+									 short cos_x,
+									 double *nx,
+									 double *ny )
 	{
-	if (! horizon_line_valid)
-		return;
-
-	// Screen-space direction of "world down" for scenery, i.e. the direction the fudge
-	// nudges a vertex in.  The z rotation maps world down to (-sin_z, cos_z); the x
-	// rotation then scales it by cos_x, whose sign flips once the viewpoint pitches
-	// past vertical (which is exactly when the ground is drawn above the horizon).
-	double nx = -(double)sin_z / PRECISION;
-	double ny =  (double)cos_z / PRECISION;
+	// In view space the z rotation maps world down to (-sin_z, cos_z), and the x rotation
+	// scales it by cos_x, whose sign flips once the viewpoint pitches past vertical (which
+	// is exactly when the ground is drawn above the horizon).  That gives the correct
+	// *side* of the line, but not the correct screen direction: ProjectToScreen divides x
+	// and y by different focal lengths (the pixel aspect correction), so the projected
+	// horizon runs along (focal_x * cos_z, focal_y * sin_z) and its normal is not simply
+	// (-sin_z, cos_z).  Using the unscaled normal leaves an error that grows along the
+	// line and flips sign across the screen - a gap under the mountains on one roll
+	// direction and an overlap on the other.
+	//
+	// So take the direction from the projected endpoints themselves, which carry whatever
+	// scaling ProjectToScreen applied, and only use the view-space vector to choose which
+	// of the two normals points at the ground.
+	double approx_x = -(double)sin_z;
+	double approx_y =  (double)cos_z;
+	double lx, ly, len;
 
 	if (cos_x < 0)
 		{
-		nx = -nx;
-		ny = -ny;
+		approx_x = -approx_x;
+		approx_y = -approx_y;
 		}
 
-	// The horizon line is perpendicular to that direction, so this can never be parallel
-	// to the line and the signed distance is always well defined.
-	double d = ((double)(point->x - horizon_line[0].x) * nx) +
-			   ((double)(point->y - horizon_line[0].y) * ny);
+	lx = (double)(horizon_line[1].x - horizon_line[0].x);
+	ly = (double)(horizon_line[1].y - horizon_line[0].y);
 
-	if (d < HORIZON_OVERLAP)
+	len = sqrt((lx * lx) + (ly * ly));
+
+	if (len < 1e-6)
 		{
-		double t = HORIZON_OVERLAP - d;
-		double dx = nx * t;
-		double dy = ny * t;
-
-		point->x += (long)(dx + ((dx >= 0.0) ? 0.5 : -0.5));
-		point->y += (long)(dy + ((dy >= 0.0) ? 0.5 : -0.5));
+		// degenerate line (both points projected to the same pixel) - fall back to the
+		// view-space direction, normalised
+		len = sqrt((approx_x * approx_x) + (approx_y * approx_y));
+		*nx = (len > 0.0) ? (approx_x / len) : 0.0;
+		*ny = (len > 0.0) ? (approx_y / len) : 1.0;
+		return;
 		}
+
+	// normal to the projected line, oriented to agree with view-space "down"
+	*nx = -ly / len;
+	*ny =  lx / len;
+
+	if (((*nx * approx_x) + (*ny * approx_y)) < 0.0)
+		{
+		*nx = -*nx;
+		*ny = -*ny;
+		}
+	}
+
+/*	======================================================================================= */
+/*	Function:		HorizonDistance															*/
+/*																							*/
+/*	Description:	Signed distance of a projected point below the horizon line				*/
+/*	======================================================================================= */
+
+// The horizon line is perpendicular to the "down" direction, so the projection can never
+// be parallel to the line and the signed distance is always well defined.
+
+static double HorizonDistance( const COORD_2D *point,
+							   double nx,
+							   double ny )
+	{
+	return (((double)(point->x - horizon_line[0].x) * nx) +
+			((double)(point->y - horizon_line[0].y) * ny));
 	}
 
 /*	======================================================================================= */
@@ -513,7 +551,7 @@ typedef struct
 	long	*polygons;
 
 	// Most scenery is a silhouette standing on the ground, so its y == 0 vertices are a
-	// footing that belongs on the horizon (see SnapSceneryBaseToHorizon).  The lake is
+	// footing that belongs on the horizon (see GetHorizonDownDirection).  The lake is
 	// not - the Amiga treats a vertex's y as height above the horizon baseline, and the
 	// lake deliberately straddles that line, so snapping would lift it into the sky.
 	// Left zero (FALSE) by the initialisers of every object except the lake.
@@ -858,6 +896,8 @@ static void DrawScenery( long viewpoint_y,
 	long trans_x, trans_y, trans_z;
 	long screen_width, screen_height;
 	long *polygons;
+	double base_distance;
+	long base_count;
 
 	BYTE colour;
 	POINT points[MAX_POLY_SIDES];
@@ -894,6 +934,8 @@ static void DrawScenery( long viewpoint_y,
 
 		// rotate scenery about x/y/z axis and perform perspective projection
 		visible = TRUE;
+		base_distance = 0.0;
+		base_count = 0;
 		for (i = 0; i < number; i++)
 			{
 			x = scenery_coords[i].x * SCENERY_X_Y_SCALE_FACTOR;
@@ -937,13 +979,46 @@ static void DrawScenery( long viewpoint_y,
 			screen_coords[i].x = x;
 			screen_coords[i].y = y;
 
-			// a vertex sitting on the object's base belongs on the horizon
+			// a vertex sitting on the object's base belongs on the horizon, so note how
+			// far off the line it landed - the object is slid by the average once every
+			// vertex has been projected
 			if ((scenery_coords[i].y == 0) && (! scenery->spansHorizon))
-				SnapSceneryBaseToHorizon(&screen_coords[i], sin_z, cos_z, cos_x);
+				{
+				double nx, ny;
+
+				GetHorizonDownDirection(sin_z, cos_z, cos_x, &nx, &ny);
+				base_distance += HorizonDistance(&screen_coords[i], nx, ny);
+				base_count++;
+				}
 			}
 
 		if (! visible)
 			continue;
+
+		// rest the object's base on the horizon by translating the whole silhouette,
+		// so its shape and height are untouched (see GetHorizonDownDirection)
+		if ((base_count > 0) && (horizon_line_valid))
+			{
+			double nx, ny;
+			double t;
+			double dx, dy;
+			long ox, oy;
+
+			GetHorizonDownDirection(sin_z, cos_z, cos_x, &nx, &ny);
+
+			t = HORIZON_OVERLAP - (base_distance / (double)base_count);
+			dx = nx * t;
+			dy = ny * t;
+
+			ox = (long)(dx + ((dx >= 0.0) ? 0.5 : -0.5));
+			oy = (long)(dy + ((dy >= 0.0) ? 0.5 : -0.5));
+
+			for (i = 0; i < number; i++)
+				{
+				screen_coords[i].x += ox;
+				screen_coords[i].y += oy;
+				}
+			}
 
 		// draw scenery object
 		polygons = scenery->polygons;

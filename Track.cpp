@@ -44,6 +44,7 @@ extern GameModeType GameMode;
 extern bool bAmigaTrackPreview;
 extern bool bAmigaPreviewScreen;
 extern long bTrackDrawMode;
+extern long gTrackLighting;
 extern bool bSuperLeague;
 
 unsigned char sections_car_can_be_put_on[] =
@@ -1977,39 +1978,120 @@ static void SetRoadVertexUV( UTVERTEX *pVertex, long piece, long s, bool uRight,
 }
 
 
-static void StorePieceTriangle( long piece, long piece_x, long piece_y, long piece_z, long offset1, long offset2, long offset3, UTVERTEX *pVertices, DWORD colour, short txind, long s )
+/*
+ * ------------------------------------------------------------------------------------------
+ * Directional shading of the track faces.
+ *
+ * A single fixed sun, no per-frame cost: the track is static geometry, so the shade is baked
+ * into the vertex colours when the vertex buffer is built.  The lambert term is quantised to
+ * a handful of steps so faces stay flat-shaded and the Amiga look survives.
+ *
+ * The sun is deliberately well off vertical.  An overhead sun would agree more neatly with the
+ * opponent's shadow (which drops straight down), but it puts a flat road at full brightness -
+ * and then nothing can be brighter than flat, so climbs and banking can only ever darken and
+ * mostly land in the same quantisation bucket as flat.  Tilting the sun sits a flat road in
+ * mid-range and lets the track deviate in both directions.
+ *
+ * GetPieceVertex returns display vertices, which have y/4 applied.  Shading those directly
+ * flattens every normal by 4x and the road comes out all one tone, so the y component of each
+ * edge is scaled back up by SHADE_Y_UNSQUASH first - the lighting follows the track's true
+ * slope rather than its foreshortened drawn slope.
+ *
+ * These numbers were picked against a spread of representative faces (flat, banked both ways,
+ * climbing, descending, vertical sides) to keep as many distinct shade steps as possible.
+ * They are a starting point tuned on paper, not by eye - adjust to taste.
+ * ------------------------------------------------------------------------------------------
+ */
+#define SHADE_LEVELS		(8)			// quantisation steps - keep low to stay flat-shaded
+#define SHADE_AMBIENT		(0.40f)		// floor, so an unlit face is never black
+#define SHADE_Y_UNSQUASH	(4.0f)		// undoes the y/4 in GetPieceVertex
+
+// Direction from a surface toward the sun (need not be unit length, we normalise below)
+#define SUN_X	(0.45f)
+#define SUN_Y	(0.80f)
+#define SUN_Z	(-0.40f)
+
+// Shade a level road (normal 0,1,0) would get - everything is scaled so that comes out at 1.0
+#define SUN_LENGTH				(sqrtf((SUN_X*SUN_X) + (SUN_Y*SUN_Y) + (SUN_Z*SUN_Z)))
+#define SHADE_LEVEL_REFERENCE	(SHADE_AMBIENT + ((1.0f - SHADE_AMBIENT) * (SUN_Y / SUN_LENGTH)))
+
+static float FaceShade( const D3DXVECTOR3 &v1, const D3DXVECTOR3 &v2, const D3DXVECTOR3 &v3 )
 {
-D3DXVECTOR3 v1, v2, v3;//, edge1, edge2, surface_normal;
+float e1x, e1y, e1z, e2x, e2y, e2z;
+float nx, ny, nz, n_len;
+float lambert, shade;
+
+	if (!gTrackLighting)
+		return(1.0f);
+
+	// Surface normal, by hand - the D3DXVec3 helpers don't exist in the non-Windows shim
+	e1x = v2.x - v1.x;	e1y = (v2.y - v1.y) * SHADE_Y_UNSQUASH;		e1z = v2.z - v1.z;
+	e2x = v3.x - v2.x;	e2y = (v3.y - v2.y) * SHADE_Y_UNSQUASH;		e2z = v3.z - v2.z;
+
+	nx = (e1y * e2z) - (e1z * e2y);
+	ny = (e1z * e2x) - (e1x * e2z);
+	nz = (e1x * e2y) - (e1y * e2x);
+
+	n_len = sqrtf((nx*nx) + (ny*ny) + (nz*nz));
+
+	// Degenerate triangle (repeated vertices do occur in the strips) - leave it unshaded
+	if (n_len == 0.0f)
+		return(1.0f);
+
+	// Winding is not consistent between the road and the two sides (and the sides are built
+	// facing outwards in opposite directions), so take the magnitude rather than trusting the
+	// normal's sign.  A track face is lit the same from either side, which is what we want -
+	// there is no "underneath" of the track that the player ever sees lit differently.
+	lambert = ((nx*SUN_X) + (ny*SUN_Y) + (nz*SUN_Z))
+				/ (n_len * sqrtf((SUN_X*SUN_X) + (SUN_Y*SUN_Y) + (SUN_Z*SUN_Z)));
+	if (lambert < 0.0f) lambert = -lambert;
+
+	shade = SHADE_AMBIENT + ((1.0f - SHADE_AMBIENT) * lambert);
+
+	/*
+	 * Normalise against a level road, so a flat piece keeps its palette colour exactly and only
+	 * the deviations from level darken.  Without this every face comes out below full brightness
+	 * and the whole track just looks washed out rather than lit - the palette is the Amiga's and
+	 * it wants to stay vivid.  The cost is that faces tilted further into the sun than level
+	 * can't go brighter than the base colour; they clamp.  That is the right trade here, as
+	 * blowing the road out toward white would look far worse than losing a step at the top.
+	 */
+	shade /= SHADE_LEVEL_REFERENCE;
+
+	// Quantise
+	shade = static_cast<float>(static_cast<long>((shade * SHADE_LEVELS) + 0.5f)) / SHADE_LEVELS;
+	if (shade > 1.0f) shade = 1.0f;
+
+	return(shade);
+}
+
+
+static void StorePieceTriangle( long piece, long piece_x, long piece_y, long piece_z, long offset1, long offset2, long offset3, UTVERTEX *pVertices, long colour_index, short txind, long s )
+{
+D3DXVECTOR3 v1, v2, v3;
+DWORD colour;
 
 	v1 = GetPieceVertex( piece, piece_x, piece_y, piece_z, offset1 );
 	v2 = GetPieceVertex( piece, piece_x, piece_y, piece_z, offset2 );
 	v3 = GetPieceVertex( piece, piece_x, piece_y, piece_z, offset3 );
 
-	/*
-	// Calculate surface normal
-	edge1 = v2-v1; edge2 = v3-v2;
-	D3DXVec3Cross( &surface_normal, &edge1, &edge2 );
-	D3DXVec3Normalize( &surface_normal, &surface_normal );
-	*/
+	colour = SCRGBShaded( colour_index, FaceShade( v1, v2, v3 ) );
 
 	pVertices[trackVertices].pos = v1;
-//	pVertices[trackVertices].normal = surface_normal;
-	pVertices[trackVertices].color = colour;//D3DCOLOR_XRGB(255,255,255);
+	pVertices[trackVertices].color = colour;
 	// triangle 1 is (near left, far left, far right), triangle 2 (near left, far right, near right)
 	if (txind != 0)
 		SetRoadVertexUV( &pVertices[trackVertices], piece, s, false, false );
 	++trackVertices;
 
 	pVertices[trackVertices].pos = v2;
-//	pVertices[trackVertices].normal = surface_normal;
-	pVertices[trackVertices].color = colour;//D3DCOLOR_XRGB(255,255,255);
+	pVertices[trackVertices].color = colour;
 	if (txind != 0)
 		SetRoadVertexUV( &pVertices[trackVertices], piece, s, (txind == 2), true );
 	++trackVertices;
 
 	pVertices[trackVertices].pos = v3;
-//	pVertices[trackVertices].normal = surface_normal;
-	pVertices[trackVertices].color = colour;//D3DCOLOR_XRGB(255,255,255);
+	pVertices[trackVertices].color = colour;
 	if (txind != 0)
 		SetRoadVertexUV( &pVertices[trackVertices], piece, s, true, (txind == 1) );
 	++trackVertices;
@@ -2017,24 +2099,16 @@ D3DXVECTOR3 v1, v2, v3;//, edge1, edge2, surface_normal;
 
 
 // Fetch and store the piece vertex identified by offset1 (offset2 and 3 are just used to calculate the surface normal)
-static void StorePieceVertex1( long piece, long piece_x, long piece_y, long piece_z, long offset1, long offset2, long offset3, UTVERTEX *pVertices, DWORD colour, short txind, long s )
+static void StorePieceVertex1( long piece, long piece_x, long piece_y, long piece_z, long offset1, long offset2, long offset3, UTVERTEX *pVertices, long colour_index, short txind, long s )
 {
-D3DXVECTOR3 v1;//, v2, v3, edge1, edge2, surface_normal;
+D3DXVECTOR3 v1, v2, v3;
 
 	v1 = GetPieceVertex( piece, piece_x, piece_y, piece_z, offset1 );
-	/*
 	v2 = GetPieceVertex( piece, piece_x, piece_y, piece_z, offset2 );
 	v3 = GetPieceVertex( piece, piece_x, piece_y, piece_z, offset3 );
 
-	// Calculate surface normal
-	edge1 = v2-v1; edge2 = v3-v2;
-	D3DXVec3Cross( &surface_normal, &edge1, &edge2 );
-	D3DXVec3Normalize( &surface_normal, &surface_normal );
-	*/
-
 	pVertices[trackVertices].pos = v1;
-//	pVertices[trackVertices].normal = surface_normal;
-	pVertices[trackVertices].color = colour;
+	pVertices[trackVertices].color = SCRGBShaded( colour_index, FaceShade( v1, v2, v3 ) );
 	// Strip mode stores one vertex at a time; the road ones are always a far-edge corner,
 	// txind picking which side of the road (except for the strip's two priming vertices,
 	// where the caller points roadTexVFar at the near edge instead - see below).
@@ -2098,7 +2172,7 @@ static void CreateUpdatePieceInVBMode1( long piece, long face, UTVERTEX *pVertic
 {
 	long piece_x, piece_y, piece_z;
 	long s, numSegments = Track[piece].numSegments, offset;
-	DWORD colour;
+	long colour;			// palette index; shading is applied per face when stored
 	/*
 	BYTE roadLineColours[2] = {SCR_BASE_COLOUR + 3,	// yellow
 								SCR_BASE_COLOUR + 10};	// red
@@ -2125,7 +2199,7 @@ static void CreateUpdatePieceInVBMode1( long piece, long face, UTVERTEX *pVertic
 			offset = s * 4;
 			roadColourIndex = Track[piece].roadColour[s];
 
-			colour = SCRGB(roadColourIndex);
+			colour = roadColourIndex;
 #ifdef SCR_ROAD_TEXTURE
 			roadTexVNear = SegmentTexV[Track[piece].firstSegment + s];
 			roadTexVFar  = SegmentTexV[Track[piece].firstSegment + s + 1];
@@ -2138,7 +2212,7 @@ static void CreateUpdatePieceInVBMode1( long piece, long face, UTVERTEX *pVertic
 	}
 	else if (face == LEFT_SIDE)	// create left side
 	{
-		colour = SCRGB(Track[piece].sidesColour);
+		colour = Track[piece].sidesColour;
 		// loop through piece segments
 		for (s = 0; s < numSegments; s++)
 		{
@@ -2151,7 +2225,7 @@ static void CreateUpdatePieceInVBMode1( long piece, long face, UTVERTEX *pVertic
 	}
 	else	// create right side
 	{
-		colour = SCRGB(Track[piece].sidesColour);
+		colour = Track[piece].sidesColour;
 		// loop through piece segments
 		for (s = 0; s < numSegments; s++)
 		{
@@ -2171,7 +2245,7 @@ static void CreateUpdatePieceInVBMode2( long piece, long face, UTVERTEX *pVertic
 	long piece_x, piece_y, piece_z;
 	long s, numSegments = Track[piece].numSegments, offset;
 	BYTE roadColourIndex;
-	DWORD colour;
+	long colour;			// palette index; shading is applied per face when stored
 	/*
 	BYTE roadLineColours[2] = {SCR_BASE_COLOUR + 3,	// yellow
 								SCR_BASE_COLOUR + 10};	// red
@@ -2197,7 +2271,7 @@ static void CreateUpdatePieceInVBMode2( long piece, long face, UTVERTEX *pVertic
 		if (face == ROAD)	// road (i.e. top)
 		{
 			roadColourIndex = Track[piece].roadColour[0];
-			colour = SCRGB(roadColourIndex);
+			colour = roadColourIndex;
 #ifdef SCR_ROAD_TEXTURE
 			// These two prime the strip with the near edge of the very first segment, so
 			// point the "far" V that StorePieceVertex1 uses at the start of the track.
@@ -2209,14 +2283,14 @@ static void CreateUpdatePieceInVBMode2( long piece, long face, UTVERTEX *pVertic
 		}
 		else if (face == LEFT_SIDE)
 		{
-			colour = SCRGB(Track[piece].sidesColour);
+			colour = Track[piece].sidesColour;
 			// triangle 1 (offsets 0,2,4)
 			StorePieceVertex1(piece, piece_x, piece_y, piece_z, 0, 2, 4, pVertices, colour, 0, 0);
 			StorePieceVertex1(piece, piece_x, piece_y, piece_z, 2, 4, 0, pVertices, colour, 0, 0);
 		}
 		else	// right side
 		{
-			colour = SCRGB(Track[piece].sidesColour);
+			colour = Track[piece].sidesColour;
 			// triangle 1 (offsets 3,1,7)
 			StorePieceVertex1(piece, piece_x, piece_y, piece_z, 3, 1, 7, pVertices, colour, 0, 0);
 			StorePieceVertex1(piece, piece_x, piece_y, piece_z, 1, 7, 3, pVertices, colour, 0, 0);
@@ -2244,7 +2318,7 @@ static void CreateUpdatePieceInVBMode2( long piece, long face, UTVERTEX *pVertic
 					roadColourIndex = Track[piece+1].roadColour[0];
 			}
 
-			colour = SCRGB(roadColourIndex);
+			colour = roadColourIndex;
 #ifdef SCR_ROAD_TEXTURE
 			roadTexVFar = SegmentTexV[Track[piece].firstSegment + s + 1];
 #endif
@@ -2262,14 +2336,14 @@ static void CreateUpdatePieceInVBMode2( long piece, long face, UTVERTEX *pVertic
 			offset = s * 4;
 			if (s < numSegments-1)
 			{
-				colour = SCRGB(Track[piece].sidesColour);
+				colour = Track[piece].sidesColour;
 			}
 			else
 			{
 				if (piece == (NumTrackPieces-1))
-					colour = SCRGB(Track[0].sidesColour);
+					colour = Track[0].sidesColour;
 				else
-					colour = SCRGB(Track[piece+1].sidesColour);
+					colour = Track[piece+1].sidesColour;
 			}
 
 			// store last vertex of triangle 1 (offsets 0,2,4) i.e. offset 4
@@ -2286,14 +2360,14 @@ static void CreateUpdatePieceInVBMode2( long piece, long face, UTVERTEX *pVertic
 			offset = s * 4;
 			if (s < numSegments-1)
 			{
-				colour = SCRGB(Track[piece].sidesColour);
+				colour = Track[piece].sidesColour;
 			}
 			else
 			{
 				if (piece == (NumTrackPieces-1))
-					colour = SCRGB(Track[0].sidesColour);
+					colour = Track[0].sidesColour;
 				else
-					colour = SCRGB(Track[piece+1].sidesColour);
+					colour = Track[piece+1].sidesColour;
 			}
 
 			// store last vertex of triangle 1 (offsets 3,1,7) i.e. offset 7

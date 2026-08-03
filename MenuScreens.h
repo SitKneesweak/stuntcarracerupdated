@@ -21,8 +21,11 @@ enum MenuScreenType
 	MS_PRACTISE_TRACK,	// pick any of the eight tracks
 	MS_DIVISION,		// 'DIVISION n' - the division's drivers and tracks (not in the flow)
 	MS_FIXTURE,			// 'RACE n' - The X V The Y, and the track
-	MS_RESULT,			// 'RESULT' - Race Winner / Fastest Lap
-	MS_TABLE,			// 'RESULTS TABLE'
+	MS_RACE_WIN,		// the winner's picture - drawn full screen
+	MS_RACE_LOST,		// the loser's picture - drawn full screen
+	MS_TRACK_RECORD,	// 'New track records' - only when the race just beat one
+	MS_RESULT,			// 'RESULT' - the two portraits, Winner 2pts / Best Lap 1pt
+	MS_TABLE,			// the division table, as three portraits with their figures
 	MS_CHAMPIONSHIP,	// 'DRIVERS CHAMPIONSHIP' - the whole ladder
 	MS_CHANGES,			// 'DIVISION n CHANGES' - promotion and relegation
 	MS_SUPER_LEAGUE,	// promotion to the SUPER LEAGUE

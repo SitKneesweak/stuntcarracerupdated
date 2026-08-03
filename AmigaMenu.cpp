@@ -337,8 +337,6 @@ void AmigaMenuPrintCentred( int row, const char *text )
 /*					to separate it from the next.  Geometry is the original's, unchanged.	*/
 /*	======================================================================================= */
 
-#define MENU_BAR_HEIGHT		17
-
 /*	fill.bar's address arithmetic works out at row*8-9, but measured against a screenshot	*/
 /*	of the real thing the bar sits four pixels lower: the entry's glyphs start six pixels	*/
 /*	down the bar with four spare below, rather than being jammed against the bottom rule		*/

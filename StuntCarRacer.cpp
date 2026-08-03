@@ -98,6 +98,9 @@ bool bPaused = FALSE;
 bool bPlayerPaused = FALSE;
 bool bOpponentPaused = FALSE;
 long bTrackDrawMode = 0;
+// Fixed-sun shading of the track faces, baked into the vertex colours (see FaceShade in Track.cpp).
+// F3 toggles it; the track vertex buffer is rebuilt on the toggle.
+long gTrackLighting = 1;
 bool bOutsideView = FALSE;
 /*	Widescreen shows the world past the cockpit's A-pillars and above the side panels, which
 	the Amiga never did - its playfield stopped at the windscreen.  With this set, the scene
@@ -502,6 +505,26 @@ DWORD SCRGB (long colour_index)		// return full RGB value
 	return(D3DCOLOR_XRGB(SCPalette[colour_index].peRed,
 					SCPalette[colour_index].peGreen,
 					SCPalette[colour_index].peBlue));
+	}
+
+
+/*
+ * As SCRGB, but scaled by a lighting factor (0..1).  The palette has no usable shade ramp
+ * (index+1 is a different hue as often as it is a lighter one), so we scale the RGB rather
+ * than shift the index - the same trick the old reducedSCPalette used with its flat 5/8.
+ * The caller quantises the factor, so the result still reads as flat-shaded faces.
+ */
+DWORD SCRGBShaded (long colour_index, float shade)
+	{
+	long r = static_cast<long>(SCPalette[colour_index].peRed   * shade + 0.5f);
+	long g = static_cast<long>(SCPalette[colour_index].peGreen * shade + 0.5f);
+	long b = static_cast<long>(SCPalette[colour_index].peBlue  * shade + 0.5f);
+
+	if (r > 255) r = 255;	if (r < 0) r = 0;
+	if (g > 255) g = 255;	if (g < 0) g = 0;
+	if (b > 255) b = 255;	if (b < 0) b = 0;
+
+	return(D3DCOLOR_XRGB(r, g, b));
 	}
 
 DWORD Fill_Colour, Line_Colour;
@@ -2024,12 +2047,8 @@ void RenderText( double fTime )
 		case GAME_OVER:
 			// Show car speed, damage and race details
 			const D3DSURFACE_DESC *pd3dsdBackBuffer = DXUTGetBackBufferSurfaceDesc();
-			// Output opponent's name for four seconds at race start
-			if (((DXUTGetTime() - gameStartTime) < 4.0) && (opponentsID != NO_OPPONENT))
-			{
-				txtHelper.SetInsertionPos( static_cast<int>((250+(wideScreen?80:0)) * textScale), static_cast<int>(pd3dsdBackBuffer->Height-15*20*textScale) );
-				txtHelper.DrawFormattedTextLine( L"Opponent: " STRING, opponentNames[opponentsID] );
-			}
+			// The Amiga names your opponent on the RACE n fixture screen and nowhere
+			// else - it prints nothing over the cockpit at the start of a race.
 			txtHelper.SetForegroundColor( D3DXCOLOR( 0.0f, 0.0f, 0.0f, 1.0f ) );
 
 			// The dashboard readouts sit in the four grey boxes of the cockpit bitmap, which
@@ -3269,6 +3288,18 @@ bool process_events()
 					fflush(stdout);
 					break;
 #endif
+
+				case SDLK_i:
+					// Toggle the fixed-sun shading of the track faces (see FaceShade in Track.cpp).
+					// The shade is baked into the vertex colours, so the track vertex buffer has
+					// to be refilled.  Note we can't use DXUTReset3DEnvironment() for this - it is
+					// a no-op outside Windows (see dx_linux.cpp).
+					gTrackLighting = !gTrackLighting;
+					printf("Track lighting %s\n", gTrackLighting ? "ON" : "OFF (flat colours)");
+					fflush(stdout);
+					if (CreateTrackVertexBuffer(DXUTGetD3DDevice()) != S_OK)
+						printf("Track lighting: failed to rebuild the track vertex buffer\n");
+					break;
 
 				case SDLK_b:
 					// Cycle the FloatV2 timestep: 10Hz (Amiga rate) -> 25Hz -> 60Hz.

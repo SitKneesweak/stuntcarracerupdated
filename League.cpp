@@ -155,12 +155,12 @@ void LeagueStartSeason( void )
 		opponents[n++] = 0;
 
 	/*	Each opponent once on each of the division's two tracks.  The original's exact	*/
-	/*	fixture ordering isn't recoverable from the disassembly, so this alternates		*/
-	/*	opponents and tracks the way a home-and-away season naturally would.				*/
+	/*	fixture ordering isn't recoverable from the disassembly, so the player takes on	*/
+	/*	one opponent over both tracks before moving on to the next.						*/
 	for (int race = 0; race < RACES_PER_SEASON; race++)
 		{
-		gLeagueFixtures[race].opponent = opponents[race & 1];
-		gLeagueFixtures[race].trackID  = LeagueDivisionTrack(division, race / 2);
+		gLeagueFixtures[race].opponent = opponents[race / 2];
+		gLeagueFixtures[race].trackID  = LeagueDivisionTrack(division, race & 1);
 		gLeagueFixtures[race].raced    = false;
 		gLeagueFixtures[race].won      = false;
 		gLeagueFixtures[race].bestLap  = false;

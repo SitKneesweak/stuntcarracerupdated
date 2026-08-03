@@ -126,6 +126,15 @@ static bool gHallFromMenu = false;
 static double gLastLapTime  = 0.0;
 static double gLastRaceTime = 0.0;
 
+/*	What the race just finished did to the records, for the 'New track records' screen		*/
+/*	that sits between the race picture and the RESULT.  gRecordScreenReturn is where fire	*/
+/*	goes from there: a league race carries on to the RESULT, a practise run drops back to	*/
+/*	the menu.																				*/
+static bool			 gNewRecordRace   = false;
+static bool			 gNewRecordLap    = false;
+static int			 gNewRecordTrack  = 0;
+static MenuScreenType gRecordScreenReturn = MS_SELECT;
+
 /*	Track records, kept for the Hall of Fame.  Zero means "not set yet", which the original	*/
 /*	shows as a row of dashes ('------------' in TEXT.5ec48).								*/
 static double gRecordLap[8]  = { 0 };
@@ -161,7 +170,7 @@ static void MenuScreensDumpAll( const char *prefix )
 	static const char *names[] =
 		{
 		"name-entry", "opponents", "main", "select", "practise-track", "division", "fixture",
-		"result", "table", "championship", "changes", "super-league",
+		"race-win", "race-lost", "track-record", "result", "table", "championship", "changes", "super-league",
 		"hall-of-fame", "load-save", "link"
 		};
 
@@ -302,6 +311,15 @@ static void DrawTimesPanel( double raceTime, double lapTime )
 /*	the same two the artist's own plates use, so the player's cell reads as one of the set.	*/
 static const AmigaPen kNamePlateInk   = { 242, 242, 242 };
 static const AmigaPen kNamePlatePaper = {  10,  10,  10 };
+
+/*	Centre a string over a portrait cell rather than on the character grid - the cells are	*/
+/*	74 pixels wide against a 7 pixel advance, so nothing lines up with a column.				*/
+static void PrintCentredOn( int x, int width, int y, const char *text )
+	{
+	const int textX = x + (width - (int)strlen(text) * AMIGA_CHAR_WIDTH) / 2;
+	AmigaMenuSetInk(AMIGA_INK_TEXT);
+	AmigaMenuPrintPixel(textX, y, text);
+	}
 
 static void DrawPortrait( int driver, int x, int y )
 	{
@@ -531,6 +549,80 @@ static void DrawFixture( void )
 	DrawTimesPanel(0.0, 0.0);
 	}
 
+/*	The two race-end pictures, shown between the chequered flag and the RESULT screen: the	*/
+/*	crowd cheering the winner in, or watching you trail past.  Like the opponents ladder		*/
+/*	they are full-screen artwork rather than something inside the menu panel, so they paint	*/
+/*	their own background and print nothing over the top.									*/
+static void DrawRacePicture( bool won )
+	{
+	AmigaMenuClear(AMIGA_INK_BLACK);
+	AmigaMenuBlit(won ? "racewin.png" : "racelost.png", 0, 0);
+	}
+
+/*	'New track records', shown straight after the race picture when the run just beaten a	*/
+/*	track record - the track it was set on, then whichever of the two records fell, each		*/
+/*	with the driver who now holds it.  The two lines share one bar: the bar is 17 pixels		*/
+/*	tall against an 8 pixel row, so bars on two adjacent rows run together into the single	*/
+/*	amber slab the original shows.															*/
+#define RECORD_ROW_1	18
+#define RECORD_ROW_2	19
+
+static void DrawTrackRecord( void )
+	{
+	DrawDivisionHeading();
+
+	char heading[64];
+	snprintf(heading, sizeof(heading), "Track:   The %s", kTrackNames[gNewRecordTrack]);
+	AmigaMenuPrintCentred(11, heading);
+
+	AmigaMenuPrintCentred(15, "New track records");
+
+	/*	One slab across both rows.  Two AmigaMenuBar calls would very nearly do it, but	*/
+	/*	each bar carries its own white top rule and black bottom rule, so the second		*/
+	/*	one's rules would be drawn straight through the middle of the block.  Fill it	*/
+	/*	by hand instead: the same bevel, top and bottom of the pair rather than of each.	*/
+	const int barTop    = AmigaMenuBarY(RECORD_ROW_1);
+	const int barBottom = AmigaMenuBarY(RECORD_ROW_2) + MENU_BAR_HEIGHT - 1;
+
+	AmigaMenuFillRect(AMIGA_PANEL_X, barTop, AMIGA_PANEL_W, barBottom - barTop + 1,
+					  AMIGA_BAR_SELECTED);
+	AmigaMenuFillRect(AMIGA_PANEL_X, barTop,    AMIGA_PANEL_W, 1, AMIGA_INK_WHITE);
+	AmigaMenuFillRect(AMIGA_PANEL_X, barBottom, AMIGA_PANEL_W, 1, AMIGA_INK_BLACK);
+
+	char time[24];
+	AmigaMenuSetInk(AMIGA_INK_BAR_TEXT);
+
+	/*	Both lines are always printed - the screen is about the track, not just the one	*/
+	/*	line that moved - but only a record this race actually took shows a driver, so	*/
+	/*	an unbeaten record still reads as the row of dashes it does everywhere else.		*/
+	FormatTime(time, sizeof(time), gRecordRace[gNewRecordTrack]);
+	AmigaMenuPrintF(5, RECORD_ROW_1, "Race Time: %-10.10s %s",
+					(gRecordRaceDriver[gNewRecordTrack] >= 0)
+						? LeagueDriverName(gRecordRaceDriver[gNewRecordTrack]) : "",
+					time);
+
+	FormatTime(time, sizeof(time), gRecordLap[gNewRecordTrack]);
+	AmigaMenuPrintF(5, RECORD_ROW_2, "Best Lap : %-10.10s %s",
+					(gRecordLapDriver[gNewRecordTrack] >= 0)
+						? LeagueDriverName(gRecordLapDriver[gNewRecordTrack]) : "",
+					time);
+
+	AmigaMenuSetInk(AMIGA_INK_TEXT);
+	}
+
+/*	The RESULT screen: the fixture that was just run on its bar, then the two portraits		*/
+/*	the points went to - the race winner under 'Winner 2pts' and the fastest lap under		*/
+/*	'Best Lap 1pt', which is where the scoring in LeagueRecordResult comes from.				*/
+/*																							*/
+/*	The rows are worked back from the portraits: a 54-pixel cell sitting on the bottom of	*/
+/*	the panel (which ends at y 195) starts at y 138, so the last row of text clear of it		*/
+/*	is row 16 (y 128..136) and everything above steps up from there.							*/
+#define RESULT_RACE_ROW			10
+#define RESULT_FIXTURE_ROW		12
+#define RESULT_HEADING_ROW		14
+#define RESULT_LABEL_Y			128
+#define RESULT_PORTRAIT_Y		138
+
 static void DrawResult( void )
 	{
 	/*	gLeagueRace has already advanced past the race just run.						*/
@@ -538,43 +630,103 @@ static void DrawResult( void )
 	const LeagueFixture *fixture = &gLeagueFixtures[index];
 
 	DrawDivisionHeading();
-	AmigaMenuPrintAt(17, 11, "RESULT");						// 31,17,15,'RESULT'
+	AmigaMenuPrintF(14, RESULT_RACE_ROW, "RACE  %d of %d", index + 1, RACES_PER_SEASON);
+
+	/*	'The X V The Y' from league.text, on a bar of its own.							*/
+	AmigaMenuBar(RESULT_FIXTURE_ROW, false);
+	char line[64];
+	snprintf(line, sizeof(line), "%s V %s",
+			 LeagueDriverName(fixture->opponent), LeagueDriverName(PLAYER_DRIVER));
+	AmigaMenuSetInk(AMIGA_INK_BAR_TEXT);
+	AmigaMenuPrintCentred(RESULT_FIXTURE_ROW, line);
+	AmigaMenuSetInk(AMIGA_INK_TEXT);
+
+	AmigaMenuPrintCentred(RESULT_HEADING_ROW, "RESULT");
 
 	const int winner  = fixture->won     ? PLAYER_DRIVER : fixture->opponent;
 	const int fastest = fixture->bestLap ? PLAYER_DRIVER : fixture->opponent;
 
-	AmigaMenuPrintF(7, 14, "Race Winner: %s", LeagueDriverName(winner));
-	AmigaMenuPrintF(7, 16, "Fastest Lap: %s", LeagueDriverName(fastest));
+	/*	The same two positions the fixture screen puts its heads in, so the result reads	*/
+	/*	as the fixture screen filled in rather than as a new layout.						*/
+	const int leftX  = AMIGA_PANEL_X + FIXTURE_HEAD_INSET;
+	const int rightX = AMIGA_PANEL_X + AMIGA_PANEL_W - FIXTURE_HEAD_INSET - HEAD_CELL_W;
 
-	/*	The same panel the fixture screen put up empty, now filled in.					*/
-	DrawTimesPanel(gLastRaceTime, gLastLapTime);
+	PrintCentredOn(leftX,  HEAD_CELL_W, RESULT_LABEL_Y, "Winner 2pts");
+	PrintCentredOn(rightX, HEAD_CELL_W, RESULT_LABEL_Y, "Best Lap 1pt");
+
+	DrawPortrait(winner,  leftX,  RESULT_PORTRAIT_Y);
+	DrawPortrait(fastest, rightX, RESULT_PORTRAIT_Y);
 	}
+
+/*	The division table: the three drivers in finishing order as portraits, with their		*/
+/*	figures in a column under each.  Three 74-wide cells fill all but two pixels of the		*/
+/*	224-wide panel, the same edge-to-edge run the DIVISION screen uses.						*/
+#define TABLE_PORTRAIT_Y	98
+#define TABLE_FIGURES_Y		(TABLE_PORTRAIT_Y + HEAD_CELL_H + 4)
+#define TABLE_FIGURE_STEP	8
+/*	The figures are laid out label-left / value-right inside each 74-wide column.  The		*/
+/*	value is pulled further in than the label so that a column's value and the next			*/
+/*	column's label do not end up touching - the columns sit edge to edge, so without that	*/
+/*	gutter the row reads as one run of text.												*/
+#define TABLE_LABEL_INSET	3
+#define TABLE_VALUE_INSET	9
 
 static void DrawTable( void )
 	{
+	static const char *kPlaces[DRIVERS_PER_DIVISION] = { "First", "Second", "Third" };
+
 	const int division = LeaguePlayerDivision();
 	const int first    = ((NUM_DIVISIONS - 1) - division) * DRIVERS_PER_DIVISION;
 
+	/*	Order the division by points, then wins, then fastest laps - the ladder order is	*/
+	/*	last season's, and this screen is about this season's standings.					*/
+	int order[DRIVERS_PER_DIVISION];
+	for (int i = 0; i < DRIVERS_PER_DIVISION; i++)
+		order[i] = gLeagueLadder[first + i];
+
+	for (int i = 0; i < DRIVERS_PER_DIVISION - 1; i++)
+		for (int j = i + 1; j < DRIVERS_PER_DIVISION; j++)
+			{
+			const LeagueDriver *a = &gLeagueTable[order[i]];
+			const LeagueDriver *b = &gLeagueTable[order[j]];
+			if ((b->points > a->points) ||
+				((b->points == a->points) && (b->wins > a->wins)) ||
+				((b->points == a->points) && (b->wins == a->wins) && (b->bestLaps > a->bestLaps)))
+				{
+				const int swap = order[i];
+				order[i] = order[j];
+				order[j] = swap;
+				}
+			}
+
 	DrawDivisionHeading();
-	AmigaMenuPrintAt(14, 11, "RESULTS TABLE");					// 31,14,11,'RESULTS TABLE'
-	AmigaMenuPrintAt(6, 14, "DRIVER     RACED WIN LAP  PTS");	// 31,6,14,...
 
 	for (int i = 0; i < DRIVERS_PER_DIVISION; i++)
 		{
-		const int driver = gLeagueLadder[first + i];
+		const int driver = order[i];
+		const int x      = AMIGA_PANEL_X + 1 + i * HEAD_CELL_W;
 		const LeagueDriver *rec = &gLeagueTable[driver];
 
-		if (driver == PLAYER_DRIVER)
-			AmigaMenuBar(16 + i * 2);
+		PrintCentredOn(x, HEAD_CELL_W, 11 * AMIGA_CHAR_HEIGHT, kPlaces[i]);
+		DrawPortrait(driver, x, TABLE_PORTRAIT_Y);
 
-		AmigaMenuSetInk(driver == PLAYER_DRIVER ? AMIGA_INK_BAR_TEXT : AMIGA_INK_TEXT);
-		AmigaMenuPrintF(6, 16 + i * 2, "%-11.11s %3d  %3d %3d  %3d",
-						LeagueDriverName(driver),
-						rec->raced, rec->wins, rec->bestLaps, rec->points);
+		static const char *kLabels[4] = { "Raced", "Wins", "Laps", "Points" };
+		const int values[4] = { rec->raced, rec->wins, rec->bestLaps, rec->points };
+
+		for (int line = 0; line < 4; line++)
+			{
+			const int y = TABLE_FIGURES_Y + line * TABLE_FIGURE_STEP;
+			char value[8];
+			snprintf(value, sizeof(value), "%d", values[line]);
+
+			AmigaMenuPrintPixel(x + TABLE_LABEL_INSET, y, kLabels[line]);
+			AmigaMenuPrintPixel(x + HEAD_CELL_W - TABLE_VALUE_INSET
+									- (int)strlen(value) * AMIGA_CHAR_WIDTH,
+								y, value);
+			}
 		}
-	AmigaMenuSetInk(AMIGA_INK_TEXT);
 
-	PressAnyKeyPrompt();
+	AmigaMenuSetInk(AMIGA_INK_TEXT);
 	}
 
 static void DrawChampionship( void )
@@ -698,11 +850,18 @@ static void DrawLink( void )
 /*	Build the current screen into the surface, without presenting it.						*/
 static void MenuScreensDraw( void )
 	{
-	/*	Two screens are drawn over the whole display rather than inside the menu frame:	*/
-	/*	the opponents picture and the Hall of Fame.  Both paint their own background.	*/
+	/*	Some screens are drawn over the whole display rather than inside the menu frame:	*/
+	/*	the opponents picture, the two race-end pictures and the Hall of Fame.  They all	*/
+	/*	paint their own background.														*/
 	if (gScreen == MS_OPPONENTS)
 		{
 		DrawOpponents();
+		return;
+		}
+
+	if ((gScreen == MS_RACE_WIN) || (gScreen == MS_RACE_LOST))
+		{
+		DrawRacePicture(gScreen == MS_RACE_WIN);
 		return;
 		}
 
@@ -712,11 +871,14 @@ static void MenuScreensDraw( void )
 		{
 		case MS_NAME_ENTRY:		DrawNameEntry();		break;
 		case MS_OPPONENTS:								break;	// handled above
+		case MS_RACE_WIN:								break;	// handled above
+		case MS_RACE_LOST:								break;	// handled above
 		case MS_MAIN:			DrawMainMenu();			break;
 		case MS_SELECT:			DrawSelectMenu();		break;
 		case MS_PRACTISE_TRACK:	DrawPractiseTracks();	break;
 		case MS_DIVISION:		DrawDivision();			break;
 		case MS_FIXTURE:		DrawFixture();			break;
+		case MS_TRACK_RECORD:	DrawTrackRecord();		break;
 		case MS_RESULT:			DrawResult();			break;
 		case MS_TABLE:			DrawTable();			break;
 		case MS_CHAMPIONSHIP:	DrawChampionship();		break;
@@ -902,6 +1064,22 @@ void MenuScreensKey( int key )
 		case MS_DIVISION:		MenuScreensGoto(MS_SELECT);		break;
 
 		case MS_FIXTURE:		StartLeagueRace();				break;
+
+		/*	The race-end picture is a pause on the way to the result, not a screen	*/
+		/*	with anything to choose on it.											*/
+		case MS_RACE_WIN:
+		case MS_RACE_LOST:
+			/*	The record screen only appears when the race actually beat one.	*/
+			MenuScreensGoto((gNewRecordRace || gNewRecordLap) ? MS_TRACK_RECORD
+															  : MS_RESULT);
+			break;
+
+		case MS_TRACK_RECORD:
+			gNewRecordRace = false;
+			gNewRecordLap  = false;
+			MenuScreensGoto(gRecordScreenReturn);
+			break;
+
 		case MS_RESULT:			MenuScreensGoto(MS_TABLE);		break;
 
 		case MS_TABLE:
@@ -969,19 +1147,33 @@ void MenuScreensRaceFinished( bool playerWon, bool playerBestLap,
 	gLastLapTime  = playerLapTime;
 	gLastRaceTime = playerRaceTime;
 
-	if (!gRaceIsLeague)
-		{
-		/*	A practise run still counts for the Hall of Fame.							*/
-		MenuScreensRecordTimes(gRaceTrack, PLAYER_DRIVER, playerLapTime, playerRaceTime);
-		MenuScreensGoto(MS_SELECT);
-		return;
-		}
+	/*	Note what this run took before handing the times to the record table, so the		*/
+	/*	'New track records' screen knows whether it has anything to say.					*/
+	gNewRecordTrack  = gRaceTrack;
+	gNewRecordLap    = (playerLapTime  > 0.0) && ((gRecordLap[gRaceTrack]  == 0.0) ||
+												  (playerLapTime  < gRecordLap[gRaceTrack]));
+	gNewRecordRace   = (playerRaceTime > 0.0) && ((gRecordRace[gRaceTrack] == 0.0) ||
+												  (playerRaceTime < gRecordRace[gRaceTrack]));
 
 	MenuScreensRecordTimes(gRaceTrack, PLAYER_DRIVER, playerLapTime, playerRaceTime);
 
+	if (!gRaceIsLeague)
+		{
+		/*	A practise run still counts for the Hall of Fame, and still gets told		*/
+		/*	when it has set a record - there is just no result to score behind it.		*/
+		gRecordScreenReturn = MS_SELECT;
+		MenuScreensGoto((gNewRecordRace || gNewRecordLap) ? MS_TRACK_RECORD : MS_SELECT);
+		return;
+		}
+
+	gRecordScreenReturn = MS_RESULT;
+
 	LeagueRecordResult(playerWon, playerBestLap);
 	gRaceIsLeague = false;
-	MenuScreensGoto(MS_RESULT);
+
+	/*	The picture comes first and the RESULT screen behind it, so you see how the race	*/
+	/*	went before you are told what it was worth.										*/
+	MenuScreensGoto(playerWon ? MS_RACE_WIN : MS_RACE_LOST);
 	}
 
 /*	Record a lap or race time against a track, for the Hall of Fame.						*/

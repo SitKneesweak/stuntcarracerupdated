@@ -122,6 +122,9 @@ void AmigaMenuPrintPixel( int x, int y, const char *text );
 /*	Every entry gets a bar; the selected one gets the amber one.							*/
 void AmigaMenuBar( int row, bool selected = true );
 
+/*	How tall that bar is, for anything that has to fill its own slab to match.				*/
+#define MENU_BAR_HEIGHT		17
+
 /*	The pixel row the top of that bar lands on, for anything that has to be positioned		*/
 /*	against the bar rather than against the character grid.									*/
 int AmigaMenuBarY( int row );

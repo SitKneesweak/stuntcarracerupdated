@@ -56,6 +56,7 @@ extern void GetScreenDimensions( long *screen_width,
 								 long *screen_height );
 
 extern DWORD SCRGB (long colour_index);
+extern DWORD SCRGBShaded (long colour_index, float shade);
 extern DWORD SCColour (long colour_index);
 
 extern void SetSolidColour (long colour_index);
