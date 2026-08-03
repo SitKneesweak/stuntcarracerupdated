@@ -62,7 +62,8 @@ typedef enum
 /*	=========== */
 /*	Global data */
 /*	=========== */
-long opponentsID = NO_OPPONENT;	// 0 to 10
+long opponentsID = NO_OPPONENT;	// 0 to 10, or NO_OPPONENT for a solo practise run
+static long gRaceOpponent = RANDOM_OPPONENT;	// what the next race asked for
 long opponents_current_piece = 0;	// use as opponents_road_section
 
 bool player_close_to_opponent = FALSE;
@@ -195,7 +196,7 @@ static unsigned char opp_track_speed_values[] =	//DAT.1fe2c
 {
 	// Standard league
 	0x07,0x07,0x07,0x07,0x07,0x07,0x07,0x07,
-	0x41,0x3a,0x3e,0x41,0x48,0x51,0x48,0x4f,
+	0x4f,0x3a,0x3e,0x41,0x48,0x51,0x48,0x4f,
 	0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,	// used when creating opponents.speed.values
 	0x48,0x41,0x45,0x48,0x4f,0x58,0x4f,0x56,	// used when creating opponents.speed.values
 
@@ -297,10 +298,24 @@ extern long fourteen_frames_elapsed;	// Car_Behaviour.cpp
 /*	Description:	Reset all opponent behaviour variables to their initial state			*/
 /*	======================================================================================= */
 
+/*	A league race is against the driver the fixture named.  Only the dev track menu,		*/
+/*	which has no fixture behind it, still draws one at random - which is what this port		*/
+/*	used to do for every race.																*/
+
+static void ChooseOpponent (void)
+	{
+	if (gRaceOpponent == NO_OPPONENT)
+		opponentsID = NO_OPPONENT;
+	else if ((gRaceOpponent >= 0) && (gRaceOpponent < NUM_OPPONENTS))
+		opponentsID = gRaceOpponent;
+	else
+		opponentsID = rand() % NUM_OPPONENTS;
+//	opponentsID = 9;	// Jumping Jack
+	}
+
 static void ResetOpponent (void)
 	{
-	opponentsID = rand() % NUM_OPPONENTS;
-//	opponentsID = 9;	// Jumping Jack
+	ChooseOpponent();
 
 	opp_old_rear_left_difference = 0;
 	opp_old_rear_right_difference = 0;
@@ -2341,6 +2356,34 @@ long CalculateOpponentsDistance (void)
 		dist = -dist;
 
 	return(dist);
+	}
+
+
+/*	======================================================================================= */
+/*	Function:		SetRaceOpponent															*/
+/*																							*/
+/*	Description:	Choose who the next race is against - see Opponent_Behaviour.h.			*/
+/*					Practise takes NO_OPPONENT, and the race then runs solo, so everything	*/
+/*					the opponent leaves behind it has to be cleared here: nothing will		*/
+/*					call ResetOpponent to do it.											*/
+/*	======================================================================================= */
+
+void SetRaceOpponent( long driver )
+	{
+	gRaceOpponent = driver;
+
+	/*	Settle on a driver now rather than waiting for ResetOpponent: the race loop asks	*/
+	/*	opponentsID whether there is an opponent at all before it calls anything that		*/
+	/*	would reset one, so leaving it stale here would race everyone solo.				*/
+	ChooseOpponent();
+
+	if (driver == NO_OPPONENT)
+		{
+		difference_between_players = 0;
+		smallest_distance_between_players = 0;
+		player_close_to_opponent = FALSE;
+		opponent_behind_player = FALSE;
+		}
 	}
 
 

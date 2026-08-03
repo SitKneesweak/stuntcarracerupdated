@@ -59,6 +59,7 @@ extern const AmigaPen AMIGA_INK_WHITE;
 extern const AmigaPen AMIGA_INK_RED;		// headings
 extern const AmigaPen AMIGA_INK_DARKRED;
 extern const AmigaPen AMIGA_INK_BROWN;
+extern const AmigaPen AMIGA_INK_GREEN;		// pen 10 - underline.text's line colour
 
 /*	The panel and its bars.  The panel is not white - the original's menu panel is a mid		*/
 /*	grey, entries sit on light grey bars, and the selected entry's bar is amber.  Text is	*/
@@ -120,6 +121,10 @@ void AmigaMenuPrintPixel( int x, int y, const char *text );
 /*																							*/
 /*	Every entry gets a bar; the selected one gets the amber one.							*/
 void AmigaMenuBar( int row, bool selected = true );
+
+/*	The pixel row the top of that bar lands on, for anything that has to be positioned		*/
+/*	against the bar rather than against the character grid.									*/
+int AmigaMenuBarY( int row );
 
 /*	Flat rectangle fill, in surface pixels.													*/
 void AmigaMenuFillRect( int x, int y, int w, int h, const AmigaPen &pen );

@@ -30,20 +30,42 @@ extern FILE *out;
 	The wheel quads are VCAR_HEIGHT/4 tall and welded to the body, so half that is about
 	as far as one can ride up before it parts company with the arch.
 
-	Compression is measured in each car's own height units, and the two differ. The
-	player's is amount.below.road, which rests at 0 and is clamped at 0x1200; the units
-	note above CalcAmigaYPerspectiveShift() in StuntCarRacer.cpp fixes it at 32 of those
-	units to one model unit. The opponent's is road height minus actual height, straight
-	out of CalculateWheelDifference(), which also rests at 0 but is 4x coarser - its
-	opponent_y is only shifted by (LOG_PRECISION-3), so 8 units to one model unit.
+	Compression is measured in each car's own height units, and the two differ, so each
+	needs its own three landmarks: where the wheel hangs free, where it rests under the
+	car's own weight, and where it is properly loaded. All six come out of the physics.
 
-	The shifts below are therefore 2 apart, which keeps the two cars articulating by the
-	same amount for the same body movement. They are one step softer than a true 1:1 (a
-	model unit of travel per 2 of body drop) so that ordinary driving uses most of the
-	range and only real impacts reach the clamp.									*/
+	PLAYER - amount.below.road (front_left/front_right/rear_amount_below_road):
+	  free    0		 ProcessWheel() zeroes it the instant the wheel leaves the road
+			  (Physics_FloatV2.cpp) - the same as the Amiga's front.left.above.road.
+	  rest    317	 static equilibrium. CalculateCarCollisionAcceleration() returns the
+			  average amount below road as the spring force and CalculateGravity-
+			  Acceleration() returns 317 per step, so the car settles where the two
+			  cancel: average.amount.below.road == 317.
+	  loaded  0x500	 the Amiga's own idea of "well compressed" - the threshold at which
+			  set.road.position.values doubles the camera's lift (StuntCarRacer.s:13399,
+			  quoted in full above CalcAmigaYPerspectiveShift()).
+	  (it clamps at $11ff, well past loaded, so heavy landings peg the travel.)
+
+	OPPONENT - road height minus actual height, out of CalculateWheelDifference():
+	  rest    0		 there is no gravity term at all on this side. The height_adjust bias
+			  is added going in and subtracted coming out, so the wheel acceleration is
+			  zero exactly when the raw difference is zero.
+	  free/loaded	 opponent_y is shifted by (LOG_PRECISION-3) against the player's
+			  LOG_PRECISION, making its unit 4x coarser: 8 of them to a model unit
+			  against the player's 32. So the player's two spans, scaled by 4.
+
+	Below the rest point the wheel droops and above it compresses; the two sides are
+	scaled separately because the physics ranges are not symmetric about rest. What the
+	model is drawn at is the rest pose, which is why this cannot simply be the raw
+	compression scaled down - doing that gave a car whose wheels stayed in the rest pose
+	all the way through a jump and barely moved on landing.							*/
 #define	SUSP_MAX_TRAVEL			(VCAR_HEIGHT/8)
-#define	SUSP_PLAYER_SHIFT		6
-#define	SUSP_OPPONENT_SHIFT		3
+#define	SUSP_PLAYER_REST		317
+#define	SUSP_PLAYER_DROOP		(SUSP_PLAYER_REST - 0)		// rest down to free
+#define	SUSP_PLAYER_LOAD		(0x500 - SUSP_PLAYER_REST)	// rest up to loaded
+#define	SUSP_OPPONENT_REST		0
+#define	SUSP_OPPONENT_DROOP		(SUSP_PLAYER_DROOP / 4)
+#define	SUSP_OPPONENT_LOAD		(SUSP_PLAYER_LOAD / 4)
 
 /*	The physics is a tripod but the car has four wheels, and the two cars share a
 	different axle: the player averages its rear pair (rear_amount_below_road), the
@@ -770,6 +792,23 @@ HRESULT CreateCarVertexBuffer (IDirect3DDevice9 *pd3dDevice)
 }
 
 
+/*	One wheel's physics compression turned into model units of travel about the rest pose:
+	negative drooping, positive compressed. 'rest' is where the car sits under its own
+	weight, 'droop' the span from there down to a free-hanging wheel, 'load' the span from
+	there up to properly loaded. Anything past either end pegs at the travel limit, which
+	is what a wheel at the end of its stroke does anyway.							*/
+static long SuspensionTravel( long below, long rest, long droop, long load )
+{
+	long d = below - rest;
+	long travel = (d < 0) ? (d * SUSP_MAX_TRAVEL / droop)
+						  : (d * SUSP_MAX_TRAVEL / load);
+
+	if (travel >  SUSP_MAX_TRAVEL) travel =  SUSP_MAX_TRAVEL;
+	if (travel < -SUSP_MAX_TRAVEL) travel = -SUSP_MAX_TRAVEL;
+	return travel;
+}
+
+
 /*	Clamp to the travel limit and split the shared axle by the roll the free axle shows.
 	'shared' is the single compression both wheels of that axle run on; 'free_left' and
 	'free_right' are the independent pair at the other end.							*/
@@ -807,20 +846,25 @@ void UpdateCarSuspension (IDirect3DDevice9 *pd3dDevice)
 CAR_SUSPENSION susp;
 long rear_left, rear_right, front;
 
+#define	PLAYER_TRAVEL(v)	SuspensionTravel((v), SUSP_PLAYER_REST, \
+											 SUSP_PLAYER_DROOP, SUSP_PLAYER_LOAD)
+#define	OPPONENT_TRAVEL(v)	SuspensionTravel((v), SUSP_OPPONENT_REST, \
+											 SUSP_OPPONENT_DROOP, SUSP_OPPONENT_LOAD)
+
 	// Player: the free pair is at the front, the rear pair share rear_amount_below_road
 	BuildSuspension(&susp,
-					front_left_amount_below_road  >> SUSP_PLAYER_SHIFT,
-					front_right_amount_below_road >> SUSP_PLAYER_SHIFT,
-					rear_amount_below_road        >> SUSP_PLAYER_SHIFT,
+					PLAYER_TRAVEL(front_left_amount_below_road),
+					PLAYER_TRAVEL(front_right_amount_below_road),
+					PLAYER_TRAVEL(rear_amount_below_road),
 					true);
 	RebuildCarVB(pd3dDevice, &pCarVB, &susp);
 
 	// Opponent: the other way round - the rear pair are free, the front wheels share
 	GetOpponentWheelCompression(&rear_left, &rear_right, &front);
 	BuildSuspension(&susp,
-					rear_left  >> SUSP_OPPONENT_SHIFT,
-					rear_right >> SUSP_OPPONENT_SHIFT,
-					front      >> SUSP_OPPONENT_SHIFT,
+					OPPONENT_TRAVEL(rear_left),
+					OPPONENT_TRAVEL(rear_right),
+					OPPONENT_TRAVEL(front),
 					false);
 	RebuildCarVB(pd3dDevice, &pOpponentCarVB, &susp);
 }
@@ -872,13 +916,101 @@ struct TRANSFORMEDCOLVERTEX
 static IDirect3DVertexBuffer9 *pCockpitVB = NULL, *pSpeedBarCB = NULL;
 #define MAX_COCKIPTVB 512
 static int old_speedbar = -1;
-static int old_leftwheel = -1, old_rightwheel = -1;
 
 extern IDirect3DTexture9 *g_pAtlas;
+extern long front_left_height_difference, front_right_height_difference;
 extern long leftwheel_angle, rightwheel_angle;
 extern long boost_activated;
 extern long new_damage;
 extern long nholes;
+
+/*	--- Cockpit wheel travel ------------------------------------------------------------
+	How far up its stroke each front wheel sprite is drawn, straight out of the Amiga's
+	update.wheel.positions ("Reference only/StuntCarRacer.s":11623):
+
+		uwp1	move.l	#new.front.left.difference,a0
+			move.w	(a0,d1.w),d0
+			addi.w	#256,d0
+			bpl	uwp2
+			move.w	#0,d0
+		uwp2	cmpi.w	#2048,d0
+			bcs	uwp3
+			move.w	#2047,d0
+		uwp3	lsr.w	#3,d0
+			not.b	d0
+			asl.w	#1,d0
+			move.l	#sin.table,a1
+			move.w	(a1,d0.w),d0
+			rol.w	#5,d0
+			andi.b	#$1f,d0
+			not.b	d0
+			add.b	B.1bbdd,d0		( = $ba normally, $92 once wrecked )
+		...	cmpi.b	#$b9,d0 / cmpi.b	#$97,d0		( clamp )
+
+	Three things matter here, and the port had all three wrong.
+
+	FIRST, the input is new.front.left.difference - road height minus actual height,
+	clamped to [-$300, $1400] by car.collision.detection - and NOT amount.below.road.
+	The two agree while the wheel is loaded, but the moment it leaves the road
+	front.left.above.road zeroes amount.below.road, whereas the difference keeps going
+	negative all the way to -$300. The difference is what knows about droop; the port
+	was reading amount.below.road, so an airborne wheel was pinned at its ground pose
+	and the sprite never dropped at all.
+
+	SECOND, the curve. sin.table is the quarter-wave get.sin.cos reads: 257 entries (the
+	516 perspective.table sits after covers 514 bytes plus padding), indexed there by
+	(angle >> 5) & $3fe, and decreasing - entry 0 is the peak, so entry k is the cosine
+	of k * PI/512. Here the index is 255 - i and only the top five bits of the entry
+	survive rol #5 / and $1f. Working that back, the travel is 32 * sin((i+1) * PI/512):
+	quick off the droop stop, flattening as the wheel packs up.
+
+	THIRD, the range - and this is what the mask width settles. The entries are unsigned
+	0.16, peaking at $ffff, so those five bits give a full 0..31. Had the table been the
+	signed 1.15 one would assume, bit 15 would never be set, the step could not exceed
+	15, and Crammond would have written and $0f. So the stroke is 32 lines of the Amiga's
+	200-line screen - 32 * 2.4 = 76.8 in the 480-line space the cockpit art is scaled
+	into here. The port's old amount.below.road >> 6 spanned 0..71, close in total but
+	with every pixel of it on the compression side and none on droop.
+
+	The wrecked case (B.1bbdd = $92) is a separate lowered ride height, not travel, and
+	the port handles the wreck with its own artwork - so only the $ba value is used.	*/
+#define	COCKPIT_WHEEL_STEPS		32			// the five bits left after rol #5 / and $1f
+#define	COCKPIT_WHEEL_Y_SCALE	2.4f		// Amiga 200-line art into the 480-line base
+
+/*	The Amiga's step at the static ride height, which is where the cockpit artwork is
+	drawn. amount.below.road settles where the suspension force cancels gravity - see the
+	travel note at the top of this file - so the difference rests at 317 too, giving
+	i = (317 + 256) >> 3 = 71 and a step of 13. Offsets are taken from there, so the wheel
+	sits where it always has when parked and now has stroke either side of it.		*/
+#define	COCKPIT_WHEEL_REST_STEP	13
+
+static int CockpitWheelStep( long height_difference )
+{
+	// new.front.left.difference: car.collision.detection's clamp, StuntCarRacer.s:15917
+	if (height_difference >  0x1400) height_difference =  0x1400;
+	if (height_difference < -0x300)  height_difference = -0x300;
+
+	long i = height_difference + 256;
+	if (i < 0) i = 0;
+	if (i > 2047) i = 2047;
+	i >>= 3;						// 0..255
+
+	// sin.table[255 - i], keeping the top five bits. Equivalent to the quarter-wave
+	// lookup, with none of the table: the entries are a plain unsigned 0.16 cosine.
+	double entry = 65535.0 * cos((255 - i) * (M_PI / 512.0));
+	int step = static_cast<int>(entry) >> 11;
+	if (step < 0) step = 0;
+	if (step > COCKPIT_WHEEL_STEPS - 1) step = COCKPIT_WHEEL_STEPS - 1;
+	return step;
+}
+
+/*	Base-space pixels to raise the wheel sprite by: positive compressed, negative drooping. */
+static float CockpitWheelOffset( long height_difference )
+{
+	return (CockpitWheelStep(height_difference) - COCKPIT_WHEEL_REST_STEP)
+		   * COCKPIT_WHEEL_Y_SCALE;
+}
+
 
 HRESULT CreateCockpitVertexBuffer (IDirect3DDevice9 *pd3dDevice)
 {
@@ -965,18 +1097,18 @@ void DrawCockpit (IDirect3DDevice9 *pd3dDevice)
 		OutputDebugStringW(L"ERROR: Failed to lock cockpit vertex buffer\n");
 		return;
 	}
-	old_leftwheel = (front_left_amount_below_road>>6);
+	float leftwheel_y = CockpitWheelOffset(front_left_height_difference);
 	float Wide = wideScreen ? COCKPIT_WIDESCREEN_OFFSET : 0.0f;
 	float X1 = (Wide+COCKPIT_WHEEL_LEFT_OFFSET)*2*scaleX, X2 = ((Wide+COCKPIT_WHEEL_LEFT_OFFSET)*2+2*COCKPIT_WHEEL_WIDTH)*scaleX;
 	float Y1 = (480.0f-COCKPIT_WHEEL_HEIGHT*2.4f-COCKPIT_WHEEL_BOTTOM_GAP*2.4f)*scaleY, Y2 = (480.0f-COCKPIT_WHEEL_BOTTOM_GAP*2.4f)*scaleY;
-	Y1-=old_leftwheel*scaleY;
-	Y2-=old_leftwheel*scaleY;
+	Y1-=leftwheel_y*scaleY;
+	Y2-=leftwheel_y*scaleY;
 	AddQuad(pVertices, X1, Y1, X2, Y2, 0.8f, eWheel0+(leftwheel_angle>>16)%6, 0,1);
-	old_rightwheel = (front_right_amount_below_road>>6);
+	float rightwheel_y = CockpitWheelOffset(front_right_height_difference);
 	X1 = (Wide*2.f+640.f-COCKPIT_WHEEL_LEFT_OFFSET*2.f - COCKPIT_WHEEL_WIDTH*2)*scaleX, X2 = (Wide*2.f+640.f-COCKPIT_WHEEL_LEFT_OFFSET*2.f)*scaleX;
 	Y1 = (480.0f-COCKPIT_WHEEL_HEIGHT*2.4f-COCKPIT_WHEEL_BOTTOM_GAP*2.4f)*scaleY, Y2 = (480.0f-COCKPIT_WHEEL_BOTTOM_GAP*2.4f)*scaleY;
-	Y1-=old_rightwheel*scaleY;
-	Y2-=old_rightwheel*scaleY;
+	Y1-=rightwheel_y*scaleY;
+	Y2-=rightwheel_y*scaleY;
 	AddQuad(pVertices, X1, Y1, X2, Y2, 0.8f, eWheel0+(rightwheel_angle>>16)%6, 1,1);
 
 	int engineFrame = eEngine;

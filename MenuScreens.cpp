@@ -31,6 +31,7 @@
 #include "MenuScreens.h"
 #include "League.h"
 #include "Track.h"
+#include "Opponent_Behaviour.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -366,10 +367,27 @@ static void PressAnyKeyPrompt( void )
 
 static void DrawNameEntry( void )
 	{
+	/*	get.players.name (~line 8220): 'NAME?', then fill.bar with B.1bb16=1 - entry 1 of	*/
+	/*	menu.bar.positions, which is row 16 - and finally underline.text in pen 10 from	*/
+	/*	X 106 to X 190 at Y 133.  There is no 'press any key' prompt on this screen: the	*/
+	/*	name field is the whole of it.													*/
 	AmigaMenuSetInk(AMIGA_INK_TEXT);
 	AmigaMenuPrintAt(18, 14, "NAME?");				// 31,18,14,'NAME?'
-	AmigaMenuPrintF(12, 17, "> %s_", gNameBuffer);
-	PressAnyKeyPrompt();
+
+	#define NAME_ROW	16
+	AmigaMenuBar(NAME_ROW, false);
+
+	/*	input.name sets the print column to 14 and prints '>', then the name runs on		*/
+	/*	from there.																		*/
+	AmigaMenuSetInk(AMIGA_INK_BAR_TEXT);
+	AmigaMenuPrintF(14, NAME_ROW, ">%s", gNameBuffer);
+	AmigaMenuSetInk(AMIGA_INK_TEXT);
+
+	/*	The underline is 14 pixels down the bar on the Amiga (bar at row*8-9, line at Y	*/
+	/*	133), so hang it off the bar rather than off Y=133 directly - AmigaMenuBar sits	*/
+	/*	four pixels lower than the address arithmetic implies, and the line has to move	*/
+	/*	with it.  X 106..190 is twelve characters, the original's max.name.length.		*/
+	AmigaMenuFillRect(106, AmigaMenuBarY(NAME_ROW) + 14, 190 - 106 + 1, 1, AMIGA_INK_GREEN);
 	}
 
 static void DrawMainMenu( void )
@@ -755,6 +773,12 @@ static void StartLeagueRace( void )
 
 	gRaceIsLeague = true;
 	gRaceTrack    = fixture->trackID;
+
+	/*	mgs9 stores the fixture's opponent in opponents.ID before previewing the road,	*/
+	/*	so the driver you race is the one the fixture screen just put up against you -	*/
+	/*	with that driver's own attributes, not a stranger's.							*/
+	SetRaceOpponent(fixture->opponent);
+
 	if (MenuStartTrack(fixture->trackID))
 		gActive = false;
 	}
@@ -782,10 +806,9 @@ static void HandleNameEntry( int key )
 	/*	under the portrait holds, so a name is never taken and then shown truncated.		*/
 	if ((key >= ' ') && (key < 127) && (gNameLength < HEAD_NAME_MAX_CHARS))
 		{
-		char c = (char)key;
-		if ((c >= 'a') && (c <= 'z'))		// the Amiga stores names upper case
-			c = (char)(c - 'a' + 'A');
-		gNameBuffer[gNameLength++] = c;
+		/*	input.name only forces upper case when do.key.validation is set, and on		*/
+		/*	this screen it isn't - the name goes in as typed.							*/
+		gNameBuffer[gNameLength++] = (char)key;
 		gNameBuffer[gNameLength]   = '\0';
 		}
 	}
@@ -871,6 +894,7 @@ void MenuScreensKey( int key )
 		case MS_PRACTISE_TRACK:
 			gRaceIsLeague = false;
 			gRaceTrack    = gSelection;
+			SetRaceOpponent(NO_OPPONENT);		// practise is solo
 			if (MenuStartTrack(gSelection))
 				gActive = false;
 			break;

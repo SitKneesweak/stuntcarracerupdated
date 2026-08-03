@@ -218,6 +218,23 @@ static double chain_frame_phase = 0.0;
 	// that is stopped for exactly as long as the car is hanging.
 static long chain_frame_fraction = 0;
 
+	// Touchdown, an addition to the Amiga sequence.  Its raise amounts run 3, 4, 2
+	// (StuntCarRacer.s:7899/7912/7953), so the car already descends as the hang
+	// begins - just not far enough to reach the road.  These frames extend that dip
+	// to a landing: the crane sets the car down on the track, holds it there, and
+	// then hoists it back to the hang height before letting go.  Frame counts, so
+	// like the rest of the crane they are rate-independent.
+#define	CHAIN_TOUCHDOWN_FRAMES	14		// ~1.4s: the descent, plus a beat on the deck
+	// Raise amount while planted.  raise.car.off.ground's lift is 256 - d3/8, and
+	// with the car at road level d3 is -(amount << 8) - so at -8 the lift is exactly
+	// zero and the car rests on its springs under its own weight, at the same ride
+	// height it would have parked at with no crane attached.  Shallower than that and
+	// the crane is still taking part of the weight and the suspension sits half
+	// extended; deeper and it presses the car down harder than gravity does.
+	// SCR_CRANE_TOUCHDOWN=amount[,frames] overrides both for tuning by eye.
+#define	CHAIN_TOUCHDOWN_AMOUNT	(-8)
+static long chain_touchdown_frames = 0;
+
 	// Release guard, see lift.car.stage3.  The Amiga lets go the instant its random
 	// timer expires; this port additionally refuses to let go while the car is out
 	// over the edge of the road, for a bounded number of frames.
@@ -668,7 +685,30 @@ void CarBehaviour (DWORD input,
 	    (bNewGame && ! new_game_placement_done) ||
 		(ReplayRequested))
 		{
+		// Going off the track and being craned back on is not a fresh car: the
+		// damage taken so far has to survive the reset.  ResetPlayer clears the
+		// lot (it is also the new-game reset), so carry the accumulated damage
+		// across by hand.  Everything else - the per-step damage flags,
+		// damaged_count, the fractional remainders - is transient and should
+		// start clean.
+		const bool relift = (off_track_count > off_track_limit) && ! bNewGame && ! ReplayRequested;
+
+		long saved_front_left_damage  = front_left_damage;
+		long saved_front_right_damage = front_right_damage;
+		long saved_rear_damage        = rear_damage;
+		long saved_new_damage         = new_damage;
+		long saved_nholes             = nholes;
+
 		ResetPlayer();
+
+		if (relift)
+			{
+			front_left_damage  = saved_front_left_damage;
+			front_right_damage = saved_front_right_damage;
+			rear_damage        = saved_rear_damage;
+			new_damage         = saved_new_damage;
+			nholes             = saved_nholes;
+			}
 
 		if (bNewGame || ReplayRequested)
 			{
@@ -2416,10 +2456,13 @@ long damaged_limit = 10;	// Actually track/league dependant (could add to track 
 long road_cushion_value = 0, fourteen_frames_elapsed = 0;
 
 
-// following are only global due to use by two functions - could be passed in instead
-static long front_left_height_difference,
-			front_right_height_difference,
-			rear_height_difference;
+// following are only global due to use by two functions - could be passed in instead.
+// The front pair are also read by DrawCockpit(), which needs the signed height
+// difference rather than amount.below.road: the latter is zeroed the moment a wheel
+// leaves the road, so it cannot say how far a wheel has drooped.
+long front_left_height_difference,
+	 front_right_height_difference;
+static long rear_height_difference;
 
 static long front_difference_below_road,
 			overall_difference_below_road;
@@ -2522,7 +2565,8 @@ static void CarCollisionDetection (void)
 	// With the FloatV2 opponent running, the collision response belongs to the
 	// opponent step, which applies it once per Amiga frame (PhysicsFloatV2.cs:137)
 	// rather than once per player physics step.
-	if (!(scr::gUseFloatV2Physics && scr::gUseFloatV2Opponent))
+	if ((opponentsID != NO_OPPONENT) &&
+		!(scr::gUseFloatV2Physics && scr::gUseFloatV2Opponent))
 		CarToCarCollision();
 
 //****************************************
@@ -2610,7 +2654,9 @@ static void CalculateWheelCollision (long road_height,
 			grounded_count++;	// wheel grounded - update grounded wheel count
 
 		damage = *amount_below_road_in_out - (road_cushion_value * 256);
-		if (damage >= 0x700)
+		if (ON_CHAINS)
+			damaged_count = 0;			// the crane's touchdown must not damage the car
+		else if (damage >= 0x700)
 			{
 			if (damage > damage_value)
 				damage_value = damage;
@@ -2938,6 +2984,11 @@ static void LiftCarOntoTrack (void)
 		chain_release_hold = 0;
 		chain_last_road_x  = -1;
 
+		// Touchdown, see chain_touchdown_frames.  Drop start only - a re-lift after
+		// going off the track starts from just above the road and has nowhere to
+		// descend from.
+		chain_touchdown_frames = (drop_start_done ? 0 : CHAIN_TOUCHDOWN_FRAMES);
+
 		// The hang before the drop is random: 160..191, released once the
 		// byte reads positive again, so 33..64 Amiga frames.  (The Amiga used a fixed
 		// 0x8c in practice mode; this port has no practice mode.)
@@ -2947,6 +2998,28 @@ static void LiftCarOntoTrack (void)
 
 	// lift.car.stage3
 	SwingCar(0);
+
+	if (chain_touchdown_frames > 0)
+		{
+		// Touchdown.  raise.car.off.ground(0) would target required_raise_height
+		// exactly, which with the >> 3 hold shift is road level in players_smaller_y
+		// units - but a servo aimed at the surface only lowers the car until it
+		// touches, so the springs never load and the car settles without compressing.
+		// Aiming one unit under the road (256 players_smaller_y, 2048 in the road
+		// height units the suspension works in) means the crane is still pulling down
+		// at road level: the car arrives with the speed of a three-unit drop from the
+		// hang height, compresses, rebounds, and then sits with weight on the springs.
+		// The crane can only ever win by the difference between its lift at that depth
+		// (256 - d3/8 == 224) and CAR.WEIGHT (317), so the squat stays shallow.
+		//
+		// The hang countdown is frozen meanwhile, so this lengthens the sequence
+		// rather than eating into the hang.  Fixed count, not "until touching_road":
+		// a piece the servo cannot plant the car on must not hang the crane.
+		RaiseCarOffGround(CHAIN_TOUCHDOWN_AMOUNT);
+		--chain_touchdown_frames;
+		return;
+		}
+
 	RaiseCarOffGround(2);
 
 	chain_frame_fraction += 238;
@@ -3353,7 +3426,16 @@ void CopyFloatV2ToLegacy (const PhysicsStateF& s)
 	// Back to the legacy unsigned 0..65535 form (see CopyLegacyToFloatV2).
 	player_x_angle = FV2_ToUnsignedAngle(s.XAngle);
 	player_y_angle = FV2_ToUnsignedAngle(s.YAngle);
-	player_z_angle = FV2_ToUnsignedAngle(s.ZAngle);
+	// ...except the roll while the crane has the car.  swing.car writes the roll
+	// outright, but it only runs on Amiga frames, and at 60Hz that is one step in
+	// six.  Letting the step's own integration own the angle for the other five and
+	// then snapping it back on the sixth is a sawtooth - a jerk during the hoist,
+	// and a violent one once the wheels touch and suspension roll starts feeding
+	// ZRotationSpeed.  Pinning it here keeps the pushed-in value (see
+	// CopyLegacyRoadStateToFloatV2) in force for every step of the frame.  At
+	// dt == 0.1 every step is a crane frame, so this changes nothing.
+	if (! ON_CHAINS)
+		player_z_angle = FV2_ToUnsignedAngle(s.ZAngle);
 
 	player_world_x_speed = static_cast<long>(s.WorldXSpeed);
 	player_world_y_speed = static_cast<long>(s.WorldYSpeed);
@@ -3371,6 +3453,10 @@ void CopyFloatV2ToLegacy (const PhysicsStateF& s)
 	front_left_amount_below_road  = static_cast<long>(s.FrontLeftAmountBelowRoad);
 	front_right_amount_below_road = static_cast<long>(s.FrontRightAmountBelowRoad);
 	rear_amount_below_road        = static_cast<long>(s.RearAmountBelowRoad);
+
+	front_left_height_difference  = static_cast<long>(s.FrontLeftHeightDifference);
+	front_right_height_difference = static_cast<long>(s.FrontRightHeightDifference);
+	rear_height_difference        = static_cast<long>(s.RearHeightDifference);
 
 	front_left_road_height  = static_cast<long>(s.FrontLeftRoadHeight);
 	front_right_road_height = static_cast<long>(s.FrontRightRoadHeight);

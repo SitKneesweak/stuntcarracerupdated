@@ -43,6 +43,17 @@
 #define COCKPIT_WRIGHT_Y_OFFSET     98.0f   // Widescreen right panel Y offset
 #define COCKPIT_WLEFT_Y_OFFSET      99.0f   // Widescreen left panel Y offset
 
+// The hole the cockpit art leaves for the world, measured off the alpha of the four cockpit
+// pieces in the atlas (320x200 space).  This is wider than the Amiga's 238x137 playfield at
+// (41,16) that SCR_WINDOW_* describes: the frame's inner bevel is transparent out to x 31
+// and 287, and down to y 159 where the bonnet slopes away.  The bevel and the bonnet edge
+// are diagonals, so this is their bounding box - the cockpit is drawn over the top of the
+// scene, so over-reaching into art that is opaque anyway costs nothing.
+#define COCKPIT_WINDOW_X            31.0f
+#define COCKPIT_WINDOW_Y            16.0f
+#define COCKPIT_WINDOW_WIDTH        257.0f  // x 31..287 inclusive
+#define COCKPIT_WINDOW_HEIGHT       144.0f  // y 16..159 inclusive
+
 // Dashboard readout positions, in the Amiga's 320x200 screen space.  Each is the original's
 // print column/row scaled by the 7x8 font cell plus its fine.x/fine.y nudge - see
 // print.lap.boost.text, boost.print and display.opponents.distance in the 68k source.

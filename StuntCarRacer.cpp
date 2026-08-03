@@ -99,6 +99,10 @@ bool bPlayerPaused = FALSE;
 bool bOpponentPaused = FALSE;
 long bTrackDrawMode = 0;
 bool bOutsideView = FALSE;
+/*	Widescreen shows the world past the cockpit's A-pillars and above the side panels, which
+	the Amiga never did - its playfield stopped at the windscreen.  With this set, the scene
+	is clipped to the windscreen aperture and the surround left black.  Press W.				*/
+bool bAmigaWindscreen = FALSE;
 long engineSoundPlaying = FALSE;
 double gameStartTime, gameEndTime;
 bool bSuperLeague = FALSE;
@@ -925,7 +929,6 @@ bool bAmigaTrackPreview = true;
 #define PREVIEW_PANEL_Y			168
 #define PREVIEW_PANEL_W			160
 #define PREVIEW_PANEL_H			16
-#define PREVIEW_PROMPT_COL		23
 #define PREVIEW_PROMPT_ROW		24
 
 /*	The dirt arena floor inside the picture, which is where the track has to end up.  The
@@ -1529,7 +1532,13 @@ static float lastFrame = 0.0f;
 			// gated internally by _framePhase, so stepping it faster makes it
 			// smoother without making it drive faster or react sooner.
 			// The legacy opponent has no timestep and stays on the 8.3Hz clock.
-			if (scr::gUseFloatV2Physics && scr::gUseFloatV2Opponent)
+			/*	A practise run is solo: draw.world's no.opponent4/no.opponent5 branches
+				skip opponent.movement and everything hanging off it (~line 20280).	*/
+			if (opponentsID == NO_OPPONENT)
+			{
+				// nothing to step
+			}
+			else if (scr::gUseFloatV2Physics && scr::gUseFloatV2Opponent)
 			{
 				for (long step = 0; step < PlayerPhysicsSteps; ++step)
 					OpponentBehaviour(&opponent_x,
@@ -1624,7 +1633,12 @@ static float lastFrame = 0.0f;
 			opponent_z_angle = player1_z_angle;
 		}
 		*/
-		SetOpponentsCarWorldTransform();
+		/*	Practise has no opponent car to place - park it where the camera can never
+			see it, the same trick the track preview uses.							*/
+		if (opponentsID == NO_OPPONENT)
+			HideOpponentsCar();
+		else
+			SetOpponentsCarWorldTransform();
 
 		if (bOutsideView)
 		{
@@ -1781,6 +1795,7 @@ static void HandleTrackMenu( CDXUTTextHelper &txtHelper )
 
 	if ((keyPress == STARTMENU) && (TrackID != NO_TRACK))
 		{
+		SetRaceOpponent(RANDOM_OPPONENT);	// no fixture behind this menu to name one
 		bNewGame = TRUE;	// Used here just to reset the opponent's car, which is then shown during the track preview
 		ResetPlayer();		// Also reset player to clear values if there was a previous game (CarBehaviour normally does this, but isn't called for track preview)
         GameMode = TRACK_PREVIEW;
@@ -2255,8 +2270,16 @@ static void DrawAmigaPreviewScreen( IDirect3DDevice9 *pd3dDevice )
 							name);
 		}
 
+	/*	Centre the prompt on the screen in pixels - twenty characters at the seven-pixel	*/
+	/*	column step does not land on a whole character cell.									*/
+	{
+	static const char *prompt = "Hit fire to continue";
+	const int prompt_w = (int)strlen(prompt) * AMIGA_CHAR_WIDTH;
+
 	AmigaMenuSetInk(INK_YELLOW);
-	AmigaMenuPrintAt(PREVIEW_PROMPT_COL, PREVIEW_PROMPT_ROW, "Hit fire to continue");
+	AmigaMenuPrintPixel((AMIGA_SCREEN_WIDTH - prompt_w) / 2,
+						PREVIEW_PROMPT_ROW * AMIGA_CHAR_HEIGHT, prompt);
+	}
 
 	AmigaMenuPresent(pd3dDevice);
 	}
@@ -2399,15 +2422,12 @@ static void SetPreviewWindowProjection( IDirect3DDevice9 *pd3dDevice )
 	pd3dDevice->SetTransform( D3DTS_PROJECTION, &matProj );
 	}
 
-static void SetPreviewWindowClip( bool enable )
+/*	Confine drawing to a rectangle given in screen space (the space GetScreenDimensions
+	reports: base space on the SDL build, back buffer pixels on the D3D one).				*/
+
+static void SetScreenSpaceClip( float win_x, float win_y, float win_w, float win_h )
 	{
 #ifdef linux
-	if (!enable)
-		{
-		glDisable(GL_SCISSOR_TEST);
-		return;
-		}
-
 	// The frame's viewport is the whole 640x480 (or 800x480) base space, letterboxed into
 	// the drawable and vertically squashed to PAL's pixel aspect.  Read it back rather than
 	// recomputing it, so this cannot drift out of step with SetupViewport.
@@ -2416,11 +2436,6 @@ static void SetPreviewWindowClip( bool enable )
 
 	long screen_width, screen_height;
 	GetScreenDimensions(&screen_width, &screen_height);
-
-	float win_x, win_y, win_w, win_h;
-	AmigaMenuGetScreenRect(PREVIEW_WINDOW_X, PREVIEW_WINDOW_Y,
-						   PREVIEW_WINDOW_W, PREVIEW_WINDOW_H,
-						   &win_x, &win_y, &win_w, &win_h);
 
 	const float sx = (float)vp[2] / (float)screen_width;
 	const float sy = (float)vp[3] / (float)screen_height;
@@ -2433,16 +2448,6 @@ static void SetPreviewWindowClip( bool enable )
 	glEnable(GL_SCISSOR_TEST);
 #else
 	IDirect3DDevice9 *pd3dDevice = DXUTGetD3DDevice();
-	if (!enable)
-		{
-		pd3dDevice->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
-		return;
-		}
-
-	float win_x, win_y, win_w, win_h;
-	AmigaMenuGetScreenRect(PREVIEW_WINDOW_X, PREVIEW_WINDOW_Y,
-						   PREVIEW_WINDOW_W, PREVIEW_WINDOW_H,
-						   &win_x, &win_y, &win_w, &win_h);
 
 	RECT rect;
 	rect.left   = (LONG)win_x;
@@ -2452,6 +2457,77 @@ static void SetPreviewWindowClip( bool enable )
 	pd3dDevice->SetScissorRect(&rect);
 	pd3dDevice->SetRenderState(D3DRS_SCISSORTESTENABLE, TRUE);
 #endif
+	}
+
+static void ClearScreenSpaceClip( void )
+	{
+#ifdef linux
+	glDisable(GL_SCISSOR_TEST);
+#else
+	DXUTGetD3DDevice()->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+#endif
+	}
+
+static void SetPreviewWindowClip( bool enable )
+	{
+	if (!enable)
+		{
+		ClearScreenSpaceClip();
+		return;
+		}
+
+	float win_x, win_y, win_w, win_h;
+	AmigaMenuGetScreenRect(PREVIEW_WINDOW_X, PREVIEW_WINDOW_Y,
+						   PREVIEW_WINDOW_W, PREVIEW_WINDOW_H,
+						   &win_x, &win_y, &win_w, &win_h);
+
+	SetScreenSpaceClip(win_x, win_y, win_w, win_h);
+	}
+
+
+/*	======================================================================================= */
+/*	Function:		SetCockpitWindowClip													*/
+/*																							*/
+/*	Description:	Clip the 3D scene to the windscreen aperture of the cockpit.				*/
+/*																							*/
+/*					The Amiga drew the world into a 320x200 playfield behind a cockpit that	*/
+/*					covered everything outside the screen window, so nothing of the track	*/
+/*					was ever visible past the frame.  Widescreen here keeps the same cockpit	*/
+/*					art but hands the scene the extra width, so sky and scenery show up		*/
+/*					beside the A-pillars and above the side panels.  With this on, the scene	*/
+/*					is scissored to the aperture and the surround is left black, as it was	*/
+/*					on the Amiga.															*/
+/*																							*/
+/*					The rectangle is the hole in the cockpit art (COCKPIT_WINDOW_*), not		*/
+/*					the Amiga playfield SCR_WINDOW_* describes - the frame's inner bevel		*/
+/*					is transparent for another ten pixels each side, and clipping to the		*/
+/*					playfield instead leaves black bands inside the frame.  In widescreen	*/
+/*					the whole 640-wide panel shifts right by COCKPIT_WIDESCREEN_OFFSET * 2.	*/
+/*	======================================================================================= */
+
+static void SetCockpitWindowClip( bool enable )
+	{
+	if (!enable)
+		{
+		ClearScreenSpaceClip();
+		return;
+		}
+
+	long screen_width, screen_height;
+	GetScreenDimensions(&screen_width, &screen_height);
+
+	const float base_width = wideScreen ? (float)BASE_WIDTH_WIDESCREEN
+									    : (float)BASE_WIDTH_STANDARD;
+	const float scaleX = (float)screen_width  / base_width;
+	const float scaleY = (float)screen_height / (float)BASE_HEIGHT;
+
+	// The art is authored in 320x200; base space is that doubled across and x2.4 down.
+	const float wide = wideScreen ? COCKPIT_WIDESCREEN_OFFSET : 0.0f;
+
+	SetScreenSpaceClip((wide + COCKPIT_WINDOW_X) * 2.0f   * scaleX,
+					   COCKPIT_WINDOW_Y         * 2.4f   * scaleY,
+					   COCKPIT_WINDOW_WIDTH     * 2.0f   * scaleX,
+					   COCKPIT_WINDOW_HEIGHT    * 2.4f   * scaleY);
 	}
 
 
@@ -2564,9 +2640,15 @@ HRESULT hr;
 	// mountains and grandstands), no help text, and the road is clipped to the window.
 	const bool previewScreen = (GameMode == TRACK_PREVIEW) && bAmigaTrackPreview && bAmigaPreviewScreen;
 
+	// Amiga windscreen: the scene is confined to the cockpit's window, so the cockpit is the
+	// only thing drawn outside it.  Only worth doing when the cockpit is actually up.
+	const bool cockpitWindow = bAmigaWindscreen && !bOutsideView && !previewScreen &&
+							   ((GameMode == GAME_IN_PROGRESS) || (GameMode == GAME_OVER));
+
 	// Normally DrawBackdrop covers every pixel, so the target is never cleared.  The preview
-	// picture is letterboxed, so the bands round it have to be wiped.
-	if (previewScreen)
+	// picture is letterboxed, so the bands round it have to be wiped - and so is the surround
+	// the clipped scene no longer paints over.
+	if (previewScreen || cockpitWindow)
 		V( pd3dDevice->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0) );
 
     // Render the scene
@@ -2625,6 +2707,8 @@ HRESULT hr;
 		pd3dDevice->SetRenderState( D3DRS_ZENABLE, FALSE );
 		pd3dDevice->SetRenderState( D3DRS_CULLMODE, D3DCULL_NONE );
 
+		if (cockpitWindow) SetCockpitWindowClip( true );
+
 		// Draw Backdrop
 		DrawBackdrop(viewpoint1_y, viewpoint1_x_angle, viewpoint1_y_angle, viewpoint1_z_angle);
 
@@ -2666,11 +2750,17 @@ HRESULT hr;
 				}
 				else
 				{
+				// The cockpit is what fills the surround, so it must not be clipped to
+				// the window it is drawing the frame of.
+				if (cockpitWindow) SetCockpitWindowClip( false );
+
 				// draw cockpit...
 				DrawCockpit(pd3dDevice);
 				}
 				break;
 			}
+
+		if (cockpitWindow) SetCockpitWindowClip( false );
 
 		if (GameMode == GAME_IN_PROGRESS)
 		{
@@ -3219,6 +3309,15 @@ bool process_events()
 					bOutsideView = !bOutsideView;
 					break;
 #endif
+				case SDLK_w:
+					// Amiga windscreen: clip the scene to the cockpit window and leave
+					// the widescreen surround black, as the Amiga's playfield did.
+					bAmigaWindscreen = !bAmigaWindscreen;
+					printf("Amiga windscreen (black surround): %s\n",
+						   bAmigaWindscreen ? "ON" : "OFF");
+					fflush(stdout);
+					break;
+
 				case SDLK_m:
 					if (GameMode != TRACK_MENU)
 					{

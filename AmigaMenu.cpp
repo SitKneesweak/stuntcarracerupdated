@@ -27,6 +27,9 @@ const AmigaPen AMIGA_INK_WHITE   = { 255, 255, 255 };
 const AmigaPen AMIGA_INK_RED     = { 204,  51,  17 };
 const AmigaPen AMIGA_INK_DARKRED = { 109,  43,  10 };
 const AmigaPen AMIGA_INK_BROWN   = { 143,  76,  43 };
+/*	The pen underline.text is called with on the name entry screen (d0=10).  Sampled off a	*/
+/*	screen shot of the real thing and rounded to the 4-bits-per-channel the Amiga had.		*/
+const AmigaPen AMIGA_INK_GREEN   = {  34,  85,  68 };
 
 /*	The panel is a mid grey, not white: the frame art leaves a hole for it and the game		*/
 /*	fills the hole behind the art, so the STUNT CAR RACER logo - which overhangs the top		*/
@@ -343,17 +346,23 @@ void AmigaMenuPrintCentred( int row, const char *text )
 /*	assumes.  The screenshot wins - this is the offset that reproduces it.					*/
 #define MENU_BAR_Y_OFFSET	(-5)
 
+int AmigaMenuBarY( int row )
+	{
+	return row * AMIGA_FONT_HEIGHT + MENU_BAR_Y_OFFSET;
+	}
+
 void AmigaMenuBar( int row, bool selected )
 	{
-	const int y0 = row * AMIGA_FONT_HEIGHT + MENU_BAR_Y_OFFSET;
+	const int y0 = AmigaMenuBarY(row);
 
 	for (int y = 0; y < MENU_BAR_HEIGHT; y++)
 		{
-		/*	A black rule along the bottom, which is what separates one bar from the		*/
-		/*	next once every entry has one.												*/
-		const bool rule = (y == MENU_BAR_HEIGHT - 1);
-		const AmigaPen &pen = rule ? AMIGA_INK_BLACK
-								   : (selected ? AMIGA_BAR_SELECTED : AMIGA_BAR);
+		/*	The bar is bevelled: a white rule along the top and a black one along the	*/
+		/*	bottom, which is what separates one bar from the next once every entry has	*/
+		/*	one.  Both are one pixel, measured off a screen shot of the real thing.		*/
+		const AmigaPen &pen = (y == 0)						? AMIGA_INK_WHITE
+							: (y == MENU_BAR_HEIGHT - 1)	? AMIGA_INK_BLACK
+							: (selected ? AMIGA_BAR_SELECTED : AMIGA_BAR);
 
 		for (int x = 0; x < AMIGA_PANEL_W; x++)
 			PutPixel(AMIGA_PANEL_X + x, y0 + y, pen);

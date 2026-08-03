@@ -532,9 +532,14 @@ double ProcessWheel(PhysicsStateF& s, double heightDiff, double& oldDiff,
         groundedCount++;
     }
 
-    // Impacts beyond the road "cushion" do damage.
+    // Impacts beyond the road "cushion" do damage - but not while the crane has
+    // the car. On the Amiga the chained car never reached the road, so the case
+    // could not arise; the port's crane sets it down on the track before letting
+    // go, and being handed a damaged car on the start line is not the deal.
     double impact = below - static_cast<double>(s.RoadCushionValue << 8);
-    if (impact >= 0.0 && impact >= 1792.0) {
+    if (s.CarOnChainsCountdown != 0) {
+        s.DamagedCount = 0;
+    } else if (impact >= 0.0 && impact >= 1792.0) {
         if (impact > damageValue) damageValue = impact;
         double excess = impact - 1536.0;
         if (static_cast<int8_t>(s.FourteenFramesElapsed) >= 0) {
