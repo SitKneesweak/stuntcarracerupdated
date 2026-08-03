@@ -3494,8 +3494,12 @@ void ApplyViewport()
 		// Use custom scale factor, in points, so it matches the requested size
 		screenScale = gCustomScale * dpiFactor;
 	} else {
-		// Automatic scaling based on window size
-		screenScale = (drawW/640. < drawH/480.) ? drawW/640. : drawH/480.;
+		// Automatic scaling based on window size.  Only 480*SCR_PRESENT_SQUASH of the base
+		// space is ever presented (see below), so fit against that, not against 480 - else
+		// the squash would be paid for twice and the picture would sit in a letterbox
+		// inside a letterbox.
+		const double presentH = 480. * SCR_PRESENT_SQUASH;
+		screenScale = (drawW/640. < drawH/presentH) ? drawW/640. : drawH/presentH;
 	}
 	// is it a Wide screen ratio?
 	// Detect widescreen if width is significantly wider than 4:3 aspect ratio.
@@ -3862,11 +3866,13 @@ int main(int argc, const char** argv)
 		// Use custom scale factor, in points, so it matches the requested size
 		screenScale = customScale * dpiFactor;
 	} else {
-		// Automatic scaling based on window size
-		if(screenW/640. < screenH/480.)
+		// Automatic scaling based on window size.  Only 480*SCR_PRESENT_SQUASH of the base
+		// space is ever presented (see below), so fit against that, not against 480.
+		const double presentH = 480. * SCR_PRESENT_SQUASH;
+		if(screenW/640. < screenH/presentH)
 			screenScale = screenW/640.;
 		else
-			screenScale = screenH/480.;
+			screenScale = screenH/presentH;
 	}
 	// is it a Wide screen ratio?
 	// Detect widescreen if width is significantly wider than 4:3 aspect ratio
