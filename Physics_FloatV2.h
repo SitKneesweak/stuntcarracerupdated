@@ -90,6 +90,22 @@ void PhysicsStepF_Tick(PhysicsStateF& state, const PhysicsInput& input, double d
 // Feature toggle. When false, the legacy CarBehaviour() runs unchanged.
 extern bool gUseFloatV2Physics;
 
+// --- Sim settings lock (netplay) -------------------------------------------
+// Set for the duration of a network session. Every debug key that can change
+// what the simulation computes — V (physics path), B (dt), U (opponent step),
+// J (curve distance), F7/F9/F10 (opponent clock) — refuses while this is set.
+// Two peers running lockstep must agree on all of it, and B in particular
+// desyncs a session the instant it is pressed. Diagnostics that only print
+// (N, K) stay live: they don't touch the sim.
+//
+// Held here rather than in the net code so the physics side never has to see
+// a transport header (see the windows.h/dx_linux.h note in the port memory).
+extern bool gSimSettingsLocked;
+
+// True if the setting change should be refused. Prints a one-line reason
+// naming `what` when it refuses, so a wedged key is self-explaining.
+bool SimSettingLocked(const char* what);
+
 // Timestep handed to Tick. Defaults to 1/60. Press B to cycle 10 -> 25 -> 60Hz;
 // 0.1 (10Hz) is the original Amiga rate and the reference for A/B'ing the port
 // against the legacy path. The whole point of FloatV2 is that lowering this

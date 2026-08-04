@@ -3001,24 +3001,29 @@ void CALLBACK KeyboardProc( UINT nChar, bool bKeyDown, bool bAltDown, void *pUse
             break;
 
         case VK_F7:
+			if (scr::SimSettingLocked("Pausing the opponent")) break;
             bOpponentPaused = !bOpponentPaused;
             break;
 
 		case VK_F9:
+			if (scr::SimSettingLocked("The opponent clock (frameGap)")) break;
 			if (frameGap > 1) frameGap--;
 			break;
 
 		case VK_F10:
+			if (scr::SimSettingLocked("The opponent clock (frameGap)")) break;
 			frameGap++;
 			break;
 
 		case 'V':
 			// Toggle the FloatV2 physics port (see Physics_FloatV2.h).
+			if (scr::SimSettingLocked("The physics path (V)")) break;
 			scr::gUseFloatV2Physics = !scr::gUseFloatV2Physics;
 			break;
 
 		case 'U':
 			// Toggle the FloatV2 opponent step (see Physics_FloatV2.h).
+			if (scr::SimSettingLocked("The opponent step (U)")) break;
 			scr::gUseFloatV2Opponent = !scr::gUseFloatV2Opponent;
 			break;
 
@@ -3026,6 +3031,7 @@ void CALLBACK KeyboardProc( UINT nChar, bool bKeyDown, bool bAltDown, void *pUse
 			// Cycle the FloatV2 timestep: 10Hz (Amiga rate) -> 25Hz -> 60Hz.
 			// At 10Hz this should behave like the legacy path; the higher
 			// rates are the point of the port.
+			if (scr::SimSettingLocked("The physics timestep (B)")) break;
 			if      (scr::gFloatV2Dt > 0.05)  scr::gFloatV2Dt = 1.0 / 25.0;
 			else if (scr::gFloatV2Dt > 0.025) scr::gFloatV2Dt = 1.0 / 60.0;
 			else                              scr::gFloatV2Dt = 0.1;
@@ -3043,6 +3049,7 @@ void CALLBACK KeyboardProc( UINT nChar, bool bKeyDown, bool bAltDown, void *pUse
 		case 'J':
 			// EXPERIMENT: un-reverse distance-into-section on opposite-direction
 			// curves (see gFloatV2UnreverseCurveDist in Physics_FloatV2.h).
+			if (scr::SimSettingLocked("The curve distance experiment (J)")) break;
 			scr::gFloatV2UnreverseCurveDist = !scr::gFloatV2UnreverseCurveDist;
 			break;
 
@@ -3333,20 +3340,24 @@ bool process_events()
 					break;
 
 				case SDLK_F7:
+					if (scr::SimSettingLocked("Pausing the opponent")) break;
 					bOpponentPaused = !bOpponentPaused;
 					break;
 
 				case SDLK_F9:
+					if (scr::SimSettingLocked("The opponent clock (frameGap)")) break;
 					if (frameGap > 1) frameGap--;
 					break;
 
 				case SDLK_F10:
+					if (scr::SimSettingLocked("The opponent clock (frameGap)")) break;
 					frameGap++;
 					break;
 
 				case SDLK_v:
 					// Toggle the FloatV2 physics port (see Physics_FloatV2.h).
 					// Letter keys, not F11/F12 — those collide with macOS.
+					if (scr::SimSettingLocked("The physics path (V)")) break;
 					scr::gUseFloatV2Physics = !scr::gUseFloatV2Physics;
 					printf("FloatV2 physics %s (dt=%.4f, %.0fHz)\n",
 						   scr::gUseFloatV2Physics ? "ON" : "OFF",
@@ -3394,6 +3405,7 @@ bool process_events()
 				case SDLK_u:
 					// Toggle the FloatV2 opponent step (see Physics_FloatV2.h).
 					// O is taken (unpause), hence U.
+					if (scr::SimSettingLocked("The opponent step (U)")) break;
 					scr::gUseFloatV2Opponent = !scr::gUseFloatV2Opponent;
 					printf("FloatV2 opponent %s%s\n",
 						   scr::gUseFloatV2Opponent ? "ON" : "OFF (8.3Hz legacy)",
@@ -3443,6 +3455,7 @@ bool process_events()
 
 				case SDLK_b:
 					// Cycle the FloatV2 timestep: 10Hz (Amiga rate) -> 25Hz -> 60Hz.
+					if (scr::SimSettingLocked("The physics timestep (B)")) break;
 					if      (scr::gFloatV2Dt > 0.05)  scr::gFloatV2Dt = 1.0 / 25.0;
 					else if (scr::gFloatV2Dt > 0.025) scr::gFloatV2Dt = 1.0 / 60.0;
 					else                              scr::gFloatV2Dt = 0.1;
@@ -3461,6 +3474,7 @@ bool process_events()
 					// EXPERIMENT: un-reverse distance-into-section on
 					// opposite-direction curves (Physics_FloatV2.h). M is taken
 					// by the track menu, so this lives on J.
+					if (scr::SimSettingLocked("The curve distance experiment (J)")) break;
 					scr::gFloatV2UnreverseCurveDist = !scr::gFloatV2UnreverseCurveDist;
 					printf("FloatV2 un-mirror NormalDistanceIntoSection: %s\n",
 						   scr::gFloatV2UnreverseCurveDist ? "ON" : "OFF");

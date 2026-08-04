@@ -13,6 +13,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 
 namespace scr {
 
@@ -1025,6 +1026,18 @@ bool   gUseFloatV2Opponent        = true;   // O toggles back to the 8.3Hz oppon
 bool   gFloatV2OpponentNeedsSeed  = true;   // set whenever the legacy opponent has run
 bool   gFloatV2UnreverseCurveDist = true;    // ON by default; J toggles. See header.
 bool   gFloatV2DumpOnCurves       = false;   // K toggles; see header
+bool   gSimSettingsLocked         = false;   // set for a network session; see header
+
+bool SimSettingLocked(const char* what)
+{
+    if (!gSimSettingsLocked)
+        return false;
+
+    printf("%s is locked for the duration of the network session — both peers "
+           "must agree on it.\n", what);
+    fflush(stdout);
+    return true;
+}
 
 // --- Tuning constants (from PhysicsStepF in PhysicsFloatV2.cs) --------------
 namespace {
