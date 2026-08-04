@@ -61,6 +61,22 @@ extern void CarBehaviour (DWORD input,
 
 extern void LimitViewpointY (long *y);
 
+/*	Select which car the player physics in Car_Behaviour.cpp is currently driving.
+	The state is one set of file-scope variables, swapped in and out around each
+	car's step (see CAR_STATE_FIELDS).  Single-player never leaves PLAYER selected,
+	so it costs nothing there; head-to-head netplay runs the same physics twice per
+	step, once per car.  ALWAYS leave PLAYER selected before rendering - the render
+	and sound paths read the globals directly and expect the local car.				*/
+extern void SelectCar (long car);
+extern long ActiveCar (void);
+
+/*	How far to the side of the piece centre the crane sets the selected car down, in the
+	units of the Amiga's player.to.side.of.road (negative is left).  Zero restores the
+	default, +/-160 on whichever side the car left the road, which is what every
+	single-player placement uses.  Head-to-head passes a much smaller value so the two
+	cars start beside each other on the track rather than off both edges of it.			*/
+extern void SetCarStartSideOffset (long side);
+
 extern long AmigaVolumeToDirectX (long amiga_volume);
 
 extern long CalculateDisplaySpeed (void);

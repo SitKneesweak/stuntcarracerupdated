@@ -400,6 +400,13 @@ static void InitialiseSparksTable (void);
 
 // Stands in for main.loop.count, which only the dust clouds use (to cycle the puff shape).
 static long spark_step_count = 0;
+
+	// CalculateSteering's piece hint, hoisted for the same reason as cwrh_piece.
+static long steering_piece = 0;
+
+	// Race-start lateral placement override, see SetCarStartSideOffset.  Zero means
+	// "use swing_from_left", which is every single-player placement.
+static long start_side_offset = 0;
 static void SetWheelRotationSpeed();
 
 #ifdef NOT_USED
@@ -1704,6 +1711,14 @@ static void CalculateIfCarOffRoad (long *height)
 // current surface co-ords
 static long sx1, sy1, sz1, sx2, sy2, sz2, sx3, sy3, sz3, sx4, sy4, sz4;
 
+	// CalculateWorldRoadHeight's road-lookup cache.  Hoisted out of the function body
+	// so the per-car context (CAR_STATE_FIELDS) can save and restore it: it is a
+	// "where was this car last time" hint, so two cars sharing one copy would each
+	// start their lookup from the other car's piece.  The function still binds local
+	// references with the original names, so its body is unchanged.
+static long cwrh_piece = -1, cwrh_segment = -1;
+static long cwrh_first_time = TRUE, cwrh_prev_track_id = NO_TRACK;
+
 
 static void CalculateWorldRoadHeight (long wheel, long x, long z, long *y_out)
 	{
@@ -1711,8 +1726,8 @@ static void CalculateWorldRoadHeight (long wheel, long x, long z, long *y_out)
 	// this avoids locating the wrong map square,
 	// e.g. for diagonal pieces that run into adjacent squares
 
-	static long piece = -1, segment = -1;
-	static long first_time = TRUE, prevTrackID = NO_TRACK;
+	long &piece = cwrh_piece, &segment = cwrh_segment;
+	long &first_time = cwrh_first_time, &prevTrackID = cwrh_prev_track_id;
 
 	//fprintf(out, "CalculateWorldRoadHeight\n");
 
@@ -3606,7 +3621,9 @@ static void CalculateSteering (void)
 	// reason why player_y_angle sometimes needs direct adjustment:-
 	//	   to give a one-off adjustment - adjusting the acceleration has a continuing effect
 
-	static long piece = 0;
+	// Per-car: IdentifyPiece uses this as its search hint.  Hoisted to file scope for
+	// CAR_STATE_FIELDS, same reason as cwrh_piece above.
+	long &piece = steering_piece;
 	long rx, rz;
 	long section_y_angle, scaled_pos_difference_angle;
 	long left_hand_bend, steering_amount, section_steering_amount;
@@ -4761,7 +4778,10 @@ static void PositionCarAbovePiece (long piece)
 	 * The side is whichever one the car left the road on (swing_from_left), so the
 	 * crane picks it up where it went off rather than always from the right.
 	 */
-	long side = (swing_from_left ? -160 : 160);
+	/*	A race start overrides this: see SetCarStartSideOffset.  Zero means "no override",
+		which is every single-player placement.									*/
+	long side = (start_side_offset != 0) ? start_side_offset
+										 : (swing_from_left ? -160 : 160);
 
 	// The Amiga's arithmetic (ptsor1, StuntCarRacer.s:8070) is
 	// (160 << 7) * trig * 2 >> 16 << 6, i.e. 160 * trig / 4 world units.  Its
@@ -5990,3 +6010,265 @@ void CloseAmigaRecording( void )
 	}
 }
 #endif
+
+
+/*	======================================================================================= */
+/*	Per-car context																			*/
+/*																							*/
+/*	Description:	The player physics in this file is welded to file-scope state - it was	*/
+/*					only ever asked to drive one car.  Head-to-head netplay needs a second	*/
+/*					instance of exactly the same physics for the remote player.				*/
+/*																							*/
+/*					Rather than thread a context pointer through ~200 functions (which		*/
+/*					would touch every line of the sim and invalidate the simtrace digests	*/
+/*					that guard it), the state is saved and restored around each car's step.	*/
+/*					The physics itself is untouched, so a solo race computes bit-for-bit	*/
+/*					what it did before - which is what the digest table checks.				*/
+/*																							*/
+/*					CAR_STATE_FIELDS is the single list of what "a car" is, in the same		*/
+/*					spirit as SIMTRACE_FIELDS: save and restore are both generated from it,	*/
+/*					so they cannot drift apart.  ANY new per-car file-scope variable in		*/
+/*					this file must be added here, or it silently leaks between the two cars.*/
+/*	======================================================================================= */
+
+#define CAR_STATE_FIELDS(X)												\
+	/* road position */													\
+	X(long, player_current_piece)										\
+	X(long, player_current_segment)										\
+	X(long, players_distance_into_section)								\
+	X(long, players_road_x_position)									\
+	X(long, rear_wheel_surface_x_position)								\
+	X(long, touching_road)												\
+	/* world position and orientation */									\
+	X(long, player_x)													\
+	X(long, player_y)													\
+	X(long, player_z)													\
+	X(long, player_x_angle)												\
+	X(long, player_y_angle)												\
+	X(long, player_z_angle)												\
+	/* speeds */														\
+	X(long, player_world_x_speed)										\
+	X(long, player_world_y_speed)										\
+	X(long, player_world_z_speed)										\
+	X(long, player_x_speed)												\
+	X(long, player_y_speed)												\
+	X(long, player_z_speed)												\
+	/* controls */														\
+	X(long, accelerate)													\
+	X(long, brake)														\
+	X(long, accelerating)												\
+	X(long, left_right_value)											\
+	X(long, engine_z_acceleration)										\
+	X(long, boost_activated)											\
+	X(long, boostReserve)												\
+	X(long, boostUnit)													\
+	/* wheel offsets */													\
+	X(long, rear_wheel_x_offset)										\
+	X(long, rear_wheel_z_offset)										\
+	X(long, front_left_wheel_x_offset)									\
+	X(long, front_left_wheel_z_offset)									\
+	X(long, front_right_wheel_x_offset)									\
+	X(long, front_right_wheel_z_offset)									\
+	/* wheel heights */													\
+	X(long, front_left_road_height)										\
+	X(long, front_right_road_height)									\
+	X(long, rear_road_height)											\
+	X(long, front_left_actual_height)									\
+	X(long, front_right_actual_height)									\
+	X(long, rear_actual_height)											\
+	X(long, front_left_amount_below_road)								\
+	X(long, front_right_amount_below_road)								\
+	X(long, rear_amount_below_road)										\
+	X(long, old_front_left_difference)									\
+	X(long, old_front_right_difference)									\
+	X(long, old_rear_difference)										\
+	X(long, front_left_wheel_speed)										\
+	X(long, front_right_wheel_speed)									\
+	X(long, leftwheel_angle)											\
+	X(long, rightwheel_angle)											\
+	/* off-road / off-map */											\
+	X(long, off_left)													\
+	X(long, off_right)													\
+	X(long, wheel_off_road)												\
+	X(long, distance_off_road)											\
+	X(long, at_side_byte)												\
+	X(long, which_side_byte)											\
+	X(long, smaller_limit_required)										\
+	X(long, player_distance_off_road)									\
+	X(long, off_map_status)												\
+	X(long, off_track_count)											\
+	/* damage */														\
+	X(long, front_left_damage)											\
+	X(long, front_right_damage)											\
+	X(long, rear_damage)												\
+	X(long, damaged)													\
+	X(long, new_damage)													\
+	X(long, nholes)														\
+	X(long, damage_value)												\
+	X(long, damaged_count)												\
+	X(long, wreck_wheel_height_reduction)								\
+	X(long, smashed_countdown)											\
+	X(long, grounded_delay)												\
+	X(long, grounded_count)												\
+	/* crane / drop start */											\
+	X(bool, drop_start_done)											\
+	X(long, car_on_chains_countdown)									\
+	X(long, swing_from_left)											\
+	X(long, swing_magnitude)											\
+	X(long, required_raise_height)										\
+	X(long, chain_fire_pressed)											\
+	X(double, chain_frame_phase)										\
+	X(long, chain_frame_fraction)										\
+	X(long, chain_touchdown_frames)										\
+	X(long, chain_release_hold)											\
+	X(long, chain_last_road_x)											\
+	/* accelerations */													\
+	X(long, car_collision_x_acceleration)								\
+	X(long, car_collision_y_acceleration)								\
+	X(long, car_collision_z_acceleration)								\
+	X(long, car_to_road_collision_z_acceleration)						\
+	X(long, gravity_x_acceleration)										\
+	X(long, gravity_y_acceleration)										\
+	X(long, gravity_z_acceleration)										\
+	X(long, player_x_acceleration)										\
+	X(long, player_y_acceleration)										\
+	X(long, player_z_acceleration)										\
+	X(long, total_world_x_acceleration)									\
+	X(long, total_world_y_acceleration)									\
+	X(long, total_world_z_acceleration)									\
+	/* rotation */														\
+	X(long, player_x_rotation_speed)									\
+	X(long, player_y_rotation_speed)									\
+	X(long, player_z_rotation_speed)									\
+	X(long, player_final_x_rotation_speed)								\
+	X(long, player_final_y_rotation_speed)								\
+	X(long, player_final_z_rotation_speed)								\
+	X(long, player_x_rotation_acceleration)								\
+	X(long, player_y_rotation_acceleration)								\
+	X(long, player_z_rotation_acceleration)								\
+	/* lap count kept alongside the rest of the car */					\
+	X(long, playerLapNumber)											\
+	/* reset / replay bookkeeping */									\
+	X(long, INITIALISE_PLAYER)											\
+	X(long, new_game_placement_done)									\
+	X(long, Replay)														\
+	X(long, ReplayRequested)											\
+	X(long, ReplayLooping)												\
+	X(long, ReplayFinished)												\
+	/* road-lookup caches (see cwrh_piece / steering_piece) */			\
+	X(long, cwrh_piece)													\
+	X(long, cwrh_segment)												\
+	X(long, cwrh_first_time)											\
+	X(long, cwrh_prev_track_id)											\
+	X(long, steering_piece)												\
+	X(long, sx1) X(long, sy1) X(long, sz1)								\
+	X(long, sx2) X(long, sy2) X(long, sz2)								\
+	X(long, sx3) X(long, sy3) X(long, sz3)								\
+	X(long, sx4) X(long, sy4) X(long, sz4)
+
+	// Deliberately NOT per-car:
+	//   engine_power / boost_unit_value  - league configuration, identical for both cars
+	//   spark_*, spark_step_count        - particle table, driven from the render path
+	//                                      with the local car's context already restored
+	//   lapNumber[] / carOnFirstHalfOfLap[] - already indexed by CarType
+struct CarContext
+	{
+#define X(type, name) type name;
+	CAR_STATE_FIELDS(X)
+#undef X
+
+	// The FloatV2 sim's own state, and the "reseed me from the legacy globals"
+	// flag that pairs with it.  Both are single instances in Physics_FloatV2.cpp,
+	// so they ride along here rather than being parameterised there.
+	scr::PhysicsStateF fv2;
+	bool fv2_needs_seed;
+	};
+
+static CarContext gCarContext[NUM_CARS];
+static long gActiveCar = PLAYER;
+static bool gCarContextPrimed = FALSE;
+
+static void SaveCarContext (CarContext *ctx)
+	{
+#define X(type, name) ctx->name = name;
+	CAR_STATE_FIELDS(X)
+#undef X
+	ctx->fv2 = scr::FloatV2_State();
+	ctx->fv2_needs_seed = scr::gFloatV2NeedsSeed;
+	}
+
+static void RestoreCarContext (const CarContext *ctx)
+	{
+#define X(type, name) name = ctx->name;
+	CAR_STATE_FIELDS(X)
+#undef X
+	scr::FloatV2_State() = ctx->fv2;
+	scr::gFloatV2NeedsSeed = ctx->fv2_needs_seed;
+	}
+
+
+/*	======================================================================================= */
+/*	Function:		SelectCar																*/
+/*																							*/
+/*	Description:	Make `car` the one the file-scope state describes.  Cheap and			*/
+/*					idempotent: selecting the car that is already active does nothing,		*/
+/*					so single-player never copies anything.									*/
+/*	======================================================================================= */
+
+void SelectCar (long car)
+	{
+	if ((car < 0) || (car >= NUM_CARS))
+		return;
+
+	if (! gCarContextPrimed)
+		{
+		// First call.  Whatever the globals hold now is the active car's state, and
+		// the other car starts as a copy of it - the caller positions it immediately
+		// afterwards, and a copy is a saner starting point than zeroes (which would
+		// mean, among other things, drop_start_done == false and a piece index of 0).
+		SaveCarContext(&gCarContext[gActiveCar]);
+		for (long i = 0; i < NUM_CARS; i++)
+			if (i != gActiveCar)
+				gCarContext[i] = gCarContext[gActiveCar];
+		gCarContextPrimed = TRUE;
+		}
+
+	if (car == gActiveCar)
+		return;
+
+	SaveCarContext(&gCarContext[gActiveCar]);
+	RestoreCarContext(&gCarContext[car]);
+	gActiveCar = car;
+	}
+
+
+long ActiveCar (void)
+	{
+	return gActiveCar;
+	}
+
+
+/*	======================================================================================= */
+/*	Function:		SetCarStartSideOffset												*/
+/*																								*/
+/*	Description:	How far to the side of the piece centre the crane sets this car down,	*/
+/*					in the units of player.to.side.of.road (StuntCarRacer.s:8070) - negative	*/
+/*					is left.  Zero restores the normal behaviour, which is +/-160 on whichever	*/
+/*					side the car left the road (swing_from_left), and is what every			*/
+/*					single-player placement uses.											*/
+/*																								*/
+/*					A head-to-head start needs this because +/-160 is a *re-lift* offset: it	*/
+/*					puts the car 640 piece units out, past the road edge at 384, which is	*/
+/*					right for picking a car up where it went off but puts two cars nearly two	*/
+/*					road widths apart at the start of a race.  The two cars want to be beside	*/
+/*					each other on the track, the way the Amiga starts its opponent (road x	*/
+/*					0x4c against a centre of 0x80, R.5a3f8).									*/
+/*																								*/
+/*					The caller picks the value from the network role, never from which car is	*/
+/*					local, so both peers place both cars identically.						*/
+/*	======================================================================================= */
+
+void SetCarStartSideOffset (long side)
+	{
+	start_side_offset = side;
+	}
