@@ -19,6 +19,7 @@ namespace scr {
 
 bool     gSimTraceEnabled  = false;
 bool     gSimTraceVerbose  = false;
+bool     gSimTraceDigestOnly = false;
 long     gSimTraceMaxSteps = 6000;      // 100 seconds at 60Hz
 int      gSimTraceTrack    = 0;
 uint32_t gSimTraceSeed     = 0x12345678u;
@@ -26,6 +27,13 @@ uint32_t gSimTraceSeed     = 0x12345678u;
 static char  sLogPath[512] = "simtrace.log";
 static FILE* sLog          = nullptr;
 static long  sStep         = 0;
+
+/*	Cumulative digest over every step hash so far. The whole point of it is that a
+	run on a machine with no shared terminal can be compared by hand: one 16-hex
+	line says match / no match, and the checkpoint lines narrow a mismatch to a
+	100-step window without anyone transcribing 6000 hashes.					*/
+static uint64_t sDigest = 0;
+static const long CHECKPOINT = 100;
 
 /*	=====================================================================================
 	Hashing
@@ -200,6 +208,17 @@ int SimTrace_ParseArg(int argc, char** argv, int i)
 			}
 		return 1;
 		}
+	if (!strcmp(argv[i], "--simtrace-digest"))
+		{
+		gSimTraceEnabled    = true;
+		gSimTraceDigestOnly = true;
+		if ((i + 1 < argc) && (argv[i+1][0] >= '0') && (argv[i+1][0] <= '9'))
+			{
+			gSimTraceMaxSteps = atol(argv[i+1]);
+			return 2;
+			}
+		return 1;
+		}
 	if (!strcmp(argv[i], "--simtrace-track") && (i + 1 < argc))
 		{
 		gSimTraceTrack = atoi(argv[i+1]);
@@ -246,7 +265,8 @@ void SimTrace_Begin()
 			gSimTraceTrack, static_cast<unsigned long>(gSimTraceSeed),
 			gSimTraceMaxSteps, gFloatV2Dt,
 			static_cast<unsigned long long>(dtBits));
-	fprintf(sLog, "# verbose=%d\n", gSimTraceVerbose ? 1 : 0);
+	fprintf(sLog, "# verbose=%d digest_only=%d\n",
+			gSimTraceVerbose ? 1 : 0, gSimTraceDigestOnly ? 1 : 0);
 	fflush(sLog);
 
 	printf("simtrace: recording %ld steps to %s (track %d, seed 0x%08lx)\n",
@@ -270,13 +290,21 @@ void SimTrace_RecordStep(const PhysicsStateF& s)
 	SIMTRACE_FIELDS(SIMTRACE_EMIT, s)
 	#undef SIMTRACE_EMIT
 
+	HashBytes(sDigest, f.h);
+
 	if (gSimTraceVerbose)
 		fprintf(sLog, " hash=%016llx\n", static_cast<unsigned long long>(f.h));
-	else
+	else if (!gSimTraceDigestOnly)
 		fprintf(sLog, "%08ld %016llx\n", sStep,
 				static_cast<unsigned long long>(f.h));
 
 	++sStep;
+
+	// Checkpoint every 100 steps. In digest-only mode these are the whole file,
+	// which is why they are short enough to paste: 6000 steps is 60 lines.
+	if ((sStep % CHECKPOINT) == 0)
+		fprintf(sLog, "#chk %06ld %016llx\n", sStep,
+				static_cast<unsigned long long>(sDigest));
 
 	// Flushed every step on purpose. The runs end in a crash often enough (and
 	// are killed by hand often enough) that a buffered tail would be the part
@@ -292,7 +320,13 @@ bool SimTrace_Finished()
 void SimTrace_End()
 {
 	if (!sLog) return;
+	// The line to compare first: if these match, the two machines agree on every
+	// bit of every step and nothing else needs transcribing at all.
+	fprintf(sLog, "# DIGEST %ld %016llx\n", sStep,
+			static_cast<unsigned long long>(sDigest));
 	fprintf(sLog, "# end %ld steps\n", sStep);
+	printf("simtrace: DIGEST %ld %016llx\n", sStep,
+		   static_cast<unsigned long long>(sDigest));
 	fclose(sLog);
 	sLog = nullptr;
 	printf("simtrace: wrote %ld steps to %s\n", sStep, sLogPath);

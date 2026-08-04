@@ -27,9 +27,15 @@
 //   stuntcarracer --simtrace 10000        trace a specific number of steps
 //   stuntcarracer --simtrace-verbose      dump every field, not just the hash
 //   stuntcarracer --simtrace-track 3      pick the track (default 0, Little Ramp)
+//   stuntcarracer --simtrace-digest       ~60 pasteable lines instead of 6000
 //   stuntcarracer --simtrace-out FILE     log path (default simtrace.log)
 //
-// Then: diff simtrace-macos.log simtrace-windows.log | head
+// Comparing two machines, cheapest first:
+//   1. Compare the single "# DIGEST <steps> <hash>" line. Equal => every bit of
+//      every step agreed, and there is nothing else to check.
+//   2. If it differs, compare the "#chk <step> <digest>" lines to find the first
+//      differing 100-step window.
+//   3. Re-run both with --simtrace-verbose and diff that window to get the field.
 
 #pragma once
 
@@ -45,6 +51,10 @@ extern bool  gSimTraceEnabled;
 // Dump every field of every step as well as the hash. Much larger files, but it
 // names the diverging field directly instead of just the step.
 extern bool  gSimTraceVerbose;
+// Write only the header, the 100-step checkpoints and the final digest -- about
+// 60 lines for a default run, small enough to paste by hand off a machine with
+// no shared terminal. That is the intended way to run this on the PC.
+extern bool  gSimTraceDigestOnly;
 // Steps to record before quitting.
 extern long  gSimTraceMaxSteps;
 // Track to race on, and the seed handed to Det_Rand at race start.
