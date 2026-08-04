@@ -169,7 +169,7 @@ static void MenuScreensDumpAll( const char *prefix )
 	{
 	static const char *names[] =
 		{
-		"name-entry", "opponents", "main", "select", "practise-track", "division", "fixture",
+		"name-entry", "opponents", "main", "select", "league-choice", "practise-track", "division", "fixture",
 		"race-win", "race-lost", "track-record", "result", "table", "championship", "changes", "super-league",
 		"hall-of-fame", "load-save", "link"
 		};
@@ -436,6 +436,23 @@ static void DrawSelectMenu( void )
 		};
 	DrawDivisionHeading();
 	DrawMenu(entries, 4, gSelection);
+	}
+
+/*	Not in the original: there, the Super League is something you are given after winning		*/
+/*	Division I (league.offset, see LeagueEndSeason) and never something you ask for.  This	*/
+/*	screen sits between 'Start the Racing Season' and the first fixture and lets the season	*/
+/*	be run either way - the flag it sets is the same one, so everything downstream (engine	*/
+/*	power and boost in Car_Behaviour, opponent speeds in Opponent_Behaviour, the cockpit		*/
+/*	artwork in Car.cpp, the SUPER DIVISION heading) follows on its own.						*/
+static void DrawLeagueChoice( void )
+	{
+	static const char *entries[2] =
+		{
+		"League",
+		"Super League"
+		};
+	DrawDivisionHeading();
+	DrawMenu(entries, 2, gSelection);
 	}
 
 /*	R.58888, "display opponents": the twelve drivers as one full-screen picture, four		*/
@@ -875,6 +892,7 @@ static void MenuScreensDraw( void )
 		case MS_RACE_LOST:								break;	// handled above
 		case MS_MAIN:			DrawMainMenu();			break;
 		case MS_SELECT:			DrawSelectMenu();		break;
+		case MS_LEAGUE_CHOICE:	DrawLeagueChoice();		break;
 		case MS_PRACTISE_TRACK:	DrawPractiseTracks();	break;
 		case MS_DIVISION:		DrawDivision();			break;
 		case MS_FIXTURE:		DrawFixture();			break;
@@ -921,6 +939,7 @@ static int EntryCount( void )
 		{
 		case MS_MAIN:			return 3;
 		case MS_SELECT:			return 4;
+		case MS_LEAGUE_CHOICE:	return 2;
 		case MS_PRACTISE_TRACK:	return 8;
 		default:				return 0;
 		}
@@ -1003,11 +1022,26 @@ static void ActivateSelect( void )
 		case 2:												// Start the Racing Season
 			/*	mgs9 goes straight to the fixture screen (R.64664) and from there	*/
 			/*	into set.and.preview.road - there is no division screen in between.	*/
-			LeagueStartSeason();
-			MenuScreensGoto(MS_FIXTURE);
+			/*	The port asks which league first; the fixture screen follows from	*/
+			/*	there.  Start on whichever the season is already set to, so a player	*/
+			/*	who earned the Super League keeps it by just pressing RETURN.		*/
+			MenuScreensGoto(MS_LEAGUE_CHOICE);
+			gSelection = gLeagueSuperLeague ? 1 : 0;
 			break;
 		case 3:	MenuScreensGoto(MS_LOADSAVE);		break;	// Load/Save/Replay
 		}
+	}
+
+static void ActivateLeagueChoice( void )
+	{
+	/*	Same flag the original sets on winning Division I, so the season runs exactly as	*/
+	/*	a promoted one would - only the choosing is new.  It is set before				*/
+	/*	LeagueStartSeason so the division heading and fixtures are drawn in the right	*/
+	/*	league from the first screen on.												*/
+	gLeagueSuperLeague = (gSelection == 1);
+
+	LeagueStartSeason();
+	MenuScreensGoto(MS_FIXTURE);
 	}
 
 void MenuScreensKey( int key )
@@ -1049,6 +1083,7 @@ void MenuScreensKey( int key )
 		{
 		case MS_MAIN:			ActivateMain();		break;
 		case MS_SELECT:			ActivateSelect();	break;
+		case MS_LEAGUE_CHOICE:	ActivateLeagueChoice();	break;
 
 		/*	Shown after the name has been entered, and again once a season is over.	*/
 		case MS_OPPONENTS:		MenuScreensGoto(MS_SELECT);		break;

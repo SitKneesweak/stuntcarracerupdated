@@ -18,6 +18,7 @@ enum MenuScreenType
 	MS_OPPONENTS,		// the twelve drivers, four divisions across - drawn full screen
 	MS_MAIN,			// 'SELECT' - Single Player League / Multiplayer / ...
 	MS_SELECT,			// 'SELECT' - Practise / Start the Racing Season / Load-Save-Replay
+	MS_LEAGUE_CHOICE,	// 'SELECT' - League or Super League, on the way into a season
 	MS_PRACTISE_TRACK,	// pick any of the eight tracks
 	MS_DIVISION,		// 'DIVISION n' - the division's drivers and tracks (not in the flow)
 	MS_FIXTURE,			// 'RACE n' - The X V The Y, and the track
