@@ -13,6 +13,15 @@
   #define WIN32_LEAN_AND_MEAN
   #include <winsock2.h>
   #include <ws2tcpip.h>
+  // SIO_UDP_CONNRESET (used in Bind) lives here, not in winsock2.h, on
+  // mingw-w64 — winsock2.h alone compiles under MSVC and fails under MinGW.
+  #include <mswsock.h>
+  // Older mingw-w64 headers ship mswsock.h without it. It is a stable, publicly
+  // documented control code, so spelling it out is safer than requiring a
+  // particular header vintage.
+  #ifndef SIO_UDP_CONNRESET
+    #define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+  #endif
   typedef int socklen_t_compat;
   // The native handle type, so the intptr_t in the header is never narrowed at
   // a call site. Windows' SOCKET is UINT_PTR (64-bit on Win64); casting it
