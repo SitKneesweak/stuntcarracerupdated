@@ -28,3 +28,4 @@ SCRlog.txt
 # Test binaries
 tests/net_socket_test
 tests/net_lockstep_test
+tests/profile_test

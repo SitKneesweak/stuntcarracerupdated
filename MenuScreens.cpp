@@ -30,8 +30,10 @@
 #include "AmigaMenu.h"
 #include "MenuScreens.h"
 #include "League.h"
+#include "Profile.h"
 #include "Track.h"
 #include "Opponent_Behaviour.h"
+#include "Det_Rand.h"
 /*	Net_Game.h includes only <cstdint> - no socket header ever reaches dx_linux.h.		*/
 #include "Net_Game.h"
 
@@ -114,6 +116,34 @@ static int			  gSelection  = 0;
 static bool			  gRaceIsLeague = false;
 static int			  gRaceTrack    = 0;	// the track the running race is on
 
+/*	The league the race that is starting runs under.  A season race and a time trial take	*/
+/*	the career's own; the Single Race screen sets it to whichever it was asked for, which	*/
+/*	is why this is a variable and not just gLeagueSuperLeague read again at the far end.		*/
+static bool			  gRaceSuperLeague = false;
+
+/*	The Single Race screen's three choices, kept between visits so a track being tuned		*/
+/*	can be raced again without setting it up each time.										*/
+static int	gSingleTrack    = 0;
+static long	gSingleOpponent = RANDOM_OPPONENT;
+static bool	gSingleSuper    = false;
+static int	gSingleField    = 0;		// which of the three rows left/right is changing
+
+/*	gSingleTrack when the Track row is on 'Random': the track is drawn when the race			*/
+/*	starts, so the same setting gives a different one each time.								*/
+#define RANDOM_TRACK	(-1)
+
+/*	The league a time trial runs under.  The career's own until the screen is asked for		*/
+/*	the other one - the Super League car is a different car to learn a track in, and		*/
+/*	there was no way to drive it without starting a season in it.							*/
+static bool	gPractiseSuper  = false;
+
+/*	True when the race that just started came off the Single Race screen, so its result		*/
+/*	comes back here rather than to the SELECT menu.											*/
+static bool	gRaceIsSingle   = false;
+
+/*	Where the tuning bench returns to - it is reachable from more than one screen now.		*/
+static MenuScreenType gTuningReturn = MS_SELECT;
+
 static char gNameBuffer[16] = "";
 static int  gNameLength     = 0;
 
@@ -130,6 +160,18 @@ static char gRelegated[16] = "";
 /*	rather than continuing the end-of-season run of screens.								*/
 static bool gHallFromMenu = false;
 
+/*	True when the ladder picture is being shown on the way into a season, so fire carries	*/
+/*	on to the first fixture rather than dropping back to the menu.  The picture belongs		*/
+/*	where it tells you something: after the league has been chosen, showing who is in which	*/
+/*	division for the season about to be raced.												*/
+static bool gOppToFixture = false;
+
+/*	Which league's records the Hall of Fame is showing.  The two leagues are two different	*/
+/*	races over the same eight tracks - the Super League car is faster and the road is the	*/
+/*	same length - so a single table would have the Super League quietly erase every league	*/
+/*	record the moment the career was promoted.  Two tables, one page each.					*/
+static bool gHallSuper = false;
+
 /*	The times from the race just finished, for the RESULT screen.							*/
 static double gLastLapTime  = 0.0;
 static double gLastRaceTime = 0.0;
@@ -141,26 +183,43 @@ static double gLastRaceTime = 0.0;
 static bool			 gNewRecordRace   = false;
 static bool			 gNewRecordLap    = false;
 static int			 gNewRecordTrack  = 0;
+static bool			 gNewRecordSuper  = false;
 static MenuScreenType gRecordScreenReturn = MS_SELECT;
 
 /*	Track records, kept for the Hall of Fame.  Zero means "not set yet", which the original	*/
-/*	shows as a row of dashes ('------------' in TEXT.5ec48).								*/
-static double gRecordLap[8]  = { 0 };
-static double gRecordRace[8] = { 0 };
-static int    gRecordLapDriver[8];
-static int    gRecordRaceDriver[8];
+/*	shows as a row of dashes ('------------' in TEXT.5ec48).  The first index is the			*/
+/*	league the time was set in: [0] is the league proper, [1] the Super League.				*/
+static double gRecordLap[2][8]  = {{ 0 }};
+static double gRecordRace[2][8] = {{ 0 }};
+static int    gRecordLapDriver[2][8];
+static int    gRecordRaceDriver[2][8];
 
 static void MenuScreensDraw( void );
 
 bool MenuScreensActive( void ) { return gActive; }
 void MenuScreensDeactivate( void ) { gActive = false; }
 bool MenuScreensRaceIsLeague( void ) { return gRaceIsLeague; }
+bool MenuScreensRaceSuperLeague( void ) { return gRaceSuperLeague; }
 
 void MenuScreensGoto( MenuScreenType screen )
 	{
+	/*	The Hall of Fame opens on the league the career is in, which is the one whose		*/
+	/*	records the player just changed; left/right goes to the other.					*/
+	if (screen == MS_HALL_OF_FAME)
+		gHallSuper = gLeagueSuperLeague;
+
 	gScreen    = screen;
 	gSelection = 0;
 	gActive    = true;
+	}
+
+/*	Write the career out, but only once there is a driver to write: before the NAME?		*/
+/*	screen has been through, the league tables hold nobody's season and saving them would	*/
+/*	conjure a profile out of a menu the player only looked at.								*/
+static void SaveCareer( void )
+	{
+	if (ProfileExists())
+		ProfileSave();
 	}
 
 /*	======================================================================================= */
@@ -177,9 +236,10 @@ static void MenuScreensDumpAll( const char *prefix )
 	{
 	static const char *names[] =
 		{
-		"name-entry", "opponents", "main", "select", "league-choice", "practise-track", "division", "fixture",
+		"name-entry", "opponents", "main", "select", "league-choice", "practise-track",
+		"single-race", "division", "fixture",
 		"race-win", "race-lost", "track-record", "result", "table", "championship", "changes", "super-league",
-		"hall-of-fame", "load-save", "mp-menu", "mp-track", "mp-join", "mp-wait"
+		"hall-of-fame", "load-save", "mp-menu", "mp-track", "mp-join", "mp-wait", "tuning"
 		};
 
 	/*	A season with two races run, so the tables have something in them.				*/
@@ -191,8 +251,9 @@ static void MenuScreensDumpAll( const char *prefix )
 	snprintf(gRelegated, sizeof(gRelegated), "%s", LeagueDriverName(10));
 	gLastLapTime  = 27.31;
 	gLastRaceTime = 112.64;
-	MenuScreensRecordTimes(0, PLAYER_DRIVER, 27.31, 112.64);
-	MenuScreensRecordTimes(5, 3, 31.09, 128.44);
+	MenuScreensRecordTimes(0, false, PLAYER_DRIVER, 27.31, 112.64);
+	MenuScreensRecordTimes(5, false, 3, 31.09, 128.44);
+	MenuScreensRecordTimes(0, true,  PLAYER_DRIVER, 24.87, 101.22);
 
 	snprintf(gNameBuffer, sizeof(gNameBuffer), "ANDREW");
 	gNameLength = 6;
@@ -203,7 +264,7 @@ static void MenuScreensDumpAll( const char *prefix )
 	snprintf(gAddressBuffer, sizeof(gAddressBuffer), "192.168.1.42");
 	gAddressLength = (int)strlen(gAddressBuffer);
 
-	for (int i = 0; i <= (int)MS_MP_WAIT; i++)
+	for (int i = 0; i <= (int)MS_TUNING; i++)
 		{
 		char path[256];
 		gScreen = (MenuScreenType)i;
@@ -217,11 +278,7 @@ static void MenuScreensDumpAll( const char *prefix )
 
 void MenuScreensInit( void )
 	{
-	for (int i = 0; i < 8; i++)
-		{
-		gRecordLapDriver[i]  = -1;
-		gRecordRaceDriver[i] = -1;
-		}
+	MenuScreensClearRecords();
 	gNameBuffer[0] = '\0';
 	gNameLength    = 0;
 
@@ -232,6 +289,26 @@ void MenuScreensInit( void )
 	gNameBuffer[0] = '\0';
 	gNameLength    = 0;
 	gHallFromMenu  = false;
+	gOppToFixture  = false;
+
+	/*	Pick up the saved career, if there is one.  The dump-all run above leaves a		*/
+	/*	made-up season behind, so load after it rather than before: whichever runs		*/
+	/*	last is what the menus show, and that should be the player's own career.			*/
+	if (!ProfileLoad())
+		{
+		LeagueNewCareer("");
+		MenuScreensClearRecords();
+		}
+
+	/*	The opponent tuning bench keeps its own file, outside the career: a number		*/
+	/*	being hunted should still be there tomorrow, and should not go when a new		*/
+	/*	driver wipes the profile.														*/
+	OpponentTuningLoad();
+
+	/*	Until a race picks otherwise, the league is the career's own.					*/
+	gRaceSuperLeague = gLeagueSuperLeague;
+	gSingleSuper     = gLeagueSuperLeague;
+	gPractiseSuper   = gLeagueSuperLeague;
 
 	/*	The Amiga puts the game-type menu up first and only then asks for a name.		*/
 	MenuScreensGoto(MS_MAIN);
@@ -250,10 +327,16 @@ static void DrawMenu( const char *const *entries, int count, int selected )
 
 	for (int i = 0; i < count; i++)
 		{
-		AmigaMenuBar(kMenuRows[i], i == selected);
+		/*	menu.bar.positions only has room for the four entries the original's		*/
+		/*	menus had.  A fifth needs the entries closer together: two rows apart,	*/
+		/*	which is what the track lists already use and is the tightest the		*/
+		/*	17-pixel selection bar allows.											*/
+		const int row = (count <= MAX_MENU_ENTRIES) ? kMenuRows[i] : (13 + i * 2);
+
+		AmigaMenuBar(row, i == selected);
 
 		AmigaMenuSetInk(AMIGA_INK_BAR_TEXT);
-		AmigaMenuPrintF(MENU_ENTRY_COLUMN, kMenuRows[i], "%d. %s", i + 1, entries[i]);
+		AmigaMenuPrintF(MENU_ENTRY_COLUMN, row, "%d. %s", i + 1, entries[i]);
 		}
 	AmigaMenuSetInk(AMIGA_INK_TEXT);
 	}
@@ -381,6 +464,21 @@ static void DrawDivisionHeading( void )
 		AmigaMenuPrintF(15, HEADING_ROW, "DIVISION %d", LeagueDivisionNumber(division));
 	}
 
+/*	Whose career this is.  Not in the original - there was no profile to be uncertain		*/
+/*	about, since the name was typed afresh every time the machine was switched on.  Now		*/
+/*	that it persists, the menus have to say who you are.  It goes on the 'SELECT' row at		*/
+/*	the left edge of the panel: the heading sits at column 17 and the name is capped at		*/
+/*	twelve characters by the entry screen, so the two never meet.							*/
+static void DrawDriverName( void )
+	{
+	if (!gPlayerName[0])
+		return;
+
+	AmigaMenuSetInk(AMIGA_INK_RED);
+	AmigaMenuPrintF(MENU_ENTRY_COLUMN, SELECT_ROW, "%.12s", gPlayerName);
+	AmigaMenuSetInk(AMIGA_INK_TEXT);
+	}
+
 /*	Row 23 is the last one that fits inside the panel: its glyphs occupy y 184..192 and		*/
 /*	the panel ends at 195.  Row 24 would hang over the frame.								*/
 #define PROMPT_ROW	23
@@ -435,6 +533,7 @@ static void DrawMainMenu( void )
 		"Multiplayer"
 		};
 	DrawMenu(entries, 2, gSelection);
+	DrawDriverName();
 	}
 
 static void DrawSelectMenu( void )
@@ -442,15 +541,21 @@ static void DrawSelectMenu( void )
 	/*	R.5baea's menu, entries 0..2 of TAB.5bcd0 - offsets $ec/$0a/$14 into TEXT.5a69a.	*/
 	/*	Load/Save/Replay ($2c) is the next entry in the table; the disassembly's count		*/
 	/*	stops short of it, but the port has the screen so it stays on the menu.				*/
-	static const char *entries[4] =
+	/*	'Practise' has become two entries.  The original's practise was a solo run round	*/
+	/*	a track, which is a time trial in everything but name, so it keeps the behaviour	*/
+	/*	and gets the name; 'Single Race' is the one that was missing - a one-off race		*/
+	/*	against a driver you choose, in whichever league you choose, outside the season.	*/
+	static const char *entries[5] =
 		{
 		"Hall of Fame",
-		"Practise",
+		"Time Trial",
+		"Single Race",
 		"Start the Racing Season",
 		"Load/Save/Replay"
 		};
 	DrawDivisionHeading();
-	DrawMenu(entries, 4, gSelection);
+	DrawMenu(entries, 5, gSelection);
+	DrawDriverName();
 	}
 
 /*	Not in the original: there, the Super League is something you are given after winning		*/
@@ -468,6 +573,7 @@ static void DrawLeagueChoice( void )
 		};
 	DrawDivisionHeading();
 	DrawMenu(entries, 2, gSelection);
+	DrawDriverName();
 	}
 
 /*	R.58888, "display opponents": the twelve drivers as one full-screen picture, four		*/
@@ -505,10 +611,61 @@ static void DrawOpponents( void )
 	AmigaMenuSetInk(AMIGA_INK_TEXT);
 	}
 
+/*	The name to print for a single race's opponent choice.									*/
+static const char *SingleOpponentName( long opponent )
+	{
+	if (opponent == NO_OPPONENT)		return "Nobody (solo)";
+	if (opponent == RANDOM_OPPONENT)	return "Random";
+	return LeagueDriverName((int)opponent);
+	}
+
+/*	Not the original's: a one-off race, set up in full - track, driver and league - and		*/
+/*	run outside the season, so a track can be raced against the opposition you want to		*/
+/*	see rather than whoever the next fixture happens to name.  It is also what makes the		*/
+/*	tuning bench usable: tune a number, drop back here, race that same track and league		*/
+/*	again.  Three rows, up/down to pick one and left/right to change it.						*/
+static void DrawSingleRace( void )
+	{
+	AmigaMenuSetInk(AMIGA_INK_TEXT);
+	AmigaMenuPrintAt(15, HEADING_ROW, "SINGLE RACE");
+
+	static const char *labels[3] = { "Track", "Against", "League" };
+	char values[3][32];
+	if (gSingleTrack == RANDOM_TRACK)
+		snprintf(values[0], sizeof(values[0]), "Random");
+	else
+		snprintf(values[0], sizeof(values[0]), "The %s", kTrackNames[gSingleTrack]);
+	snprintf(values[1], sizeof(values[1]), "%s", SingleOpponentName(gSingleOpponent));
+	snprintf(values[2], sizeof(values[2]), "%s", gSingleSuper ? "SUPER LEAGUE" : "League");
+
+	for (int i = 0; i < 3; i++)
+		{
+		const int row = 12 + i * 3;
+		AmigaMenuBar(row, i == gSingleField);
+
+		AmigaMenuSetInk(AMIGA_INK_BAR_TEXT);
+		/*	An arrow on the row the left/right keys are on, so which line they		*/
+		/*	change is not something to work out from the bar colour alone.  '>' and	*/
+		/*	not '<': the Amiga font has no '<' glyph.								*/
+		AmigaMenuPrintF(MENU_ENTRY_COLUMN, row, "%-8.8s %c %s",
+						labels[i],
+						(i == gSingleField) ? '>' : ' ',
+						values[i]);
+		}
+
+	AmigaMenuSetInk(AMIGA_INK_TEXT);
+	AmigaMenuPrintCentred(21, "Left/Right changes the row");
+	AmigaMenuSetInk(AMIGA_INK_RED);
+	AmigaMenuPrintCentred(23, "RETURN races.  T tunes it.");
+	AmigaMenuSetInk(AMIGA_INK_TEXT);
+	}
+
 static void DrawPractiseTracks( void )
 	{
-	/*	No 'SELECT' heading here: eight entries two rows apart already fill the panel	*/
-	/*	from row 9 - the first row clear of the logo - down to row 23.					*/
+	/*	No 'TIME TRIAL' heading, though the screen could do with one: eight entries two	*/
+	/*	rows apart already run from row 9 - the first row clear of the logo - down to	*/
+	/*	row 23, and a bar any lower would hang over the bottom of the panel.  The menu	*/
+	/*	entry that leads here is what names it.											*/
 
 	/*	Two rows per entry: the selection bar is 17 pixels tall, so entries any closer	*/
 	/*	than two rows would be swallowed by their neighbour's bar.						*/
@@ -518,6 +675,18 @@ static void DrawPractiseTracks( void )
 		AmigaMenuBar(row, i == gSelection);
 		AmigaMenuSetInk(AMIGA_INK_BAR_TEXT);
 		AmigaMenuPrintF(MENU_ENTRY_COLUMN, row, "%d. The %s", i + 1, kTrackNames[i]);
+
+		/*	Which league the trial runs in, on the selected row and nowhere else:	*/
+		/*	the eight entries already fill every row the panel has, so there is no	*/
+		/*	line to put it on of its own.  Right-aligned against the last column		*/
+		/*	that fits inside the panel (column 35), which the longest track name -	*/
+		/*	'2. The STEPPING STONES', ending at column 26 - stays clear of.  The		*/
+		/*	'>' is the Single Race screen's arrow, marking the row left/right change.*/
+		if (i == gSelection)
+			{
+			const char *league = gPractiseSuper ? "SUPER" : "LEAGUE";
+			AmigaMenuPrintF(36 - 2 - (int)strlen(league), row, "> %s", league);
+			}
 		}
 	AmigaMenuSetInk(AMIGA_INK_TEXT);
 	}
@@ -627,16 +796,18 @@ static void DrawTrackRecord( void )
 	/*	Both lines are always printed - the screen is about the track, not just the one	*/
 	/*	line that moved - but only a record this race actually took shows a driver, so	*/
 	/*	an unbeaten record still reads as the row of dashes it does everywhere else.		*/
-	FormatTime(time, sizeof(time), gRecordRace[gNewRecordTrack]);
+	const int league = gNewRecordSuper ? 1 : 0;
+
+	FormatTime(time, sizeof(time), gRecordRace[league][gNewRecordTrack]);
 	AmigaMenuPrintF(5, RECORD_ROW_1, "Race Time: %-10.10s %s",
-					(gRecordRaceDriver[gNewRecordTrack] >= 0)
-						? LeagueDriverName(gRecordRaceDriver[gNewRecordTrack]) : "",
+					(gRecordRaceDriver[league][gNewRecordTrack] >= 0)
+						? LeagueDriverName(gRecordRaceDriver[league][gNewRecordTrack]) : "",
 					time);
 
-	FormatTime(time, sizeof(time), gRecordLap[gNewRecordTrack]);
+	FormatTime(time, sizeof(time), gRecordLap[league][gNewRecordTrack]);
 	AmigaMenuPrintF(5, RECORD_ROW_2, "Best Lap : %-10.10s %s",
-					(gRecordLapDriver[gNewRecordTrack] >= 0)
-						? LeagueDriverName(gRecordLapDriver[gNewRecordTrack]) : "",
+					(gRecordLapDriver[league][gNewRecordTrack] >= 0)
+						? LeagueDriverName(gRecordLapDriver[league][gNewRecordTrack]) : "",
 					time);
 
 	AmigaMenuSetInk(AMIGA_INK_TEXT);
@@ -821,48 +992,303 @@ static void DrawSuperLeague( void )
 /*	panel.  At 45 characters the heading only fits because it spans the full 320 pixels.		*/
 static void DrawHallOfFame( void )
 	{
-	AmigaMenuClear(AMIGA_INK_BLACK);
-	AmigaMenuSetInk(AMIGA_INK_WHITE);
+	/*	The panel grey the menus sit on, so the two full-screen tables belong to the		*/
+	/*	same game as the screens either side of them rather than being white text on		*/
+	/*	black.  There is no frame art out here - the frame's hole is panel-sized - so		*/
+	/*	the paper covers the screen and the rows are the menus' own bars.				*/
+	AmigaMenuClear(AMIGA_PAPER);
 
+	/*	Amber for the heading: the menus' one bright colour, and the only thing on		*/
+	/*	this screen that is not either a bar or a record.								*/
+	AmigaMenuSetInk(AMIGA_BAR_SELECTED);
 	AmigaMenuPrintAt(16, 1, "HALL of FAME");					// 31,16,1,'HALL of FAME'
-	if (gLeagueSuperLeague)
-		AmigaMenuPrintAt(16, 3, "SUPER LEAGUE");				// 31,16,5,'SUPER LEAGUE'
+
+	/*	Which of the two tables is up.  The original prints 'SUPER LEAGUE' here when		*/
+	/*	the career is in it; this page can be either, so it always says which.			*/
+	/*																					*/
+	/*	One row up from the original's, along with everything else above the table:		*/
+	/*	the headings now sit on a bar, and a bar starting on row 6 reaches up into row	*/
+	/*	5's glyphs.  What that buys is a clear row 24 at the bottom for the prompt,		*/
+	/*	which the old spacing ran into.													*/
+	/*	Which league, and whose records these are, on one line - they are one fact		*/
+	/*	between them, and putting them on separate rows crowded the title.  Centred by	*/
+	/*	hand: AmigaMenuPrintCentred centres within the menu panel, and this screen is	*/
+	/*	outside it.  No apostrophe in 'driver's' - the Amiga font has no glyph for one	*/
+	/*	and draws a block.																*/
+	char subtitle[64];
+	if (gPlayerName[0])
+		snprintf(subtitle, sizeof(subtitle), "%s records for %.12s",
+				 gHallSuper ? "SUPER LEAGUE" : "LEAGUE", gPlayerName);
+	else
+		snprintf(subtitle, sizeof(subtitle), "%s records",
+				 gHallSuper ? "SUPER LEAGUE" : "LEAGUE");
+
+	AmigaMenuSetInk(AMIGA_INK_TEXT);
+	AmigaMenuPrintAt((45 - (int)strlen(subtitle)) / 2, 3, subtitle);
+
+	/*	Say so rather than let a player wonder why a good lap never landed.  Amber is	*/
+	/*	the palette's one bright ink, which is what a line like this wants.				*/
+	if (OpponentTuningActive())
+		{
+		AmigaMenuSetInk(AMIGA_BAR_SELECTED);
+		AmigaMenuPrintAt(0, 4, "Opponent tuning active - times not recorded");
+		}
+
+	/*	A bar under the headings, which tiles onto the top of the table below - and		*/
+	/*	gives the red something light to sit on, which the panel grey does not.			*/
+	AmigaMenuTableRow(6, AMIGA_BAR);
 
 	AmigaMenuSetInk(AMIGA_INK_RED);
 	/*	31,0,7,'TRACK  DRIVER   LAP-TIME    DRIVER  RACE-TIME'						*/
-	AmigaMenuPrintAt(0, 7, "TRACK  DRIVER   LAP-TIME    DRIVER  RACE-TIME");
-	AmigaMenuSetInk(AMIGA_INK_WHITE);
+	AmigaMenuPrintAt(0, 6, "TRACK  DRIVER   LAP-TIME    DRIVER  RACE-TIME");
+
+	const int league = gHallSuper ? 1 : 0;
 
 	for (int track = 0; track < 8; track++)
 		{
 		char lap[24], race[24];
-		FormatTime(lap,  sizeof(lap),  gRecordLap[track]);
-		FormatTime(race, sizeof(race), gRecordRace[track]);
+		FormatTime(lap,  sizeof(lap),  gRecordLap[league][track]);
+		FormatTime(race, sizeof(race), gRecordRace[league][track]);
 
-		AmigaMenuPrintF(0, 9 + track * 2, "%-6.6s %-8.8s %-11.11s %-7.7s %-9.9s",
+		const int lapDriver  = gRecordLapDriver[league][track];
+		const int raceDriver = gRecordRaceDriver[league][track];
+
+		/*	Amber where the player holds one of the two records, light grey where	*/
+		/*	neither is theirs.  The menus use amber for the entry that matters, and	*/
+		/*	on this screen what matters is which of these times you set yourself -	*/
+		/*	which is otherwise buried in a column of driver names.					*/
+		const bool mine = (lapDriver  == PLAYER_DRIVER) ||
+						  (raceDriver == PLAYER_DRIVER);
+
+		const int row = 8 + track * 2;
+		AmigaMenuTableRow(row, mine ? AMIGA_BAR_SELECTED : AMIGA_BAR);
+
+		AmigaMenuSetInk(AMIGA_INK_BAR_TEXT);
+		AmigaMenuPrintF(0, row, "%-6.6s %-8.8s %-11.11s %-7.7s %-9.9s",
 						kTrackShortNames[track],
-						(gRecordLapDriver[track]  >= 0) ? LeagueDriverName(gRecordLapDriver[track])  : "",
+						(lapDriver  >= 0) ? LeagueDriverName(lapDriver)  : "",
 						lap,
-						(gRecordRaceDriver[track] >= 0) ? LeagueDriverName(gRecordRaceDriver[track]) : "",
+						(raceDriver >= 0) ? LeagueDriverName(raceDriver) : "",
 						race);
 		}
 
-	AmigaMenuSetInk(AMIGA_INK_RED);
-	AmigaMenuPrintAt(6, 24, "Press RETURN to continue");
+	/*	Both keys on one line under the table.  That the other league is one keypress	*/
+	/*	away is worth saying - nothing else on this screen suggests a second page - and	*/
+	/*	saying it down here leaves the top of the screen to the records.				*/
+	AmigaMenuSetInk(AMIGA_INK_TEXT);
+	AmigaMenuPrintAt(0, 24, "RETURN continues   Left/Right swaps league");
 	}
 
-/*	The original's Load/Save/Replay submenu.  The entries are the real ones (TEXT.5a69a),	*/
-/*	but this port has no career persistence or replay recorder behind them, so the screen	*/
-/*	says so rather than pretending.															*/
+/*	======================================================================================= */
+/*	Opponent speed tuning																	*/
+/*																							*/
+/*	Not one of the original's screens and not meant for players: it is reached by pressing	*/
+/*	T on the SELECT menu and appears nowhere in the flow, because what it edits is the		*/
+/*	table the game's difficulty comes out of (see Opponent_Behaviour.h).  It exists so		*/
+/*	that a track which drives wrong - the Super League Little Ramp being the case it was		*/
+/*	written for - can be found by racing it, changing a number and racing it again.			*/
+/*																							*/
+/*	Drawn full screen like the Hall of Fame: two leagues side by side needs more than the	*/
+/*	28 characters the menu panel allows.													*/
+/*	======================================================================================= */
+
+/*	Which league column the left/right keys are editing.  Not gLeagueSuperLeague: this		*/
+/*	screen edits both leagues whichever one the career is currently in.						*/
+static bool gTuningColumnSuper = true;
+
+/*	What the next race off the screen the bench was opened from will be: the league it		*/
+/*	will run under and the track it will be on.  This is the pair the tuning table has to	*/
+/*	be read against, and telling the tester which they are is most of what makes the		*/
+/*	screen usable - editing the LEAGUE column and then racing the Super League is the one	*/
+/*	mistake it invites.																		*/
+static void NextRaceIntent( bool *super, int *track )
+	{
+	switch (gTuningReturn)
+		{
+		case MS_SINGLE_RACE:
+			*super = gSingleSuper;
+			/*	A random track is not known until RETURN, so the bench opens on	*/
+			/*	the one that was last raced instead.								*/
+			*track = (gSingleTrack == RANDOM_TRACK) ? gRaceTrack : gSingleTrack;
+			break;
+
+		case MS_FIXTURE:
+			{
+			const LeagueFixture *fixture = LeagueCurrentFixture();
+			*super = gLeagueSuperLeague;
+			*track = (fixture != NULL) ? fixture->trackID : 0;
+			}
+			break;
+
+		default:
+			{
+			/*	Off the SELECT menu there is no track chosen yet, so the season's	*/
+			/*	next fixture is the best answer available - it is where RETURN on	*/
+			/*	that menu leads.													*/
+			const LeagueFixture *fixture = LeagueCurrentFixture();
+			*super = gLeagueSuperLeague;
+			*track = (fixture != NULL) ? fixture->trackID : 0;
+			}
+			break;
+		}
+	}
+
+/*	The grid this screen is laid out on.  Full screen, so 45 characters across and 25 rows	*/
+/*	down, the same as the Hall of Fame - which is what the spacing below is copied from.		*/
+/*																							*/
+/*		 0         1         2         3         4											*/
+/*		 0123456789012345678901234567890123456789012345										*/
+/*	 6	 TRACK            LEAGUE        SUPER												*/
+/*	 8	>LITTLE RAMP      +00  66/61   >-24  4e/49											*/
+/*																							*/
+/*	The marker column in front of each field is what carries the arrows, so a cell only		*/
+/*	ever moves between ' ' and '>' - nothing shifts sideways as the cursor is walked			*/
+/*	around, which is what made the old layout jump.											*/
+#define TUNE_COL_TRACK		0		// marker, then 15 characters of track name
+#define TUNE_COL_LEAGUE		17		// marker, then '+00  66/61'
+#define TUNE_COL_SUPER		31
+
+#define TUNE_ROW_FIRST		8		// first track
+#define TUNE_ROW_STEP		2		// every other row, as the Hall of Fame does
+
+static void DrawTuningCell( int column, int row, int track, bool super, bool live )
+	{
+	const long offset = OpponentTuningGet(track, super);
+
+	/*	An arrow for the cell the keys are on.  The row it is on is already an amber		*/
+	/*	bar, so the arrow is what says which of the row's two cells is being edited.		*/
+	/*	'>' rather than brackets: the Amiga font has no '[' or ']' - the slots those		*/
+	/*	characters fall in hold something else entirely, and printing them draws			*/
+	/*	rubbish.																		*/
+	const bool cursor = (gTuningColumnSuper == super) && (track == gSelection);
+
+	AmigaMenuSetInk(AMIGA_INK_BAR_TEXT);
+	AmigaMenuPrintF(column, row, "%c", cursor ? '>' : ' ');
+
+	/*	Green for the column the next race actually reads and black for the other, so	*/
+	/*	a glance down the table says which numbers are the ones in play.  Both are dark	*/
+	/*	on the light bar, which is the menus' own arrangement - the bar carries the		*/
+	/*	emphasis and the ink stays readable.											*/
+	AmigaMenuSetInk(live ? AMIGA_INK_GREEN : AMIGA_INK_BAR_TEXT);
+
+	/*	The two numbers behind the offset are what is actually being tuned - the base	*/
+	/*	the opponent's top speed is built from and the base of its per-piece target -	*/
+	/*	so show them rather than make the tester hold the table in their head.			*/
+	AmigaMenuPrintF(column + 1, row, "%+03d  %02x/%02x",
+					(int)offset,
+					(unsigned)OpponentTuningBase(track, 8,  super),
+					(unsigned)OpponentTuningBase(track, 24, super));
+	}
+
+static void DrawTuning( void )
+	{
+	/*	The menus' panel grey and the menus' bars, as the Hall of Fame now uses - this	*/
+	/*	is the other full-screen table and the two should not look like different games.	*/
+	AmigaMenuClear(AMIGA_PAPER);
+
+	/*	The inks, which the Hall of Fame now follows too: amber on the paper for the		*/
+	/*	title and for anything the reader has to notice, white on the paper for			*/
+	/*	ordinary text, red for column headings - which sit on a bar, because red on		*/
+	/*	the panel grey is too dark to read a line of - black on a bar for the data,		*/
+	/*	and green on a bar for what the next race will read.							*/
+	AmigaMenuSetInk(AMIGA_BAR_SELECTED);
+	AmigaMenuPrintAt(15, 1, "OPPONENT TUNING");			// centred on 45 columns
+	AmigaMenuPrintAt(3, 2, "Testing only - kept - times not recorded");
+
+	/*	The trap this screen sets is editing one league and racing the other, which		*/
+	/*	looks exactly like tuning that does nothing.  So say outright what the next		*/
+	/*	race will read - the track it will be on and the league it will run under - and	*/
+	/*	mark that column and that row in the table below.								*/
+	bool raceSuper = false;
+	int  raceTrack = 0;
+	NextRaceIntent(&raceSuper, &raceTrack);
+
+	/*	No comma: the Amiga font's comma slot holds one of the junk glyphs and prints	*/
+	/*	as a stray block, so the dash does the separating on this screen.				*/
+	/*																					*/
+	/*	White rather than the green used inside the table: the panel grey out here is	*/
+	/*	dark, and the menu green is dark too - it only reads against a bar.				*/
+	AmigaMenuSetInk(AMIGA_INK_TEXT);
+	AmigaMenuPrintF(0, 4, "Next race: %s - %s",
+					kTrackNames[raceTrack], raceSuper ? "SUPER LEAGUE" : "LEAGUE");
+
+	/*	Row 5 stays blank, so the table below reads as its own block.					*/
+
+	/*	The headings get a bar of their own, which tiles onto the top of the table and	*/
+	/*	gives the dark menu green something light to sit on - on the panel grey it is	*/
+	/*	nearly invisible.																*/
+	AmigaMenuTableRow(6, AMIGA_BAR);
+
+	/*	Headings sit one character in from each field, over the numbers rather than		*/
+	/*	over the marker column, so the live column's own arrow has somewhere to go.		*/
+	/*	'LIVE' fits between the two columns and says in a word what the arrow and the	*/
+	/*	colour say twice over - this is the one the next race will read.				*/
+	AmigaMenuSetInk(AMIGA_INK_RED);
+	AmigaMenuPrintAt(TUNE_COL_TRACK  + 1, 6, "TRACK");
+	AmigaMenuPrintAt(TUNE_COL_LEAGUE + 1, 6, "LEAGUE");
+	AmigaMenuPrintAt(TUNE_COL_SUPER  + 1, 6, "SUPER");
+
+	AmigaMenuSetInk(AMIGA_INK_GREEN);
+	const int liveColumn = raceSuper ? TUNE_COL_SUPER : TUNE_COL_LEAGUE;
+	AmigaMenuPrintAt(liveColumn, 6, ">");
+	AmigaMenuPrintAt(liveColumn + 8, 6, "LIVE");
+
+	for (int track = 0; track < 8; track++)
+		{
+		const int row = TUNE_ROW_FIRST + track * TUNE_ROW_STEP;
+
+		/*	Amber for the row the keys are on, exactly as a menu marks its selected	*/
+		/*	entry, and light grey for the rest.										*/
+		AmigaMenuTableRow(row, (track == gSelection) ? AMIGA_BAR_SELECTED : AMIGA_BAR);
+
+		/*	An arrow against the track the next race is on.  Full names, not the		*/
+		/*	Hall of Fame's short forms: two columns of numbers leave room for them,	*/
+		/*	and 'LITTLE RAMP' saves working out what 'LITTLE' was short for.			*/
+		AmigaMenuSetInk((track == raceTrack) ? AMIGA_INK_GREEN : AMIGA_INK_BAR_TEXT);
+		AmigaMenuPrintF(TUNE_COL_TRACK, row, "%c%-15.15s",
+						(track == raceTrack) ? '>' : ' ', kTrackNames[track]);
+
+		DrawTuningCell(TUNE_COL_LEAGUE, row, track, false, !raceSuper);
+		DrawTuningCell(TUNE_COL_SUPER,  row, track, true,   raceSuper);
+		}
+
+	/*	Row 23 is left blank: the table wants a gap under it before the key list, and	*/
+	/*	which column is being edited is already on the screen twice over - the cursor	*/
+	/*	arrow sits in it, and the green arrow on row 6 says which one the race reads.	*/
+	AmigaMenuSetInk(AMIGA_INK_TEXT);
+	AmigaMenuPrintAt(0, 24, "LR +-1   -/= +-8   TAB column   R reset");
+	}
+
+/*	The original's Load/Save/Replay submenu.  Loading and saving are no longer something	*/
+/*	to ask for - the career is written out after every race and read back at start-up -		*/
+/*	so what is left for this screen is the one decision that is still the player's: keep	*/
+/*	this driver, or start again as someone else.  Replays are still not in the port.		*/
 static void DrawLoadSave( void )
 	{
+	static const char *entries[2] =
+		{
+		"Continue this career",
+		"New driver"
+		};
+
 	AmigaMenuSetInk(AMIGA_INK_TEXT);
-	AmigaMenuPrintAt(12, 10, "Load/Save/Replay");
-	AmigaMenuPrintCentred(14, "Load    Save    Replay");
-	AmigaMenuPrintCentred(17, "Saving a career and replays");
-	AmigaMenuPrintCentred(18, "are not available in this port.");
-	AmigaMenuPrintCentred(21, "Cancel");
-	PressAnyKeyPrompt();
+	AmigaMenuPrintAt(12, 9, "Load/Save/Replay");
+
+	char driver[32];
+	snprintf(driver, sizeof(driver), "Driver: %.12s", gPlayerName);
+	AmigaMenuPrintCentred(11, driver);
+	AmigaMenuPrintCentred(12, "This career saves itself.");
+
+	for (int i = 0; i < 2; i++)
+		{
+		const int row = 14 + i * 3;
+		AmigaMenuBar(row, i == gSelection);
+		AmigaMenuSetInk(AMIGA_INK_BAR_TEXT);
+		AmigaMenuPrintF(MENU_ENTRY_COLUMN, row, "%d. %s", i + 1, entries[i]);
+		}
+
+	AmigaMenuSetInk(AMIGA_INK_TEXT);
+	AmigaMenuPrintCentred(21, "New driver erases this one.");
 	}
 
 /*	======================================================================================= */
@@ -991,6 +1417,14 @@ static void MenuScreensDraw( void )
 		return;
 		}
 
+	/*	Full screen, for the same reason the Hall of Fame is - its table is wider than	*/
+	/*	the menu panel.																	*/
+	if (gScreen == MS_TUNING)
+		{
+		DrawTuning();
+		return;
+		}
+
 	AmigaMenuFrame();
 
 	switch (gScreen)
@@ -1003,6 +1437,7 @@ static void MenuScreensDraw( void )
 		case MS_SELECT:			DrawSelectMenu();		break;
 		case MS_LEAGUE_CHOICE:	DrawLeagueChoice();		break;
 		case MS_PRACTISE_TRACK:	DrawPractiseTracks();	break;
+		case MS_SINGLE_RACE:	DrawSingleRace();		break;
 		case MS_DIVISION:		DrawDivision();			break;
 		case MS_FIXTURE:		DrawFixture();			break;
 		case MS_TRACK_RECORD:	DrawTrackRecord();		break;
@@ -1017,6 +1452,7 @@ static void MenuScreensDraw( void )
 		case MS_MP_TRACK:		DrawMultiplayerTrack();	break;
 		case MS_MP_JOIN:		DrawMultiplayerJoin();	break;
 		case MS_MP_WAIT:		DrawMultiplayerWait();	break;
+		case MS_TUNING:									break;	// handled above
 		}
 	}
 
@@ -1036,12 +1472,18 @@ void MenuScreensRender( IDirect3DDevice9 *pd3dDevice )
 #define KEY_ENTER	SDLK_RETURN
 #define KEY_BACK	SDLK_BACKSPACE
 #define KEY_ESCAPE	SDLK_ESCAPE
+#define KEY_LEFT	SDLK_LEFT
+#define KEY_RIGHT	SDLK_RIGHT
+#define KEY_TAB		SDLK_TAB
 #else
 #define KEY_UP		VK_UP
 #define KEY_DOWN	VK_DOWN
 #define KEY_ENTER	VK_RETURN
 #define KEY_BACK	VK_BACK
 #define KEY_ESCAPE	VK_ESCAPE
+#define KEY_LEFT	VK_LEFT
+#define KEY_RIGHT	VK_RIGHT
+#define KEY_TAB		VK_TAB
 #endif
 
 /*	How many entries the current screen offers, for the up/down keys.						*/
@@ -1051,9 +1493,11 @@ static int EntryCount( void )
 		{
 		/*	'Computer Link' is gone - see DrawMultiplayerMenu.						*/
 		case MS_MAIN:			return 2;
-		case MS_SELECT:			return 4;
+		case MS_SELECT:			return 5;
 		case MS_LEAGUE_CHOICE:	return 2;
 		case MS_PRACTISE_TRACK:	return 8;
+		case MS_TUNING:			return 8;	// up/down walk the tracks; see HandleTuning
+		case MS_LOADSAVE:		return 2;
 		case MS_MP_MENU:		return 2;
 		case MS_MP_TRACK:		return 8;
 		default:				return 0;
@@ -1068,7 +1512,11 @@ static void StartLeagueRace( void )
 		return;
 
 	gRaceIsLeague = true;
+	gRaceIsSingle = false;
 	gRaceTrack    = fixture->trackID;
+
+	/*	A season race is run under the career's own league.								*/
+	gRaceSuperLeague = gLeagueSuperLeague;
 
 	/*	mgs9 stores the fixture's opponent in opponents.ID before previewing the road,	*/
 	/*	so the driver you race is the one the fixture screen just put up against you -	*/
@@ -1085,9 +1533,17 @@ static void HandleNameEntry( int key )
 		{
 		LeagueNewCareer(gNameBuffer);
 
+		/*	A new driver starts with an empty Hall of Fame: the records belong to the	*/
+		/*	career, not to the machine.  Written out straight away so the profile		*/
+		/*	exists from the moment the name is entered, not only once a race is run.		*/
+		MenuScreensClearRecords();
+		ProfileSave();
+
 		/*	main.game.selection: get.players.name, jsr R.648b2 'display opponents',		*/
-		/*	then jsr R.5baea, the SELECT menu.  Nothing else in between.					*/
-		MenuScreensGoto(MS_OPPONENTS);
+		/*	then jsr R.5baea, the SELECT menu.  The port holds the ladder picture		*/
+		/*	back until the season is actually being started - see ActivateLeagueChoice	*/
+		/*	- so the name leads straight to the menu.									*/
+		MenuScreensGoto(MS_SELECT);
 		return;
 		}
 
@@ -1114,6 +1570,16 @@ static void ActivateMain( void )
 	switch (gSelection)
 		{
 		case 0:												// Single Player League
+			/*	A saved career skips the NAME? screen: the driver is already	*/
+			/*	known, so go where the name entry would have gone - the		*/
+			/*	SELECT menu.  'New driver' on the Load/Save screen is how you	*/
+			/*	get the question back.											*/
+			if (ProfileExists())
+				{
+				MenuScreensGoto(MS_SELECT);
+				break;
+				}
+
 			gNameBuffer[0] = '\0';
 			gNameLength    = 0;
 			MenuScreensGoto(MS_NAME_ENTRY);
@@ -1140,7 +1606,12 @@ static void ActivateMain( void )
 static void EnterMultiplayerRace( void )
 	{
 	gRaceIsLeague = false;
+	gRaceIsSingle = false;
 	gRaceTrack    = scr::NetGameTrack();
+
+	/*	Both peers have to agree on the league, and nothing in the handshake carries it,	*/
+	/*	so a network race is run under the career's own - as it always has been.			*/
+	gRaceSuperLeague = gLeagueSuperLeague;
 
 	SetRaceOpponent(MP_OPPONENT_DRIVER);
 
@@ -1167,12 +1638,6 @@ static void HandleAddressEntry( int key )
 			MenuScreensGoto(MS_MP_WAIT);
 		else
 			snprintf(gAddressError, sizeof(gAddressError), "%s", scr::NetGameStatusLine());
-		return;
-		}
-
-	if (key == KEY_ESCAPE)
-		{
-		MenuScreensGoto(MS_MP_MENU);
 		return;
 		}
 
@@ -1250,18 +1715,116 @@ static void ActivateSelect( void )
 			gHallFromMenu = true;
 			MenuScreensGoto(MS_HALL_OF_FAME);
 			break;
-		case 1:	MenuScreensGoto(MS_PRACTISE_TRACK);	break;	// Practise
-		case 2:												// Start the Racing Season
+		case 1:	MenuScreensGoto(MS_PRACTISE_TRACK);	break;	// Time Trial
+		case 2:												// Single Race
+			/*	The league starts on the career's own, which is what a player who	*/
+			/*	just wants "this track again, properly" expects to get.				*/
+			gSingleSuper = gLeagueSuperLeague;
+			MenuScreensGoto(MS_SINGLE_RACE);
+			gSingleField = 0;
+			break;
+		case 3:												// Start the Racing Season
 			/*	mgs9 goes straight to the fixture screen (R.64664) and from there	*/
 			/*	into set.and.preview.road - there is no division screen in between.	*/
 			/*	The port asks which league first; the fixture screen follows from	*/
 			/*	there.  Start on whichever the season is already set to, so a player	*/
 			/*	who earned the Super League keeps it by just pressing RETURN.		*/
+			/*																		*/
+			/*	A season already part-run goes straight back to its next fixture:	*/
+			/*	the league choice would call LeagueStartSeason and throw away the	*/
+			/*	races already in the table.											*/
+			if ((gLeagueRace > 0) && !LeagueSeasonComplete())
+				{
+				MenuScreensGoto(MS_FIXTURE);
+				break;
+				}
+
 			MenuScreensGoto(MS_LEAGUE_CHOICE);
 			gSelection = gLeagueSuperLeague ? 1 : 0;
 			break;
-		case 3:	MenuScreensGoto(MS_LOADSAVE);		break;	// Load/Save/Replay
+		case 4:	MenuScreensGoto(MS_LOADSAVE);		break;	// Load/Save/Replay
 		}
+	}
+
+/*	Start the race the Single Race screen has been set up for.  Not a league race: nothing	*/
+/*	it does reaches the season table, and it comes back to this screen so the same race		*/
+/*	can be run again with one number changed.												*/
+static void StartSingleRace( void )
+	{
+	/*	Random settles on a track here rather than on the menu, so racing the same		*/
+	/*	setting twice gives two different tracks.										*/
+	const int track = (gSingleTrack == RANDOM_TRACK) ? (int)(SCR_Rand() % 8) : gSingleTrack;
+
+	gRaceIsLeague    = false;
+	gRaceIsSingle    = true;
+	gRaceTrack       = track;
+	gRaceSuperLeague = gSingleSuper;
+
+	SetRaceOpponent(gSingleOpponent);
+
+	if (MenuStartTrack(track))
+		gActive = false;
+	}
+
+/*	The Single Race screen's keys: up/down pick a row, left/right change what is on it.		*/
+static bool HandleSingleRace( int key )
+	{
+	int step = 0;
+
+	switch (key)
+		{
+		case KEY_UP:
+			gSingleField = (gSingleField + 2) % 3;
+			return true;
+		case KEY_DOWN:
+			gSingleField = (gSingleField + 1) % 3;
+			return true;
+		case KEY_LEFT:		step = -1;	break;
+		case KEY_RIGHT:		step = +1;	break;
+
+		case KEY_ENTER:
+		case ' ':
+			StartSingleRace();
+			return true;
+
+		default:
+			return false;
+		}
+
+	switch (gSingleField)
+		{
+		case 0:
+			/*	The list runs Random and then the eight tracks, the same shape as	*/
+			/*	the opponent row below it: RANDOM_TRACK is index 0 and track t is	*/
+			/*	index t+1.  The track is drawn when RETURN is pressed, so leaving	*/
+			/*	the row on Random and racing again gives a different one.			*/
+			{
+			int index = (gSingleTrack == RANDOM_TRACK) ? 0 : gSingleTrack + 1;
+			index = (index + 9 + step) % 9;
+			gSingleTrack = (index == 0) ? RANDOM_TRACK : index - 1;
+			}
+			break;
+
+		case 1:
+			{
+			/*	The list runs Nobody, Random, then the eleven drivers, so all three	*/
+			/*	kinds of race - solo, pot luck and a named driver - are one row.		*/
+			int index = (gSingleOpponent == NO_OPPONENT)     ? 0
+					  : (gSingleOpponent == RANDOM_OPPONENT) ? 1
+															 : (int)gSingleOpponent + 2;
+			const int count = NUM_LEAGUE_DRIVERS - 1 + 2;	// the player is not an opponent
+			index = (index + count + step) % count;
+			gSingleOpponent = (index == 0) ? NO_OPPONENT
+							: (index == 1) ? RANDOM_OPPONENT
+										   : (long)(index - 2);
+			}
+			break;
+
+		case 2:
+			gSingleSuper = !gSingleSuper;
+			break;
+		}
+	return true;
 	}
 
 static void ActivateLeagueChoice( void )
@@ -1273,13 +1836,134 @@ static void ActivateLeagueChoice( void )
 	gLeagueSuperLeague = (gSelection == 1);
 
 	LeagueStartSeason();
-	MenuScreensGoto(MS_FIXTURE);
+
+	/*	Show the ladder before the first fixture: with the league settled and the season	*/
+	/*	just laid out, this is the point at which who is in which division is worth		*/
+	/*	looking at.  Fire carries on into the fixture.									*/
+	gOppToFixture = true;
+	MenuScreensGoto(MS_OPPONENTS);
+	}
+
+/*	The tuning screen's own keys.  True when the key has been dealt with; anything left		*/
+/*	over falls through to the shared up/down handling, which walks the eight tracks.			*/
+static bool HandleTuning( int key )
+	{
+	int step = 0;
+
+	switch (key)
+		{
+		case KEY_LEFT:		step = -1;	break;
+		case KEY_RIGHT:		step = +1;	break;
+
+		/*	The coarse step is on the minus and equals keys, which are next to each	*/
+		/*	other and - unlike the comma and full stop this used to use - can both be	*/
+		/*	printed in the key list at the bottom: the Amiga font's comma slot holds	*/
+		/*	a junk glyph.  '+' as well, for anyone who reaches for shift.				*/
+		case '-':			step = -8;	break;
+		case '=':
+		case '+':			step = +8;	break;
+
+		/*	Still accepted, just no longer advertised.								*/
+		case ',':			step = -8;	break;
+		case '.':			step = +8;	break;
+
+		case KEY_TAB:
+			gTuningColumnSuper = !gTuningColumnSuper;
+			return true;
+
+		case 'r':
+		case 'R':
+			OpponentTuningClear();
+			return true;
+
+		case KEY_ENTER:
+		case ' ':
+			MenuScreensGoto(gTuningReturn);
+			return true;
+		}
+
+	if (step == 0)
+		return false;
+
+	OpponentTuningSet(gSelection, gTuningColumnSuper,
+					  OpponentTuningGet(gSelection, gTuningColumnSuper) + step);
+	return true;
+	}
+
+/*	======================================================================================= */
+/*	Function:		MenuScreensBack															*/
+/*																							*/
+/*	Description:	Escape backs out one screen rather than quitting the game outright,		*/
+/*					so every screen the flow can reach is reachable again without			*/
+/*					restarting.  True when the key was dealt with; false only at the two		*/
+/*					screens with nowhere left to go back to (NAME? and the top menu),		*/
+/*					where the caller quits as the original always did.						*/
+/*	======================================================================================= */
+
+bool MenuScreensBack( void )
+	{
+	switch (gScreen)
+		{
+		case MS_NAME_ENTRY:
+		case MS_MAIN:
+			return false;						// nowhere above these: let the caller quit
+
+		case MS_SELECT:
+		case MS_MP_MENU:
+			MenuScreensGoto(MS_MAIN);
+			return true;
+
+		case MS_TUNING:
+			MenuScreensGoto(gTuningReturn);
+			return true;
+
+		case MS_LEAGUE_CHOICE:
+		case MS_PRACTISE_TRACK:
+		case MS_SINGLE_RACE:
+		case MS_LOADSAVE:
+		case MS_DIVISION:
+		case MS_FIXTURE:		/*	the season keeps its place; SELECT returns to it	*/
+			MenuScreensGoto(MS_SELECT);
+			return true;
+
+		case MS_HALL_OF_FAME:
+			/*	Only when it was opened from the menu.  On the way out of a season	*/
+			/*	it is part of the end-of-season run, which fire walks through.		*/
+			if (gHallFromMenu)
+				{
+				gHallFromMenu = false;
+				MenuScreensGoto(MS_SELECT);
+				}
+			return true;
+
+		case MS_MP_TRACK:
+		case MS_MP_JOIN:
+			MenuScreensGoto(MS_MP_MENU);
+			return true;
+
+		case MS_MP_WAIT:
+			scr::NetGameCancel();
+			MenuScreensGoto(MS_MP_MENU);
+			return true;
+
+		default:
+			/*	The result and end-of-season screens are a sequence, not a choice:	*/
+			/*	swallow escape rather than letting it drop out of the game.			*/
+			return true;
+		}
 	}
 
 void MenuScreensKey( int key )
 	{
 	if (key == 0)
 		return;
+
+	/*	Escape means "back" on every screen, including the ones that read text.			*/
+	if (key == KEY_ESCAPE)
+		{
+		MenuScreensBack();
+		return;
+		}
 
 	if (gScreen == MS_NAME_ENTRY)
 		{
@@ -1297,7 +1981,7 @@ void MenuScreensKey( int key )
 	/*	the one that gives up.															*/
 	if (gScreen == MS_MP_WAIT)
 		{
-		if ((key == KEY_ESCAPE) || (key == KEY_ENTER) || (key == ' '))
+		if ((key == KEY_ENTER) || (key == ' '))
 			{
 			scr::NetGameCancel();
 			MenuScreensGoto(MS_MP_MENU);
@@ -1305,10 +1989,52 @@ void MenuScreensKey( int key )
 		return;
 		}
 
-	/*	ESC backs out of the multiplayer screens rather than doing nothing.				*/
-	if ((key == KEY_ESCAPE) && ((gScreen == MS_MP_MENU) || (gScreen == MS_MP_TRACK)))
+	if (gScreen == MS_TUNING)
 		{
-		MenuScreensGoto((gScreen == MS_MP_TRACK) ? MS_MP_MENU : MS_MAIN);
+		if (HandleTuning(key))
+			return;
+		}
+
+	if (gScreen == MS_SINGLE_RACE)
+		{
+		if (HandleSingleRace(key))
+			return;
+		}
+
+	/*	Up and down walk the tracks on the time trial screen, so the league it runs		*/
+	/*	under is on left/right - the only keys that screen has left.						*/
+	if ((gScreen == MS_PRACTISE_TRACK) && ((key == KEY_LEFT) || (key == KEY_RIGHT)))
+		{
+		gPractiseSuper = !gPractiseSuper;
+		return;
+		}
+
+	/*	The Hall of Fame is two tables, one per league, and left/right turns the page.	*/
+	if ((gScreen == MS_HALL_OF_FAME) && ((key == KEY_LEFT) || (key == KEY_RIGHT)))
+		{
+		gHallSuper = !gHallSuper;
+		return;
+		}
+
+	/*	T opens the opponent tuning bench.  Deliberately a key and not a menu entry - it	*/
+	/*	is a developer's screen, and the menus it hangs off are the original's.  It is	*/
+	/*	reachable from the Single Race screen as well as from SELECT, because that is	*/
+	/*	the screen a tester goes back and forth to: set a number here, race it there.	*/
+	if (((gScreen == MS_SELECT) || (gScreen == MS_SINGLE_RACE))
+		&& ((key == 't') || (key == 'T')))
+		{
+		gTuningReturn = gScreen;
+		MenuScreensGoto(MS_TUNING);
+
+		/*	Open on the track and the league the next race will actually use, so		*/
+		/*	the keys are on the live cell before anything is typed - editing the		*/
+		/*	other league's column and seeing no change is the mistake this screen	*/
+		/*	otherwise invites.														*/
+		bool super = false;
+		int  track = 0;
+		NextRaceIntent(&super, &track);
+		gTuningColumnSuper = super;
+		gSelection         = track;
 		return;
 		}
 
@@ -1342,13 +2068,23 @@ void MenuScreensKey( int key )
 		case MS_SELECT:			ActivateSelect();	break;
 		case MS_LEAGUE_CHOICE:	ActivateLeagueChoice();	break;
 
-		/*	Shown after the name has been entered, and again once a season is over.	*/
-		case MS_OPPONENTS:		MenuScreensGoto(MS_SELECT);		break;
+		/*	Shown on the way into a season, and again once one is over.				*/
+		case MS_OPPONENTS:
+			if (gOppToFixture)
+				{
+				gOppToFixture = false;
+				MenuScreensGoto(MS_FIXTURE);
+				}
+			else
+				MenuScreensGoto(MS_SELECT);
+			break;
 
 		case MS_PRACTISE_TRACK:
-			gRaceIsLeague = false;
-			gRaceTrack    = gSelection;
-			SetRaceOpponent(NO_OPPONENT);		// practise is solo
+			gRaceIsLeague    = false;
+			gRaceIsSingle    = false;
+			gRaceTrack       = gSelection;
+			gRaceSuperLeague = gPractiseSuper;
+			SetRaceOpponent(NO_OPPONENT);		// a time trial is solo
 			if (MenuStartTrack(gSelection))
 				gActive = false;
 			break;
@@ -1362,8 +2098,11 @@ void MenuScreensKey( int key )
 		case MS_RACE_WIN:
 		case MS_RACE_LOST:
 			/*	The record screen only appears when the race actually beat one.	*/
+			/*	gRecordScreenReturn is the RESULT screen for a league race and	*/
+			/*	the menu for anything else - a single race has no season figures	*/
+			/*	behind it to show.												*/
 			MenuScreensGoto((gNewRecordRace || gNewRecordLap) ? MS_TRACK_RECORD
-															  : MS_RESULT);
+															  : gRecordScreenReturn);
 			break;
 
 		case MS_TRACK_RECORD:
@@ -1385,6 +2124,7 @@ void MenuScreensKey( int key )
 			{
 			const bool wasTop = (LeaguePlayerDivision() == NUM_DIVISIONS - 1);
 			LeagueEndSeason(gPromoted, gRelegated, sizeof(gPromoted));
+			SaveCareer();
 			if (wasTop && gLeagueSuperLeague)
 				MenuScreensGoto(MS_SUPER_LEAGUE);
 			else
@@ -1406,7 +2146,22 @@ void MenuScreensKey( int key )
 				MenuScreensGoto(MS_OPPONENTS);
 			break;
 
-		case MS_LOADSAVE:		MenuScreensGoto(MS_SELECT);			break;
+		case MS_LOADSAVE:
+			if (gSelection == 1)
+				{
+				/*	Start again: throw the saved career away and go back to	*/
+				/*	the NAME? screen through the main menu, which is where	*/
+				/*	a driver with no profile starts.						*/
+				ProfileDelete();
+				LeagueNewCareer("");
+				MenuScreensClearRecords();
+				gNameBuffer[0] = '\0';
+				gNameLength    = 0;
+				MenuScreensGoto(MS_NAME_ENTRY);
+				}
+			else
+				MenuScreensGoto(MS_SELECT);
+			break;
 
 		case MS_MP_MENU:		ActivateMultiplayerMenu();			break;
 
@@ -1448,6 +2203,11 @@ void MenuScreensAbandonRace( void )
 		gRaceIsLeague = false;
 		MenuScreensGoto(MS_FIXTURE);		// the fixture stands, run it again
 		}
+	else if (gRaceIsSingle)
+		{
+		gRaceIsSingle = false;
+		MenuScreensGoto(MS_SINGLE_RACE);	// back to the set-up, unchanged
+		}
 	else
 		MenuScreensGoto(MS_SELECT);
 	}
@@ -1467,20 +2227,50 @@ void MenuScreensRaceFinished( bool playerWon, bool playerBestLap,
 
 	/*	Note what this run took before handing the times to the record table, so the		*/
 	/*	'New track records' screen knows whether it has anything to say.					*/
-	gNewRecordTrack  = gRaceTrack;
-	gNewRecordLap    = (playerLapTime  > 0.0) && ((gRecordLap[gRaceTrack]  == 0.0) ||
-												  (playerLapTime  < gRecordLap[gRaceTrack]));
-	gNewRecordRace   = (playerRaceTime > 0.0) && ((gRecordRace[gRaceTrack] == 0.0) ||
-												  (playerRaceTime < gRecordRace[gRaceTrack]));
+	/*	A race run against tuned opposition is not a race anyone can hold a record from,	*/
+	/*	so the Hall of Fame ignores it entirely - no time taken, and nothing claimed on	*/
+	/*	the record screen.  The season still scores: the tuning bench is for driving the	*/
+	/*	same fixture over and over, and refusing to advance it would defeat that.		*/
+	const bool tuned = OpponentTuningActive();
 
-	MenuScreensRecordTimes(gRaceTrack, PLAYER_DRIVER, playerLapTime, playerRaceTime);
+	/*	The record this race is measured against is the one from its own league.			*/
+	const int raceLeague = gRaceSuperLeague ? 1 : 0;
+
+	gNewRecordTrack  = gRaceTrack;
+	gNewRecordSuper  = gRaceSuperLeague;
+	gNewRecordLap    = !tuned && (playerLapTime  > 0.0) &&
+					   ((gRecordLap[raceLeague][gRaceTrack]  == 0.0) ||
+						(playerLapTime  < gRecordLap[raceLeague][gRaceTrack]));
+	gNewRecordRace   = !tuned && (playerRaceTime > 0.0) &&
+					   ((gRecordRace[raceLeague][gRaceTrack] == 0.0) ||
+						(playerRaceTime < gRecordRace[raceLeague][gRaceTrack]));
+
+	if (!tuned)
+		MenuScreensRecordTimes(gRaceTrack, gRaceSuperLeague, PLAYER_DRIVER,
+							   playerLapTime, playerRaceTime);
 
 	if (!gRaceIsLeague)
 		{
-		/*	A practise run still counts for the Hall of Fame, and still gets told		*/
-		/*	when it has set a record - there is just no result to score behind it.		*/
-		gRecordScreenReturn = MS_SELECT;
-		MenuScreensGoto((gNewRecordRace || gNewRecordLap) ? MS_TRACK_RECORD : MS_SELECT);
+		/*	A time trial still counts for the Hall of Fame, and still gets told when		*/
+		/*	it has set a record - there is just no result to score behind it.			*/
+		SaveCareer();
+
+		/*	A single race comes back to the screen it was set up on, so the same		*/
+		/*	race can be run again with one thing changed.  It had an opponent, so		*/
+		/*	it gets the winner's or loser's picture first - just not the RESULT			*/
+		/*	screen, which is the season's.											*/
+		const bool single    = gRaceIsSingle;
+		gRaceIsSingle        = false;
+		gRecordScreenReturn  = single ? MS_SINGLE_RACE : MS_SELECT;
+
+		if (single && (gSingleOpponent != NO_OPPONENT))
+			{
+			MenuScreensGoto(playerWon ? MS_RACE_WIN : MS_RACE_LOST);
+			return;
+			}
+
+		MenuScreensGoto((gNewRecordRace || gNewRecordLap) ? MS_TRACK_RECORD
+														  : gRecordScreenReturn);
 		return;
 		}
 
@@ -1489,26 +2279,74 @@ void MenuScreensRaceFinished( bool playerWon, bool playerBestLap,
 	LeagueRecordResult(playerWon, playerBestLap);
 	gRaceIsLeague = false;
 
+	/*	Saved here rather than at the end of the season, so a career put down halfway		*/
+	/*	through picks up at the next fixture with the table as it stood.					*/
+	SaveCareer();
+
 	/*	The picture comes first and the RESULT screen behind it, so you see how the race	*/
 	/*	went before you are told what it was worth.										*/
 	MenuScreensGoto(playerWon ? MS_RACE_WIN : MS_RACE_LOST);
 	}
 
 /*	Record a lap or race time against a track, for the Hall of Fame.						*/
-void MenuScreensRecordTimes( int trackID, int driver, double lapTime, double raceTime )
+void MenuScreensRecordTimes( int trackID, bool superLeague, int driver,
+							 double lapTime, double raceTime )
 	{
 	if ((trackID < 0) || (trackID >= 8))
 		return;
 
-	if ((lapTime > 0.0) && ((gRecordLap[trackID] == 0.0) || (lapTime < gRecordLap[trackID])))
+	const int league = superLeague ? 1 : 0;
+
+	if ((lapTime > 0.0) &&
+		((gRecordLap[league][trackID] == 0.0) || (lapTime < gRecordLap[league][trackID])))
 		{
-		gRecordLap[trackID]       = lapTime;
-		gRecordLapDriver[trackID] = driver;
+		gRecordLap[league][trackID]       = lapTime;
+		gRecordLapDriver[league][trackID] = driver;
 		}
 
-	if ((raceTime > 0.0) && ((gRecordRace[trackID] == 0.0) || (raceTime < gRecordRace[trackID])))
+	if ((raceTime > 0.0) &&
+		((gRecordRace[league][trackID] == 0.0) || (raceTime < gRecordRace[league][trackID])))
 		{
-		gRecordRace[trackID]       = raceTime;
-		gRecordRaceDriver[trackID] = driver;
+		gRecordRace[league][trackID]       = raceTime;
+		gRecordRaceDriver[league][trackID] = driver;
 		}
+	}
+
+/*	The record table as the profile sees it - straight reads and writes, no comparing.		*/
+void MenuScreensGetRecord( int trackID, int league, double *lapTime, int *lapDriver,
+													double *raceTime, int *raceDriver )
+	{
+	if ((trackID < 0) || (trackID >= MENU_RECORD_TRACKS) ||
+		(league  < 0) || (league  >= MENU_RECORD_LEAGUES))
+		return;
+
+	if (lapTime)    *lapTime    = gRecordLap[league][trackID];
+	if (lapDriver)  *lapDriver  = gRecordLapDriver[league][trackID];
+	if (raceTime)   *raceTime   = gRecordRace[league][trackID];
+	if (raceDriver) *raceDriver = gRecordRaceDriver[league][trackID];
+	}
+
+void MenuScreensSetRecord( int trackID, int league, double lapTime, int lapDriver,
+													double raceTime, int raceDriver )
+	{
+	if ((trackID < 0) || (trackID >= MENU_RECORD_TRACKS) ||
+		(league  < 0) || (league  >= MENU_RECORD_LEAGUES))
+		return;
+
+	gRecordLap[league][trackID]        = lapTime;
+	gRecordLapDriver[league][trackID]  = lapDriver;
+	gRecordRace[league][trackID]       = raceTime;
+	gRecordRaceDriver[league][trackID] = raceDriver;
+	}
+
+void MenuScreensClearRecords( void )
+	{
+	for (int league = 0; league < MENU_RECORD_LEAGUES; league++)
+		for (int i = 0; i < MENU_RECORD_TRACKS; i++)
+			{
+			gRecordLap[league][i]        = 0.0;
+			gRecordRace[league][i]       = 0.0;
+			gRecordLapDriver[league][i]  = -1;
+			gRecordRaceDriver[league][i] = -1;
+			}
 	}

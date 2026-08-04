@@ -125,6 +125,12 @@ void AmigaMenuBar( int row, bool selected = true );
 /*	How tall that bar is, for anything that has to fill its own slab to match.				*/
 #define MENU_BAR_HEIGHT		17
 
+/*	The same slab for the two full-screen tables (Hall of Fame, opponent tuning): full		*/
+/*	screen width rather than panel width, and exactly the two-row pitch those tables use,	*/
+/*	so consecutive rows tile instead of overlapping.  Pass AMIGA_BAR for an ordinary row		*/
+/*	and AMIGA_BAR_SELECTED for the one being pointed at, as the menus do.					*/
+void AmigaMenuTableRow( int row, const AmigaPen &pen );
+
 /*	The pixel row the top of that bar lands on, for anything that has to be positioned		*/
 /*	against the bar rather than against the character grid.									*/
 int AmigaMenuBarY( int row );

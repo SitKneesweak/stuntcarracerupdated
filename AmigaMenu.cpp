@@ -369,6 +369,37 @@ void AmigaMenuBar( int row, bool selected )
 	}
 
 /*	======================================================================================= */
+/*	Function:		AmigaMenuTableRow														*/
+/*																							*/
+/*	Description:	The same slab as the menu bar, for the two full-screen tables.  Those	*/
+/*					sit outside the frame and are twice as wide as the panel, and their		*/
+/*					rows are two apart rather than three - so this is a bar of exactly one	*/
+/*					pair of rows, which tiles with the ones above and below it instead of	*/
+/*					overlapping them, and it spans the whole screen rather than the panel.	*/
+/*																						*/
+/*					The black rule along the bottom is the menu bar's, and does the same	*/
+/*					job: it is what keeps a run of same-coloured rows from reading as one	*/
+/*					slab.  No white rule along the top - at this pitch there is no room		*/
+/*					for both, and the dark one is the one that separates.					*/
+/*	======================================================================================= */
+
+#define MENU_TABLE_ROW_HEIGHT	(2 * AMIGA_FONT_HEIGHT)		// the tables' row pitch
+
+void AmigaMenuTableRow( int row, const AmigaPen &pen )
+	{
+	const int y0 = AmigaMenuBarY(row);
+
+	for (int y = 0; y < MENU_TABLE_ROW_HEIGHT; y++)
+		{
+		const AmigaPen &line = (y == MENU_TABLE_ROW_HEIGHT - 1) ? AMIGA_INK_BLACK : pen;
+
+		for (int x = 0; x < AMIGA_SCREEN_WIDTH; x++)
+			PutPixel(x, y0 + y, line);
+		}
+	gSurfaceDirty = true;
+	}
+
+/*	======================================================================================= */
 /*	Presentation																			*/
 /*	======================================================================================= */
 

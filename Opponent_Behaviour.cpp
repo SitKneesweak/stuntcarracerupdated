@@ -11,8 +11,10 @@
 #include "dxstdafx.h"
 
 #include <stdlib.h>
+#include <stdio.h>
 
 #include "StuntCarRacer.h"
+#include "Profile.h"	// ProfileDataPath - where the tuning offsets are kept
 #include "Opponent_Behaviour.h"
 #include "Car_Behaviour.h"
 #include "Track.h"
@@ -208,6 +210,170 @@ static unsigned char opp_track_speed_values[] =	//DAT.1fe2c
 	0x07,0x03,0x03,0x03,0x03,0x01,0x03,0x03,	// used when creating opponents.speed.values
 	0x61,0x55,0x53,0x56,0x58,0x5b,0x5a,0x62		// used when creating opponents.speed.values
 };
+
+/*	The two groups above that this port lets a tester move: the base a track's speeds are	*/
+/*	built up from, once for the max speed the opponent will hold and once for the target	*/
+/*	speed of an individual piece.  The random masks either side of them are left alone -	*/
+/*	they are what makes two races on the same track differ, and widening them would change	*/
+/*	the character of the driving rather than its pace.										*/
+#define OPP_SPEED_GROUP_MAX_SPEED	8
+#define OPP_SPEED_GROUP_PER_PIECE	24
+
+/*	Tuning offsets, [league][track], applied to both bases.  Kept in their own file next		*/
+/*	to the profile rather than inside it: finding a number takes more than one sitting, so	*/
+/*	the offsets have to outlive the run that found them, but they are a developer's			*/
+/*	workings and have no business in a player's career file - and they should survive a		*/
+/*	new driver, which wipes that file.  What does not change is that any offset at all		*/
+/*	stops times being recorded, so a tuned session still cannot set a record.				*/
+static signed char gOppSpeedTuning[2][NUM_TRACKS] = { { 0 }, { 0 } };
+
+#define OPP_TUNING_FILE		"tuning.txt"
+#define OPP_TUNING_VERSION	1
+
+/*	Bumped on every edit, so Opponent_Speed_Value's one-entry cache cannot answer from		*/
+/*	before a change - the tuning screen is reached between races, exactly when the piece		*/
+/*	and track it caches on are unchanged.													*/
+static long gOppSpeedTuningEdits = 0;
+
+/*	Set while the file is being read back, so the writes that reading does are not each		*/
+/*	written straight out again over the file still being read.								*/
+static bool gOppSpeedTuningLoading = false;
+
+/*	Write the offsets out, or remove the file once they are all back to zero - a reset		*/
+/*	should leave nothing behind to be loaded next time.  Silent on failure, as the profile	*/
+/*	is: a bench that cannot save is still a bench.											*/
+static void OpponentTuningSave( void )
+	{
+	if (gOppSpeedTuningLoading)
+		return;
+
+	const char *path = ProfileDataPath(OPP_TUNING_FILE);
+	if (path == NULL)
+		return;
+
+	if (!OpponentTuningActive())
+		{
+		remove(path);
+		return;
+		}
+
+	FILE *f = fopen(path, "w");
+	if (f == NULL)
+		return;
+
+	fprintf(f, "StuntCarRacerTuning %d\n", OPP_TUNING_VERSION);
+
+	/*	Only the tracks that have been moved, so the file reads as a list of what was	*/
+	/*	changed rather than a table of mostly zeroes.									*/
+	for (int league = 0; league < 2; league++)
+		for (int track = 0; track < NUM_TRACKS; track++)
+			if (gOppSpeedTuning[league][track] != 0)
+				fprintf(f, "tuning %d %d %d\n", league, track,
+						(int)gOppSpeedTuning[league][track]);
+
+	fclose(f);
+	}
+
+void OpponentTuningLoad( void )
+	{
+	gOppSpeedTuningLoading = true;
+
+	/*	Start from stock, so a second call cannot add to what the first one read.		*/
+	OpponentTuningClear();
+
+	const char *path = ProfileDataPath(OPP_TUNING_FILE);
+	FILE *f = (path != NULL) ? fopen(path, "r") : NULL;
+
+	/*	Nothing saved is the normal case: stock speeds, and no file to write until		*/
+	/*	something is actually tuned.													*/
+	if (f != NULL)
+		{
+		char line[256];
+		int  version = 0;
+
+		if ((fgets(line, sizeof(line), f) != NULL) &&
+			(sscanf(line, "StuntCarRacerTuning %d", &version) == 1) &&
+			(version >= 1) && (version <= OPP_TUNING_VERSION))
+			{
+			while (fgets(line, sizeof(line), f) != NULL)
+				{
+				int league = 0, track = 0, offset = 0;
+				if (sscanf(line, "tuning %d %d %d", &league, &track, &offset) != 3)
+					continue;	// a line from a build that knows more than this one
+
+				if ((league < 0) || (league > 1))
+					continue;
+
+				/*	Through OpponentTuningSet for the range clamp, so a hand-edited	*/
+				/*	file cannot put a base somewhere the table cannot hold.			*/
+				OpponentTuningSet(track, league != 0, offset);
+				}
+			}
+
+		fclose(f);
+		}
+
+	gOppSpeedTuningLoading = false;
+	}
+
+long OpponentTuningGet( long trackID, bool superLeague )
+	{
+	if ((trackID < 0) || (trackID >= NUM_TRACKS))
+		return 0;
+	return gOppSpeedTuning[superLeague ? 1 : 0][trackID];
+	}
+
+void OpponentTuningSet( long trackID, bool superLeague, long offset )
+	{
+	if ((trackID < 0) || (trackID >= NUM_TRACKS))
+		return;
+
+	if (offset < OPPONENT_TUNING_MIN) offset = OPPONENT_TUNING_MIN;
+	if (offset > OPPONENT_TUNING_MAX) offset = OPPONENT_TUNING_MAX;
+
+	gOppSpeedTuning[superLeague ? 1 : 0][trackID] = (signed char)offset;
+	gOppSpeedTuningEdits++;
+
+	/*	Written out on every edit rather than on the way out of the game: the bench is	*/
+	/*	used by racing, and a race is left by whatever route the tester feels like,		*/
+	/*	including closing the window.  One small file per keypress is nothing.			*/
+	OpponentTuningSave();
+	}
+
+void OpponentTuningClear( void )
+	{
+	for (int league = 0; league < 2; league++)
+		for (int track = 0; track < NUM_TRACKS; track++)
+			gOppSpeedTuning[league][track] = 0;
+
+	gOppSpeedTuningEdits++;
+	OpponentTuningSave();		// removes the file - a reset leaves nothing behind
+	}
+
+bool OpponentTuningActive( void )
+	{
+	for (int league = 0; league < 2; league++)
+		for (int track = 0; track < NUM_TRACKS; track++)
+			if (gOppSpeedTuning[league][track] != 0)
+				return TRUE;
+	return FALSE;
+	}
+
+/*	A track's base speed for one of the two groups, with the tuning offset folded in and		*/
+/*	held inside the byte the table stores - the values are used as unsigned 7-bit speeds,	*/
+/*	and a base that wrapped would make the opponent crawl rather than slow down.				*/
+long OpponentTuningBase( long trackID, long group, bool superLeague )
+	{
+	if ((trackID < 0) || (trackID >= NUM_TRACKS))
+		trackID = 0;
+
+	long value = static_cast<long>(opp_track_speed_values[trackID + group + (superLeague ? 32 : 0)]);
+	value += OpponentTuningGet(trackID, superLeague);
+
+	if (value < 0)     value = 0;
+	if (value > 0x7f)  value = 0x7f;
+	return value;
+	}
 
 static long opponents_distance_into_section;
 static long opponents_road_x_position;
@@ -420,7 +586,7 @@ void OpponentBehaviour (long *x,
 
 		// Set opponent_max_speed
 		long s = static_cast<long>(SCR_Rand()) & static_cast<long>(opp_track_speed_values[TrackID+(bSuperLeague?32:0)]);
-		s += static_cast<long>(opp_track_speed_values[TrackID+8+(bSuperLeague?32:0)]);
+		s += OpponentTuningBase(TrackID, OPP_SPEED_GROUP_MAX_SPEED, bSuperLeague);
 		opponents_max_speed = s;
 //temp		opponents_max_speed = 10;
 
@@ -1391,16 +1557,18 @@ srd114	move.l	#opponents.speed.values,a1
 	static long oldtrack = -1;
 	static bool oldleague = false;
 	static long oldspeed = 0;
-	if(pos==oldpos && oldtrack==track_id && oldleague==bSuperLeague)
+	static long oldedits = -1;
+	if(pos==oldpos && oldtrack==track_id && oldleague==bSuperLeague && oldedits==gOppSpeedTuningEdits)
 		return oldspeed;
 	oldpos = pos;
 	oldleague = bSuperLeague;
 	oldtrack = track_id;
+	oldedits = gOppSpeedTuningEdits;
 
 	long b = Piece_Angle_And_Template[pos];
 	b = sections_car_can_be_put_on[b&0x0f];
 	long B63ce1 = static_cast<long>(SCR_Rand()) & static_cast<long>(opp_track_speed_values[track_id+16+(bSuperLeague?32:0)]);
-		 B63ce1 += static_cast<long>(opp_track_speed_values[track_id+24+(bSuperLeague?32:0)]);
+		 B63ce1 += OpponentTuningBase(track_id, OPP_SPEED_GROUP_PER_PIECE, bSuperLeague);
 	long /*value,*/ d0;
 	if (b<0) {
 		//value = B63ce1-10;

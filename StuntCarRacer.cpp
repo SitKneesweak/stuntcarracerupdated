@@ -100,7 +100,7 @@ bool bNewGame = FALSE;
 bool bPaused = FALSE;
 bool bPlayerPaused = FALSE;
 bool bOpponentPaused = FALSE;
-// Escape during a race asks before quitting rather than dropping out instantly.
+// Escape during a race asks before leaving it rather than dropping out instantly.
 // bQuitConfirmWasPaused remembers whether the game was already paused (via 'P')
 // so cancelling puts things back the way they were.
 bool bQuitConfirm = FALSE;
@@ -2013,9 +2013,12 @@ static float lastFrame = 0.0f;
 
 bool MenuStartTrack( int trackID )
 	{
-	if (bSuperLeague != gLeagueSuperLeague)
+	/*	Not gLeagueSuperLeague directly: the Single Race screen runs a race in whichever	*/
+	/*	league it was asked for, and everything downstream - engine, boost, colours and	*/
+	/*	the opponent speed table - keys off this one flag.								*/
+	if (bSuperLeague != MenuScreensRaceSuperLeague())
 		{
-		bSuperLeague = gLeagueSuperLeague;
+		bSuperLeague = MenuScreensRaceSuperLeague();
 		CreateCarVertexBuffer(DXUTGetD3DDevice());		// recreate car in league colours
 		}
 
@@ -2040,6 +2043,32 @@ bool MenuStartTrack( int trackID )
 	return true;
 	}
 
+/*	======================================================================================= */
+/*	Function:		ReturnToMenus															*/
+/*																							*/
+/*	Description:	Leave the race (or its preview) without scoring it and put the Amiga		*/
+/*					menus back up.  Shared by the 'M' key and the Escape prompt so the		*/
+/*					two cannot drift apart.													*/
+/*	======================================================================================= */
+
+static void ReturnToMenus( void )
+	{
+	if (GameMode == TRACK_MENU)
+		return;
+
+	GameMode    = TRACK_MENU;
+	opponentsID = NO_OPPONENT;
+
+	// reset all animated objects
+	ResetDrawBridge();
+
+	bQuitConfirm  = FALSE;
+	bPaused       = FALSE;
+	bPlayerPaused = bOpponentPaused = FALSE;
+
+	MenuScreensAbandonRace();
+	}
+
 static void HandleTrackMenu( CDXUTTextHelper &txtHelper )
 	{
 	long i, track_number;
@@ -2057,7 +2086,7 @@ static void HandleTrackMenu( CDXUTTextHelper &txtHelper )
 	// output instructions
 	const D3DSURFACE_DESC *pd3dsdBackBuffer = DXUTGetBackBufferSurfaceDesc();
 	txtHelper.SetInsertionPos( static_cast<int>((2+(wideScreen?10:0)) * textScale), static_cast<int>(pd3dsdBackBuffer->Height-15*8*textScale) );
-	txtHelper.DrawFormattedTextLine( L"Current track - " STRING L".  Press 'S' to select, Escape to quit", (TrackID == NO_TRACK ? L"None" : GetTrackName(TrackID)));
+	txtHelper.DrawFormattedTextLine( L"Current track - " STRING L".  Press 'S' to select, Escape for the menu", (TrackID == NO_TRACK ? L"None" : GetTrackName(TrackID)));
 	txtHelper.DrawTextLine( L"'L' to switch Super League On/Off");
 
 	if (((keyPress >= firstMenuOption) && (keyPress <= lastMenuOption)) || (keyPress == LEAGUEMENU))
@@ -2121,8 +2150,8 @@ static void HandleTrackPreview( CDXUTTextHelper &txtHelper )
 	txtHelper.SetInsertionPos( static_cast<int>((2+(wideScreen?10:0)) * textScale), static_cast<int>(pd3dsdBackBuffer->Height-15*9*textScale) );
 	txtHelper.DrawFormattedTextLine( L"Selected track - " STRING L".  Press 'S' to start game", (TrackID == NO_TRACK ? L"None" : GetTrackName(TrackID)));
 	txtHelper.DrawTextLine( bAmigaTrackPreview
-							? L"'M' for track menu, steer to rotate view, Escape to quit"
-							: L"'M' for track menu, Escape to quit");
+							? L"'M' for track menu, steer to rotate view, Escape for the menu"
+							: L"'M' for track menu, Escape for the menu");
 	txtHelper.DrawTextLine( L"(Press F4 to change scenery, F9 / F10 to adjust frame rate)" );
 
 	txtHelper.SetInsertionPos( static_cast<int>((2+(wideScreen?10:0)) * textScale), static_cast<int>(pd3dsdBackBuffer->Height-15*6*textScale) );
@@ -2133,7 +2162,7 @@ static void HandleTrackPreview( CDXUTTextHelper &txtHelper )
 	txtHelper.DrawTextLine( L"  Arrow left = Steer left, Arrow right = Steer right, Space = Accelerate, Arrow Down = Brake" );
 	#endif
 	txtHelper.DrawTextLine( L"  R = Point car in opposite direction, P = Pause, O = Unpause" );
-	txtHelper.DrawTextLine( L"  M = Back to track menu, Escape = Quit" );
+	txtHelper.DrawTextLine( L"  M = Back to track menu, Escape = Back to menu" );
 
 	HandleTrackPreviewInput();
 
@@ -2484,8 +2513,8 @@ void RenderText( double fTime )
 				#define CONFIRM_X(text)	((static_cast<int>(pd3dsdBackBuffer->Width) \
 										  - static_cast<int>(wcslen(text)) * advance) / 2)
 
-				const WCHAR *line1 = L"QUIT GAME?";
-				const WCHAR *line2 = L"ESC TO CANCEL, ENTER TO QUIT";
+				const WCHAR *line1 = L"LEAVE THE RACE?";
+				const WCHAR *line2 = L"ESC TO CANCEL, ENTER FOR THE MENU";
 
 				txtHelperConfirm.Begin();
 				txtHelperConfirm.SetForegroundColor( D3DXCOLOR( 1.0f, 1.0f, 1.0f, 1.0f ) );
@@ -3324,17 +3353,7 @@ void CALLBACK KeyboardProc( UINT nChar, bool bKeyDown, bool bAltDown, void *pUse
             break;
 #endif
 		case 'M':
-			if (GameMode != TRACK_MENU)
-			{
-				GameMode = TRACK_MENU;
-
-				opponentsID = NO_OPPONENT;
-
-				// reset all animated objects
-				ResetDrawBridge();
-
-				MenuScreensAbandonRace();
-			}
+			ReturnToMenus();
             break;
 
 		case 'O':
@@ -3560,19 +3579,32 @@ bool process_events()
 			// and menu selection all go to them, and none of the in-game keys apply.
 			if (MenuScreensActive())
 			{
+				// Escape backs out one screen, and only quits from the top of the
+				// menu tree - otherwise there is no way back to a screen once it
+				// has been left.
 				if (keyPress == SDLK_ESCAPE)
-					return false;			// quit, as the menus always allowed
+				{
+					if (!MenuScreensBack())
+						return false;
+					keyPress = '\0';
+					break;
+				}
 				MenuScreensKey( keyPress );
 				keyPress = '\0';
 				break;
 			}
 
 			// The quit prompt owns the keyboard while it is up: Escape backs out,
-			// Enter quits, everything else is swallowed so the car cannot be driven.
+			// Enter leaves the race, everything else is swallowed so the car cannot
+			// be driven.
 			if (bQuitConfirm)
 			{
 				if (keyPress == SDLK_RETURN || keyPress == SDLK_KP_ENTER)
-					return false;
+				{
+					ReturnToMenus();		// clears the prompt and the freeze
+					keyPress = '\0';
+					break;
+				}
 				if (keyPress == SDLK_ESCAPE)
 				{
 					bQuitConfirm = FALSE;
@@ -3772,17 +3804,7 @@ bool process_events()
 					break;
 
 				case SDLK_m:
-					if (GameMode != TRACK_MENU)
-					{
-						GameMode = TRACK_MENU;
-
-						opponentsID = NO_OPPONENT;
-
-						// reset all animated objects
-						ResetDrawBridge();
-
-						MenuScreensAbandonRace();
-					}
+					ReturnToMenus();
 					break;
 
 				case SDLK_o:
@@ -3835,7 +3857,7 @@ bool process_events()
 					break;
 
 				case SDLK_ESCAPE:
-					// Quitting out from under a race is too easy to do by accident,
+					// Dropping out from under a race is too easy to do by accident,
 					// so put a confirmation up and freeze the race behind it.
 					if ((GameMode == GAME_IN_PROGRESS) || (GameMode == GAME_OVER))
 					{
@@ -3849,7 +3871,10 @@ bool process_events()
 							bPaused = TRUE;
 						break;
 					}
-					return false;
+					// Anywhere else in the game (the track preview) escape just goes
+					// back to the menus, which is where quitting now lives.
+					ReturnToMenus();
+					break;
 				}
             break;
         case SDL_KEYUP:
@@ -4138,7 +4163,16 @@ int main(int argc, char** argv)
     SDL_GL_SetAttribute( SDL_GL_RED_SIZE, 5 );
     SDL_GL_SetAttribute( SDL_GL_GREEN_SIZE, 5 );
     SDL_GL_SetAttribute( SDL_GL_BLUE_SIZE, 5 );
-    SDL_GL_SetAttribute( SDL_GL_DEPTH_SIZE, 16 );
+	/*	24 bits of depth, not 16.  Depth resolution falls off as z^2: the world-space gap
+		between two representable depths is about z^2 / (zn * 2^bits), and this frustum is
+		zn 0.5 to FURTHEST_Z 131072 - a 262144:1 ratio, which spends nearly all of a 16-bit
+		buffer inside the first few units.  At 3000 units out the gap was ~275 world units
+		and the opponent's car is only ~240 long, so the car and the road it stands on
+		landed in the same bucket and rounding decided which one you saw.  That is the
+		opponent flickering and vanishing through a 180: the car is far away and there is
+		road behind it in every direction to lose against.  8 more bits is 256x finer.
+		Asked for, not required - SDL will hand back whatever the driver has.			*/
+	SDL_GL_SetAttribute( SDL_GL_DEPTH_SIZE, 24 );
     SDL_GL_SetAttribute( SDL_GL_DOUBLEBUFFER, 1 );
 
 #if defined(PANDORA)

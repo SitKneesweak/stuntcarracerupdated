@@ -15,13 +15,16 @@ ifeq ($(OS),Windows_NT)
     LIBS += -lws2_32
 endif
 
-TESTS = net_socket_test
+TESTS = net_socket_test profile_test
 ifneq ($(OS),Windows_NT)
     # needs fork()
     TESTS += net_lockstep_test
 endif
 
 all: $(TESTS)
+
+profile_test: profile_test.cpp ../Profile.cpp ../League.cpp ../Profile.h ../League.h
+	$(CXX) $(CXXFLAGS) -o $@ profile_test.cpp ../Profile.cpp ../League.cpp
 
 net_socket_test: net_socket_test.cpp ../Net_Socket.cpp ../Net_Socket.h
 	$(CXX) $(CXXFLAGS) -o $@ net_socket_test.cpp ../Net_Socket.cpp $(LIBS)
