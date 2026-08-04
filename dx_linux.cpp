@@ -662,10 +662,12 @@ static const char* kSharpFragmentShader =
 	"  vec2 scale = max(1.0 / max(fwidth(texel), vec2(1e-6)), vec2(1.0));\n"
 	// Push the sample towards the texel centre, leaving a one-output-pixel ramp across the
 	// boundary for the hardware's bilinear to smooth - that ramp is the whole trick.
-	"  vec2 base  = floor(texel);\n"
-	"  vec2 dist  = fract(texel) - 0.5;\n"
-	"  vec2 flat  = 0.5 - 0.5 / scale;\n"
-	"  vec2 f     = (dist - clamp(dist, -flat, flat)) * scale + 0.5;\n"
+	// NB: "plateau" must not be called "flat" - that is a reserved GLSL interpolation
+	// qualifier. Apple's compiler accepts it as an identifier anyway; NVIDIA's does not.
+	"  vec2 base    = floor(texel);\n"
+	"  vec2 dist    = fract(texel) - 0.5;\n"
+	"  vec2 plateau = 0.5 - 0.5 / scale;\n"
+	"  vec2 f       = (dist - clamp(dist, -plateau, plateau)) * scale + 0.5;\n"
 	"  vec4 texel_color = texture2D(uTexture, (base + f) / uTexSize);\n"
 	"  vec4 outColor = vec4(1.0);\n"
 	"  if (uColorMode == 1) {\n"
