@@ -118,6 +118,22 @@
 // final geometry and the entire picture is 28% too tall.
 #define	SCR_PRESENT_SQUASH	(1.0f / (AMIGA_BASE_STRETCH * AMIGA_PAL_PIXEL_ASPECT))
 
+// The NTSC figure, (4/3)/(320/200). Presenting with this is the same as not squashing at
+// all - 1/(1.2 * 0.8333) = 1.0 - so the 640x480 base goes out as a clean 4:3 picture, with
+// black bars at the sides on a wide display instead of at the top and bottom. Geometrically
+// it is the "one Amiga pixel is 1.2x tall" reading; historically it is NTSC, not this game.
+#define	AMIGA_NTSC_PIXEL_ASPECT	0.83333f
+
+// Which of the two the raster is actually presented with. A toggles at runtime; see
+// ScrPresentSquash() and the SDLK_a case in StuntCarRacer.cpp.
+extern float gPresentPixelAspect;
+
+// The live squash factor, the runtime counterpart of SCR_PRESENT_SQUASH above.
+static inline float ScrPresentSquash( void )
+{
+	return 1.0f / (AMIGA_BASE_STRETCH * gPresentPixelAspect);
+}
+
 extern bool  gAmigaFov;			// F toggles; see StuntCarRacer.cpp
 extern float gAmigaFovStretch;	// , and . adjust; 1.2 = base space, see AMIGA_BASE_STRETCH
 

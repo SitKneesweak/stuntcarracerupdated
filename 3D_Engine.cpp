@@ -123,6 +123,13 @@ bool gAmigaFov = true;
 	- see SCR_PRESENT_SQUASH.  Adjustable at runtime with , and . */
 float gAmigaFovStretch = AMIGA_BASE_STRETCH;
 
+/*	Display pixel aspect used at present time.  AMIGA_PAL_PIXEL_ASPECT (1.0667) is what the
+	hardware did - a 1.707 picture, letterboxed top and bottom.  AMIGA_NTSC_PIXEL_ASPECT
+	(0.8333) presents the base space as a clean 4:3 instead, pillarboxed on a wide display,
+	which is the one that reads as "not stretched" to a modern eye.  Toggled with A.
+	Affects presentation only - no geometry, no layout. */
+float gPresentPixelAspect = AMIGA_NTSC_PIXEL_ASPECT;
+
 #ifndef SCR_DEG_TO_RAD
 #define SCR_DEG_TO_RAD(d)	((d) * 3.14159265358979323846f / 180.0f)
 #endif

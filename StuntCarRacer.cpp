@@ -3262,6 +3262,22 @@ bool process_events()
 					fflush(stdout);
 					break;
 
+				case SDLK_a:
+					// Toggle the display pixel aspect the raster is presented with:
+					// PAL 1.0667 (authentic, 1.707 picture, bars top and bottom) or
+					// NTSC 0.8333 (4:3 picture, bars at the sides).  Presentation only.
+					gPresentPixelAspect = (gPresentPixelAspect == AMIGA_PAL_PIXEL_ASPECT)
+						? AMIGA_NTSC_PIXEL_ASPECT : AMIGA_PAL_PIXEL_ASPECT;
+					printf("Display aspect: %s (pixel aspect %.4f, picture %.3f:1)\n",
+						   (gPresentPixelAspect == AMIGA_PAL_PIXEL_ASPECT) ? "PAL" : "4:3",
+						   gPresentPixelAspect,
+						   (wideScreen ? 800.f : 640.f) / (480.f * ScrPresentSquash()));
+					fflush(stdout);
+#ifdef USE_SDL2
+					ApplyViewport();
+#endif
+					break;
+
 				case SDLK_f:
 					// Toggle the Amiga field of view (see GetProjectionTangents,
 					// 3D_Engine.cpp).
@@ -3526,20 +3542,24 @@ void ApplyViewport()
 		// Use custom scale factor, in points, so it matches the requested size
 		screenScale = gCustomScale * dpiFactor;
 	} else {
-		// Automatic scaling based on window size.  Only 480*SCR_PRESENT_SQUASH of the base
+		// Automatic scaling based on window size.  Only 480*ScrPresentSquash() of the base
 		// space is ever presented (see below), so fit against that, not against 480 - else
 		// the squash would be paid for twice and the picture would sit in a letterbox
 		// inside a letterbox.
-		const double presentH = 480. * SCR_PRESENT_SQUASH;
+		const double presentH = 480. * ScrPresentSquash();
 		screenScale = (drawW/640. < drawH/presentH) ? drawW/640. : drawH/presentH;
 	}
 	// is it a Wide screen ratio?
 	// Detect widescreen if width is significantly wider than 4:3 aspect ratio.
 	// Decided once, at startup: the whole 2D layout is built around it, so it
 	// must not flip when the window is dragged to another display.
+	// Measured against the PAL presentation (the constant, not ScrPresentSquash) so that
+	// the A toggle changes only how the raster is presented, never the 2D layout.
 	static bool aspectChosen = false;
 	if(!aspectChosen) {
-		if((drawW/screenScale - 640)>=80)
+		const double palScale = (drawW/640. < drawH/(480.*SCR_PRESENT_SQUASH))
+			? drawW/640. : drawH/(480.*SCR_PRESENT_SQUASH);
+		if((drawW/palScale - 640)>=80)
 			wideScreen=1;
 		aspectChosen = true;
 	}
@@ -3549,10 +3569,11 @@ void ApplyViewport()
 	int baseY = (drawH - fullH)/2;
 	// The 640x480 base holds the Amiga's 320x200 at (2.0, 2.4), i.e. 1.2x taller than wide.
 	// Undo that here, once, for the whole raster - geometry and 2D art alike - and replace it
-	// with PAL's own 1.0667, exactly as the monitor did on real hardware. 200 lines were
-	// letterboxed inside PAL's 256-line display window, so the black bands are authentic too.
-	// See SCR_PRESENT_SQUASH / AMIGA_PAL_PIXEL_ASPECT in 3D_Engine.h for the derivation.
-	int viewH = static_cast<int>(fullH * SCR_PRESENT_SQUASH + 0.5f);
+	// with the display's own pixel aspect, exactly as the monitor did on real hardware.
+	// PAL (1.0667) gives the authentic 1.707 picture, letterboxed top and bottom as the 200
+	// lines were inside PAL's 256-line display window; NTSC (0.8333) gives a 4:3 picture,
+	// pillarboxed on a wide display.  A toggles.  See 3D_Engine.h for the derivation.
+	int viewH = static_cast<int>(fullH * ScrPresentSquash() + 0.5f);
 	int viewY = baseY + (fullH - viewH)/2;
 	static int lastW = 0, lastH = 0;
 	if(viewW != lastW || viewH != lastH) {
@@ -3898,18 +3919,25 @@ int main(int argc, const char** argv)
 		// Use custom scale factor, in points, so it matches the requested size
 		screenScale = customScale * dpiFactor;
 	} else {
-		// Automatic scaling based on window size.  Only 480*SCR_PRESENT_SQUASH of the base
+		// Automatic scaling based on window size.  Only 480*ScrPresentSquash() of the base
 		// space is ever presented (see below), so fit against that, not against 480.
-		const double presentH = 480. * SCR_PRESENT_SQUASH;
+		const double presentH = 480. * ScrPresentSquash();
 		if(screenW/640. < screenH/presentH)
 			screenScale = screenW/640.;
 		else
 			screenScale = screenH/presentH;
 	}
 	// is it a Wide screen ratio?
-	// Detect widescreen if width is significantly wider than 4:3 aspect ratio
-	if((screenW/screenScale - 640)>=80)
-		wideScreen=1;
+	// Detect widescreen if width is significantly wider than 4:3 aspect ratio.
+	// Measured against the PAL presentation (the constant, not ScrPresentSquash) so that
+	// the display-aspect choice changes only presentation, never the 2D layout.
+	{
+		const double palPresentH = 480. * SCR_PRESENT_SQUASH;
+		const double palScale = (screenW/640. < screenH/palPresentH)
+			? screenW/640. : screenH/palPresentH;
+		if((screenW/palScale - 640)>=80)
+			wideScreen=1;
+	}
 	screenX = (screenW-(wideScreen?800.:640.)*screenScale)/2.;
 	screenY = (screenH-480.*screenScale)/2.;
 	screenW = (wideScreen?800:640)*screenScale;
@@ -3920,10 +3948,9 @@ int main(int argc, const char** argv)
 		SDL_ShowCursor(SDL_DISABLE);
 	// The 640x480 base holds the Amiga's 320x200 at (2.0, 2.4), i.e. 1.2x taller than wide.
 	// Undo that here, once, for the whole raster - geometry and 2D art alike - and replace it
-	// with PAL's own 1.0667, exactly as the monitor did on real hardware. 200 lines were
-	// letterboxed inside PAL's 256-line display window, so the black bands are authentic too.
-	// See SCR_PRESENT_SQUASH / AMIGA_PAL_PIXEL_ASPECT in 3D_Engine.h for the derivation.
-	long viewH = static_cast<long>(screenH * SCR_PRESENT_SQUASH + 0.5f);
+	// with the display's own pixel aspect, exactly as the monitor did on real hardware.
+	// See ScrPresentSquash() / AMIGA_PAL_PIXEL_ASPECT in 3D_Engine.h for the derivation.
+	long viewH = static_cast<long>(screenH * ScrPresentSquash() + 0.5f);
 	long viewY = screenY + (screenH - viewH) / 2;
 	glViewport(screenX, viewY, screenW, viewH);
 	glMatrixMode(GL_PROJECTION);
