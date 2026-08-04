@@ -3679,7 +3679,11 @@ void em_main_loop()
 #endif
 
 int GL_MSAA = 0;
-int main(int argc, const char** argv)
+// argv is char** rather than const char**: on Windows SDL_main.h does
+// "#define main SDL_main" and declares SDL_main as taking char *argv[]. A const
+// parameter mangles to a different symbol, so libSDL2main's WinMain cannot find
+// it and the link fails with "undefined reference to SDL_main".
+int main(int argc, char** argv)
 {
 #ifdef __EMSCRIPTEN__
 	initialize_gl4es();
