@@ -80,6 +80,23 @@ endif
 # which relied on a gcc builtin that MinGW does not set.)
 FLAGS+= -DSCR_PORTABLE
 
+# Bit-identical floating point across platforms, which lockstep multiplayer will
+# depend on: the same inputs must produce the same doubles on clang/macOS,
+# gcc/Linux and MinGW/Windows or peers desync.
+#
+# -ffp-contract=off is the one that actually bites. GCC defaults to "fast" for
+# C++, letting it fuse a*b+c into a single FMA with different rounding - and
+# whether it does so depends on target and optimizer decisions, so two platforms
+# can disagree on one line of physics. Turning it off costs a little speed and
+# buys reproducibility.
+#
+# Do NOT add -ffast-math (or -Ofast) to any build that runs the physics: it
+# permits reassociation, which destroys reproducibility outright. Note the
+# ARM64/cortex-a72 target above still sets it - that target predates this and is
+# not one of the three cross-platform builds; it must lose the flag before it
+# can join a netplay session.
+FLAGS+= -ffp-contract=off
+
 FLAGS+= -pipe -fpermissive
 CFLAGS=$(FLAGS) -Wno-conversion-null -Wno-write-strings -ICommon
 LDFLAGS=$(FLAGS)
