@@ -28,6 +28,7 @@
 //   stuntcarracer --simtrace-verbose      dump every field, not just the hash
 //   stuntcarracer --simtrace-track 3      pick the track (default 0, Little Ramp)
 //   stuntcarracer --simtrace-digest       ~60 pasteable lines instead of 6000
+//   stuntcarracer --simtrace-solo         race with no AI opponent
 //   stuntcarracer --simtrace-window N C   log only steps N..N+C, verbosely
 //   stuntcarracer --simtrace-out FILE     log path (default simtrace.log)
 //
@@ -68,6 +69,10 @@ extern long  gSimTraceWindowCount;
 extern long  gSimTraceMaxSteps;
 // Track to race on, and the seed handed to Det_Rand at race start.
 extern int   gSimTraceTrack;
+// Race solo (no AI opponent). The opponent is not hashed but does perturb the
+// player via car-to-car impulses, so this separates a player-side divergence
+// from one that merely leaks in from the opponent.
+extern bool  gSimTraceSolo;
 extern uint32_t gSimTraceSeed;
 
 // Parse one command-line argument. Returns the number of argv entries consumed

@@ -1456,7 +1456,7 @@ static float lastFrame = 0.0f;
 			// A named driver, not RANDOM_OPPONENT: which car we race against has to be
 			// the same on both platforms, and it must be settled before the RNG is
 			// seeded rather than by drawing from it.
-			SetRaceOpponent(0);
+			SetRaceOpponent(scr::gSimTraceSolo ? NO_OPPONENT : 0);
 			// Deactivate as well as start: while the Amiga menus are up OnFrameRender
 			// returns before the track-preview input is reached, so the race would
 			// never be entered. Same pair as the screenshot path below.

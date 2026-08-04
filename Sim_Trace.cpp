@@ -24,6 +24,7 @@ long     gSimTraceWindowFirst = -1;     // -1 = log every step
 long     gSimTraceWindowCount = 0;
 long     gSimTraceMaxSteps = 6000;      // 100 seconds at 60Hz
 int      gSimTraceTrack    = 0;
+bool     gSimTraceSolo     = false;
 uint32_t gSimTraceSeed     = 0x12345678u;
 
 static char  sLogPath[512] = "simtrace.log";
@@ -233,6 +234,17 @@ int SimTrace_ParseArg(int argc, char** argv, int i)
 		gSimTraceWindowCount  = atol(argv[i+2]);
 		return 3;
 		}
+	// Race solo. In head-to-head multiplayer the AI opponent is replaced by the
+	// remote player and never runs, so its state is out of scope for lockstep --
+	// but it still perturbs the player here through the car-to-car impulses, and
+	// it is not itself hashed. Tracing solo separates "the player's physics
+	// diverges" from "the opponent's does, and leaks into the player".
+	if (!strcmp(argv[i], "--simtrace-solo"))
+		{
+		gSimTraceEnabled = true;
+		gSimTraceSolo    = true;
+		return 1;
+		}
 	if (!strcmp(argv[i], "--simtrace-track") && (i + 1 < argc))
 		{
 		gSimTraceTrack = atoi(argv[i+1]);
@@ -279,8 +291,9 @@ void SimTrace_Begin()
 			gSimTraceTrack, static_cast<unsigned long>(gSimTraceSeed),
 			gSimTraceMaxSteps, gFloatV2Dt,
 			static_cast<unsigned long long>(dtBits));
-	fprintf(sLog, "# verbose=%d digest_only=%d\n",
-			gSimTraceVerbose ? 1 : 0, gSimTraceDigestOnly ? 1 : 0);
+	fprintf(sLog, "# verbose=%d digest_only=%d solo=%d\n",
+			gSimTraceVerbose ? 1 : 0, gSimTraceDigestOnly ? 1 : 0,
+			gSimTraceSolo ? 1 : 0);
 	fflush(sLog);
 
 	printf("simtrace: recording %ld steps to %s (track %d, seed 0x%08lx)\n",
