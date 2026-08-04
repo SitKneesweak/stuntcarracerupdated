@@ -1,0 +1,55 @@
+name: build
+
+# Compile-checks every platform the SDL/OpenGL port targets, so a change made on
+# one of them cannot quietly break the others.
+on:
+  push:
+    branches: [master, macos-port]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libsdl2-dev libsdl2-ttf-dev libopenal-dev libglm-dev \
+            libgl1-mesa-dev libglu1-mesa-dev
+      - name: Build
+        run: make LINUX=1 -j$(nproc)
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: brew install sdl2 sdl2_ttf openal-soft glm pkg-config
+      - name: Build
+        run: make MACOS=1 -j$(sysctl -n hw.ncpu)
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            make
+            pkg-config
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-SDL2
+            mingw-w64-x86_64-SDL2_ttf
+            mingw-w64-x86_64-openal
+            mingw-w64-x86_64-glm
+      - name: Build
+        run: make MINGW=1 -j$(nproc)

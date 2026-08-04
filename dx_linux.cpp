@@ -584,6 +584,9 @@ bool IDirect3DDevice9::EnsureFogProgram()
 		return false;
 	mFogTried = true;
 
+	if (!SCR_HaveGLShaders())
+		return false;
+
 	GLuint vs = CompileGLShader(GL_VERTEX_SHADER, kFogVertexShader, "Fog");
 	if (!vs)
 		return false;
@@ -682,6 +685,9 @@ bool IDirect3DDevice9::EnsureSharpProgram()
 	if (mSharpTried)
 		return false;
 	mSharpTried = true;
+
+	if (!SCR_HaveGLShaders())
+		return false;
 
 	GLuint vs = CompileGLShader(GL_VERTEX_SHADER, kSharpVertexShader, "Sharp-pixel");
 	if (!vs)

@@ -5,8 +5,17 @@
 #elif defined(__APPLE__)
 #include <OpenGL/gl.h>
 #else
+#ifdef _WIN32
+// <GL/gl.h> on Windows needs APIENTRY/WINGDIAPI, which come from windows.h.
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
 #include <GL/gl.h>
 #endif
+// Must come after the GL header: it #defines the post-1.1 entry points over
+// runtime-resolved function pointers. See gl_loader.h.
+#include "gl_loader.h"
 #include <math.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -826,12 +835,13 @@ public:
 /*	and gl_ModelViewProjectionMatrix - that way the existing glVertexPointer/glColorPointer	*/
 /*	client-array setup in DrawPrimitive() keeps feeding it unchanged.						*/
 /*																							*/
-/*	macOS gives us a legacy 2.1 compatibility context (no profile is requested in			*/
-/*	StuntCarRacer.cpp), which has both GLSL 120 and the fixed-function state the rest of		*/
-/*	the shim relies on. GLES1 has no shaders, and plain <GL/gl.h> on Linux doesn't declare	*/
-/*	the GL2 entry points without a loader, so this is Apple-only for now.					*/
+/*	We ask for no GL profile in StuntCarRacer.cpp, so every desktop platform hands us a		*/
+/*	legacy/compatibility context with both GLSL 120 and the fixed-function state the rest	*/
+/*	of the shim relies on. The GL2 entry points come from gl_loader.h at runtime, so this	*/
+/*	compiles everywhere; SCR_HaveGLShaders() decides at runtime whether it can actually		*/
+/*	run. GLES1 has no shaders at all, hence the one remaining guard.						*/
 /*	--------------------------------------------------------------------------------------- */
-#if defined(__APPLE__) && !defined(HAVE_GLES)
+#ifndef HAVE_GLES
 #define SCR_FOG_SHADER 1
 #endif
 
@@ -861,7 +871,7 @@ extern float gFogMaxAmount;		// upper clamp on the fog blend, 1.0 = no limit.
 /*																							*/
 /*	Same programmable-pipeline requirement as the fog above, hence the same guard.			*/
 /*	--------------------------------------------------------------------------------------- */
-#if defined(__APPLE__) && !defined(HAVE_GLES)
+#ifndef HAVE_GLES
 #define SCR_SHARP_PIXEL 1
 #endif
 

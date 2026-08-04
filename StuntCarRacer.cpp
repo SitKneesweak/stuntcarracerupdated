@@ -33,9 +33,6 @@
 #else
 #define STRING L"%s"
 #endif
-#ifdef __APPLE__
-#include <mach-o/dyld.h>
-#endif
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #endif
@@ -3627,22 +3624,27 @@ int main(int argc, const char** argv)
 	sprintf(maintitle, "StuntCarRemake v%d.%02d.%02d", V_MAJOR, V_MINOR, V_PATCH);
 	printf("%s\n", maintitle);
 	// get executable folder and cd into it, so relative asset paths work
-	char buf[500];
-#ifdef __APPLE__
-	uint32_t bufsize = sizeof(buf);
-	int rc = _NSGetExecutablePath(buf, &bufsize);
-	ssize_t bufsized = (rc == 0) ? (ssize_t)strlen(buf) : -1;
+#ifdef USE_SDL2
+	// SDL knows how to do this on every platform we care about: GetModuleFileName on
+	// Windows, _NSGetExecutablePath on macOS, /proc/self/exe on Linux.
+	if(char* basePath = SDL_GetBasePath()) {
+		chdir(basePath);
+		printf("chdir(\"%s\")\n", basePath);
+		SDL_free(basePath);
+	}
 #else
-	ssize_t bufsized = readlink("/proc/self/exe", buf, sizeof(buf));
-#endif
+	char buf[500];
+	ssize_t bufsized = readlink("/proc/self/exe", buf, sizeof(buf)-1);
 	if(bufsized>0) {
+		buf[bufsized] = 0;		// readlink() does not terminate
 		char* p = strrchr(buf, '/');
-		if(*p) {
+		if(p) {
 			*p=0;
 			chdir(buf);
 			printf("chdir(\"%s\")\n", buf);
 		}
 	}
+#endif
 #ifdef USE_SDL2
 	SDL_GLContext context = NULL;
 	if(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_JOYSTICK)==-1) {
@@ -3844,6 +3846,9 @@ int main(int argc, const char** argv)
 			printf("Couldn't create OpenGL Context: %s\n", SDL_GetError());
 			exit(-3);
 	}
+	// Resolve the post-GL-1.1 entry points now the context is current. Failure is not
+	// fatal: the game falls back to fixed-function, minus fog and sharp-pixel filtering.
+	SCR_LoadGLProcs();
 	// Drawable size, not window size: on a HiDPI display these differ and the
 	// GL viewport is in pixels. dpiFactor rescales the point-based -s/-w/-h
 	// options so a requested size still means the same physical size.
@@ -3904,6 +3909,8 @@ int main(int argc, const char** argv)
 		glEnable(GL_MULTISAMPLE);
 	}
 	SDL_WM_SetCaption(maintitle, NULL);
+	// See the USE_SDL2 branch above - resolve the post-GL-1.1 entry points.
+	SCR_LoadGLProcs();
 #endif
 #ifdef USE_SDL2
 	if(flags&SDL_WINDOW_FULLSCREEN || flags&SDL_WINDOW_FULLSCREEN_DESKTOP)

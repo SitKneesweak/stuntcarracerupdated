@@ -44,6 +44,18 @@ ifeq ($(CHIP),1)
         LDFLAGS= -mcpu=cortex-a8 -mfpu=neon -mfloat-abi=hard
         #HAVE_GLES=1
 endif
+ifeq ($(LINUX),1)
+        # Desktop Linux. gcc predefines "linux" itself in gnu++ mode, but say it
+        # explicitly so the build does not depend on that.
+        FLAGS+= -Dlinux -DUSE_SDL2
+        SDL=2
+endif
+ifeq ($(MINGW),1)
+        # Windows, cross-compiled or under MSYS2. "linux" here means "the SDL/OpenGL
+        # port rather than the DirectX one" - see the note in README.md.
+        FLAGS+= -Dlinux -DUSE_SDL2
+        SDL=2
+endif
 ifeq ($(MACOS),1)
         # macOS build. Uses Homebrew for SDL2, SDL2_ttf, openal-soft, glm.
         # -Dlinux activates the POSIX code paths (dx_linux.cpp, etc).
@@ -126,9 +138,9 @@ endif
 LIB+= `pkg-config --libs $(TTF_)`
 
 ifeq ($(MINGW),1)
-	LIB += -L./mingw/bin
 	LIB += -lglu32 -lopengl32
-	LIB += -lsocket -lws2_32 -lwsock32 -lwinmm -lOpenAL32
+	LIB += -lws2_32 -lwinmm
+	LIB += `pkg-config --libs openal`
 else
 ifeq ($(MACOS),1)
 	LIB += -framework OpenGL
