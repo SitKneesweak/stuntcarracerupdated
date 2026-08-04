@@ -6,6 +6,7 @@
 
 #include "Physics_FloatV2.h"
 #include "Track_FloatV2.h"
+#include "Det_Math.h"
 
 #include <algorithm>
 #include <array>
@@ -18,16 +19,18 @@ namespace {
 
 // --- Common helpers -------------------------------------------------------
 // Amiga integer angle convention: 65536 == one full turn (2π).
-constexpr double kAngleToRadians = 2.0 * 3.14159265358979323846 / 65536.0;
-
-inline double SinF(double angle) { return std::sin(angle * kAngleToRadians); }
-inline double CosF(double angle) { return std::cos(angle * kAngleToRadians); }
+//
+// These go through Det_Math rather than libm: sin/cos/pow are not required to
+// be correctly rounded and genuinely differ between glibc, Apple's libm and
+// MSVCRT, which would desync lockstep multiplayer. See Det_Math.h.
+inline double SinF(double angle) { return det::SinUnits(angle); }
+inline double CosF(double angle) { return det::CosUnits(angle); }
 
 // Per-tick multiplicative decay used all over the physics (spring damping,
 // friction, etc.). At dtRatio=1 this is a plain scale by 119/128 (≈0.930).
 // At other rates it compounds so the per-second decay stays constant.
 inline double ReduceValue(double value, double dtRatio = 1.0) {
-    return value * std::pow(119.0 / 128.0, dtRatio);
+    return value * det::PowFromLog2(det::kLog2_119_128, dtRatio);
 }
 
 // Normalise an angle back into the signed 16-bit Amiga range [-32768, 32767].
@@ -363,7 +366,8 @@ double ProcessOneWheel(PhysicsStateF& s, const FV2Track& t, int& currentSection,
         return height;
     }
 
-    double blend = 1.0 - std::pow(0.5, dtRatio);   // half-way per 10Hz step
+    // half-way per 10Hz step; log2(0.5) is exactly -1
+    double blend = 1.0 - det::Exp2(-dtRatio);
     if (dbgWheel) gDbgBlendUsed = 1;
     storedHeight = std::round(previous + blend * (static_cast<double>(height) - previous));
     return storedHeight;
@@ -421,7 +425,7 @@ void SetWheelRotationSpeed(PhysicsStateF& s, double zSpeed, double dtRatio) {
     double absZ = std::fabs(zSpeed);
     s.PosPlayersZSpeed = absZ;
     if (s.TouchingRoad == 0) {
-        s.WheelRotationSpeed *= std::pow(0.75, dtRatio);
+        s.WheelRotationSpeed *= det::PowFromLog2(det::kLog2_3_4, dtRatio);
         return;
     }
     if (absZ < 2048.0) {
