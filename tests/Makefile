@@ -3,8 +3,10 @@
 #
 #   make -C tests && ./tests/net_socket_test
 #
-# net_socket_test talks to itself over UDP loopback, so it needs no peer and no
-# network, but a sandbox that blocks loopback sockets will fail it.
+# Both tests talk to themselves over UDP loopback, so they need no peer and no
+# network, but a sandbox that blocks loopback sockets will fail them.
+# net_lockstep_test forks a second process for the joining peer and so is POSIX
+# only; it binds port 47921.
 
 CXX ?= g++
 CXXFLAGS ?= -std=gnu++14 -I.. -Wall -O1
@@ -13,15 +15,27 @@ ifeq ($(OS),Windows_NT)
     LIBS += -lws2_32
 endif
 
-all: net_socket_test
+TESTS = net_socket_test
+ifneq ($(OS),Windows_NT)
+    # needs fork()
+    TESTS += net_lockstep_test
+endif
+
+all: $(TESTS)
 
 net_socket_test: net_socket_test.cpp ../Net_Socket.cpp ../Net_Socket.h
 	$(CXX) $(CXXFLAGS) -o $@ net_socket_test.cpp ../Net_Socket.cpp $(LIBS)
 
-check: net_socket_test
-	./net_socket_test
+net_lockstep_test: net_lockstep_test.cpp ../Net_Lockstep.cpp ../Net_Socket.cpp ../Net_Lockstep.h ../Net_Socket.h
+	$(CXX) $(CXXFLAGS) -o $@ net_lockstep_test.cpp ../Net_Lockstep.cpp ../Net_Socket.cpp $(LIBS)
+
+check: $(TESTS)
+	@for t in $(TESTS); do echo "=== $$t"; ./$$t || exit 1; done
+ifneq ($(OS),Windows_NT)
+	@echo "=== net_lockstep_test desync"; ./net_lockstep_test desync || exit 1
+endif
 
 clean:
-	rm -f net_socket_test
+	rm -f $(TESTS)
 
 .PHONY: all check clean
