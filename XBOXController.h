@@ -5,7 +5,7 @@
 #define WIN32_LEAN_AND_MEAN
 
 // We need the Windows Header and the XInput Header
-#ifdef linux
+#ifdef SCR_PORTABLE
 #ifdef USE_SDL2
 #include <SDL2/SDL.h>
 #else

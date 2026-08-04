@@ -27,7 +27,7 @@
 #include "League.h"
 #include "version.h"
 
-#ifdef linux
+#ifdef SCR_PORTABLE
 #include <unistd.h>
 #define STRING "%S"
 #else
@@ -42,7 +42,7 @@
 // Defines, constants, and global variables
 //-----------------------------------------------------------------------------
 
-#ifdef linux
+#ifdef SCR_PORTABLE
 #define DEFAULT_FRAME_GAP	(6)		// 4 Used to limit frame rate.  Amiga StuntCarRacer uses value of 6 (called MIN.FRAMES)
 #else
 #define DEFAULT_FRAME_GAP	(4)
@@ -94,6 +94,11 @@ bool bNewGame = FALSE;
 bool bPaused = FALSE;
 bool bPlayerPaused = FALSE;
 bool bOpponentPaused = FALSE;
+// Escape during a race asks before quitting rather than dropping out instantly.
+// bQuitConfirmWasPaused remembers whether the game was already paused (via 'P')
+// so cancelling puts things back the way they were.
+bool bQuitConfirm = FALSE;
+static bool bQuitConfirmWasPaused = FALSE;
 long bTrackDrawMode = 0;
 // Fixed-sun shading of the track faces, baked into the vertex colours (see FaceShade in Track.cpp).
 // F3 toggles it; the track vertex buffer is rebuilt on the toggle.
@@ -344,7 +349,7 @@ static void FreeData( void )
 void GetScreenDimensions( long *screen_width,
 						  long *screen_height )
 	{
-#ifdef linux
+#ifdef SCR_PORTABLE
 	/*const SDL_VideoInfo* info = SDL_GetVideoInfo();
 	*screen_width = info->current_w;
 	*screen_height = info->current_h; */
@@ -604,7 +609,7 @@ static void EnforceConstantFrameRate( long max_frame_rate )
 //--------------------------------------------------------------------------------------
 // Global variables
 //--------------------------------------------------------------------------------------
-#ifdef linux
+#ifdef SCR_PORTABLE
 TTF_Font *g_pFont = NULL;
 TTF_Font *g_pFontLarge = NULL;
 float GetTextScale() {
@@ -641,7 +646,7 @@ float GetTextScale()
 ID3DXSprite *g_pSprite = NULL;       // Sprite for batching draw text calls
 #endif
 
-#ifndef linux
+#ifndef SCR_PORTABLE
 //--------------------------------------------------------------------------------------
 // Rejects any devices that aren't acceptable by returning false
 //--------------------------------------------------------------------------------------
@@ -839,7 +844,7 @@ void CreateBuffers(IDirect3DDevice9 *pd3dDevice)
 		printf("Error creating CarVertexBuffer\n");
 
 }
-#endif	//!linux
+#endif	//!SCR_PORTABLE
 /*	======================================================================================= */
 /*	Function:		CalcTrackMenuViewpoint													*/
 /*																							*/
@@ -1406,7 +1411,7 @@ static bool bDrawBridgeStepDue = true;	// track menu / preview keep the old per-
 DWORD input = lastInput;	// take copy of user input
 D3DXMATRIX matRot, matTemp, matTrans, matView;
 
-#ifndef linux
+#ifndef SCR_PORTABLE
 // crude 60fps cap method...
 static float lastFrame = 0.0f;
 #define FPSMAX (1.0f/60.f)
@@ -1702,7 +1707,7 @@ static float lastFrame = 0.0f;
 		float ya = ((static_cast<float>(-viewpoint1_y_angle) * 2 * D3DX_PI) / 65536.0f);
 		float za = ((static_cast<float>(-viewpoint1_z_angle) * 2 * D3DX_PI) / 65536.0f);
 		// Produce and combine the rotation matrices
-#ifdef linux
+#ifdef SCR_PORTABLE
 		D3DXMatrixRotationY(&matTemp, ya + D3DX_PI);
 		D3DXMatrixMultiply(&matRot, &matRot, &matTemp);
 		D3DXMatrixRotationX(&matTemp, -xa);
@@ -1719,7 +1724,7 @@ static float lastFrame = 0.0f;
 #endif
 		// Combine the rotation and translation matrices to complete the world matrix
 		D3DXMatrixMultiply(&matView, &matTrans, &matRot);
-#ifdef linux
+#ifdef SCR_PORTABLE
 		D3DXMatrixScaling(&matTrans, +1, -1, +1);
 		D3DXMatrixMultiply(&matView, &matView, &matTrans);
 #endif
@@ -1736,7 +1741,7 @@ static float lastFrame = 0.0f;
 /*																							*/
 /*	Description:	Output track menu text													*/
 /*	======================================================================================= */
-#ifdef linux
+#ifdef SCR_PORTABLE
 #define FIRSTMENU SDLK_1
 #define STARTMENU SDLK_s
 #define LEAGUEMENU SDLK_l
@@ -1789,6 +1794,7 @@ bool MenuStartTrack( int trackID )
 	ResetPlayer();
 	GameMode = TRACK_PREVIEW;
 	bPlayerPaused = bOpponentPaused = FALSE;
+	bQuitConfirm = FALSE;
 	keyPress = '\0';
 	return true;
 	}
@@ -2029,7 +2035,7 @@ void RenderText( double fTime )
     // If NULL is passed in as the sprite object, then it will work fine however the 
     // pFont->DrawText() will not be batched together.  Batching calls will improve perf.
 	float textScale = GetTextScale();
-#ifdef linux
+#ifdef SCR_PORTABLE
 	static
 #endif
     CDXUTTextHelper txtHelper( g_pFont, g_pSprite, static_cast<int>(15 * textScale) );
@@ -2040,7 +2046,7 @@ void RenderText( double fTime )
 	if (bShowStats)
 	{
 		txtHelper.SetInsertionPos( static_cast<int>((2+(wideScreen?10:0)) * textScale), 0 );
-#ifndef linux
+#ifndef SCR_PORTABLE
 		txtHelper.DrawTextLine( DXUTGetFrameStats(true) );
 		txtHelper.DrawTextLine( DXUTGetDeviceStats() );
 #else
@@ -2132,7 +2138,7 @@ void RenderText( double fTime )
 
 			if (raceFinished)
 			{
-				#ifdef linux
+				#ifdef SCR_PORTABLE
 				static
 				#endif
 				CDXUTTextHelper txtHelperLarge( g_pFontLarge, g_pSprite, static_cast<int>(25 * textScale) );
@@ -2152,7 +2158,7 @@ void RenderText( double fTime )
 
 				if (GameMode == GAME_OVER)
 				{
-#ifdef 	linux
+#ifdef SCR_PORTABLE
 					txtHelperLarge.SetInsertionPos( static_cast<int>((250+(wideScreen?80:0)) * textScale), static_cast<int>(pd3dsdBackBuffer->Height-25*13*textScale) );
 					txtHelperLarge.DrawTextLine( L"GAME OVER" );
 					txtHelperLarge.SetInsertionPos( static_cast<int>((132+(wideScreen?80:0)) * textScale), static_cast<int>(pd3dsdBackBuffer->Height-25*11*textScale) );
@@ -2180,6 +2186,40 @@ void RenderText( double fTime )
 				}
 
 				txtHelperLarge.End();
+			}
+
+			if (bQuitConfirm)
+			{
+				// Keep the prompt small and a quarter of the way down the screen so it
+				// lands in the sky above the horizon rather than over the cockpit.
+				const int confirmSize = static_cast<int>(15 * textScale);
+				#ifdef SCR_PORTABLE
+				static
+				#endif
+				CDXUTTextHelper txtHelperConfirm( g_pFont, g_pSprite, confirmSize );
+
+				// The 7-bit font advances a fixed 7 pixels per character at its integer
+				// scale (see CDXUTTextHelper in dx_linux.cpp), so the width is exact.
+				int glyphScale = (confirmSize + 4) / 8;
+				if (glyphScale < 1) glyphScale = 1;
+				const int advance = 7 * glyphScale;
+				#define CONFIRM_X(text)	((static_cast<int>(pd3dsdBackBuffer->Width) \
+										  - static_cast<int>(wcslen(text)) * advance) / 2)
+
+				const WCHAR *line1 = L"QUIT GAME?";
+				const WCHAR *line2 = L"ESC TO CANCEL, ENTER TO QUIT";
+
+				txtHelperConfirm.Begin();
+				txtHelperConfirm.SetForegroundColor( D3DXCOLOR( 1.0f, 1.0f, 1.0f, 1.0f ) );
+				const int confirmY = static_cast<int>(pd3dsdBackBuffer->Height) / 4;
+				const int lineStep = static_cast<int>(confirmSize * 1.5f);
+
+				txtHelperConfirm.SetInsertionPos( CONFIRM_X(line1), confirmY );
+				txtHelperConfirm.DrawTextLine( line1 );
+				txtHelperConfirm.SetInsertionPos( CONFIRM_X(line2), confirmY + lineStep );
+				txtHelperConfirm.DrawTextLine( line2 );
+				txtHelperConfirm.End();
+				#undef CONFIRM_X
 			}
 			break;
 		}
@@ -2475,7 +2515,7 @@ static void SetPreviewWindowProjection( IDirect3DDevice9 *pd3dDevice )
 
 static void SetScreenSpaceClip( float win_x, float win_y, float win_w, float win_h )
 	{
-#ifdef linux
+#ifdef SCR_PORTABLE
 	// The frame's viewport is the whole 640x480 (or 800x480) base space, letterboxed into
 	// the drawable and vertically squashed to PAL's pixel aspect.  Read it back rather than
 	// recomputing it, so this cannot drift out of step with SetupViewport.
@@ -2509,7 +2549,7 @@ static void SetScreenSpaceClip( float win_x, float win_y, float win_w, float win
 
 static void ClearScreenSpaceClip( void )
 	{
-#ifdef linux
+#ifdef SCR_PORTABLE
 	glDisable(GL_SCISSOR_TEST);
 #else
 	DXUTGetD3DDevice()->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
@@ -2579,7 +2619,7 @@ static void SetCockpitWindowClip( bool enable )
 	}
 
 
-#ifdef linux
+#ifdef SCR_PORTABLE
 /*	Set by the SCR_PREVIEW_SHOT development aid below: the file the next completed preview
 	frame should be written to, before the program quits.									*/
 static const char *gPreviewShotDue = NULL;
@@ -2634,7 +2674,7 @@ HRESULT hr;
     // Clear the zbuffer
     V( pd3dDevice->Clear(0, NULL, D3DCLEAR_ZBUFFER, 0, 1.0f, 0) );
 
-#ifdef linux
+#ifdef SCR_PORTABLE
 	/*	SCR_PREVIEW_SHOT=<file.ppm> jumps straight into the track preview for the track in
 		SCR_PREVIEW_TRACK, grabs the framebuffer and quits.  A development aid for working
 		on the preview screen without driving the menus by hand.							*/
@@ -2734,7 +2774,7 @@ HRESULT hr;
 			pd3dDevice->SetRenderState( D3DRS_ZENABLE, TRUE );
 			pd3dDevice->EndScene();
 
-#ifdef linux
+#ifdef SCR_PORTABLE
 			if (gPreviewShotDue)
 				{
 				WriteFramebufferPPM(gPreviewShotDue);
@@ -2838,7 +2878,7 @@ HRESULT hr;
 	}
 }
 
-#ifndef linux
+#ifndef SCR_PORTABLE
 //--------------------------------------------------------------------------------------
 // Handle messages to the application 
 //--------------------------------------------------------------------------------------
@@ -3213,6 +3253,21 @@ bool process_events()
 				break;
 			}
 
+			// The quit prompt owns the keyboard while it is up: Escape backs out,
+			// Enter quits, everything else is swallowed so the car cannot be driven.
+			if (bQuitConfirm)
+			{
+				if (keyPress == SDLK_RETURN || keyPress == SDLK_KP_ENTER)
+					return false;
+				if (keyPress == SDLK_ESCAPE)
+				{
+					bQuitConfirm = FALSE;
+					bPaused = bQuitConfirmWasPaused;
+				}
+				keyPress = '\0';
+				break;
+			}
+
             switch( keyPress ) {
 #if defined(DEBUG) || defined(_DEBUG)
 				case SDLK_F1:
@@ -3456,6 +3511,15 @@ bool process_events()
 					break;
 
 				case SDLK_ESCAPE:
+					// Quitting out from under a race is too easy to do by accident,
+					// so put a confirmation up and freeze the race behind it.
+					if ((GameMode == GAME_IN_PROGRESS) || (GameMode == GAME_OVER))
+					{
+						bQuitConfirm = TRUE;
+						bQuitConfirmWasPaused = bPaused;
+						bPaused = TRUE;
+						break;
+					}
 					return false;
 				}
             break;

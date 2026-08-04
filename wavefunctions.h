@@ -1,4 +1,4 @@
-#ifdef linux
+#ifdef SCR_PORTABLE
 #include "dx_linux.h"
 #else
 #include <windows.h>

@@ -6,7 +6,7 @@
 /*	Include files */
 /*	============= */
 #include "3D_Engine.h"
-#ifdef linux
+#ifdef SCR_PORTABLE
 #include "dx_linux.h"
 #endif
 

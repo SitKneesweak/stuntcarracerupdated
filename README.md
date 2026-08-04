@@ -6,11 +6,21 @@ This is a port to Linux & OpenPandora of Stunt Car Racer Remake, a windows remak
 
 ## Building
 
-To build on Linux, simply use `make LINUX=1`
-For ODroid it will be `make ODROID=1`
-and for PocketCHIP: `make CHIP=1`
-a simple `make` will build for Pandora.
-Also, you can also use SDL2 instead of SDL1, by adding `SDL=2` to the make command (so SDL2 Linux is `make LINUX=1 SDL=2`)
+Desktop targets, all SDL2 + OpenGL + OpenAL:
+
+| Platform | Command | Dependencies |
+| --- | --- | --- |
+| Linux | `make LINUX=1` | `libsdl2-dev libsdl2-ttf-dev libopenal-dev libglm-dev libgl1-mesa-dev libglu1-mesa-dev` |
+| macOS | `make MACOS=1` | `brew install sdl2 sdl2_ttf openal-soft glm pkg-config` |
+| Windows | `make MINGW=1` | MSYS2 MINGW64: `mingw-w64-x86_64-{gcc,SDL2,SDL2_ttf,openal,glm}` |
+
+Handheld targets, which still default to SDL1: `make ODROID=1`, `make CHIP=1`, or a
+plain `make` for Pandora. Add `SDL=2` to any of those to use SDL2 instead.
+
+All of the above build the same portable renderer, selected by `-DSCR_PORTABLE`
+(see the note in the Makefile). The separate DirectX 9 build is the MSVC
+`StuntCarRacer_2022.vcxproj`, which is currently stale - it predates most of the
+source files and does not link.
 
 You can play Emscripten version, built using [gl4es](https://github.com/ptitSeb/gl4es) here: [Web version](http://ptitseb.github.io/stuntcarremake/)
 

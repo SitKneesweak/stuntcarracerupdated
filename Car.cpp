@@ -1448,13 +1448,13 @@ static void AddQuad(TRANSFORMEDTEXVERTEX *pVertices, float x1, float y1, float x
 	cockpit_vtx += 3;
 }
 
-#ifdef linux
+#ifdef SCR_PORTABLE
 extern int GL_MSAA;
 #endif
 
 void DrawCockpit (IDirect3DDevice9 *pd3dDevice)
 {
-#ifdef linux
+#ifdef SCR_PORTABLE
 	if(GL_MSAA)
 		glDisable(GL_MULTISAMPLE);
 #endif
@@ -1530,7 +1530,7 @@ void DrawCockpit (IDirect3DDevice9 *pd3dDevice)
 		}
 		float speedX1 = (Wide*2.f+COCKPIT_SPEEDBAR_X_OFFSET)*scaleX, speedX2 = (Wide*2.f+COCKPIT_SPEEDBAR_X_OFFSET + ((old_speedbar > COCKPIT_SPEEDBAR_MAX) ? (old_speedbar-COCKPIT_SPEEDBAR_MAX) : old_speedbar)/static_cast<float>(COCKPIT_SPEEDBAR_MAX)*COCKPIT_SPEEDBAR_WIDTH)*scaleX;
 		float speedY1 = (480.0f-COCKPIT_SPEEDBAR_Y_OFFSET)*scaleY, speedY2=(480.0f-COCKPIT_SPEEDBAR_Y_OFFSET+COCKPIT_SPEEDBAR_HEIGHT)*scaleY;
-#ifdef linux
+#ifdef SCR_PORTABLE
 #define SPEEDCOL1 0xff00ffff	// ABGR
 #define SPEEDCOL2 0xff00ccff	// ABGR
 #else
@@ -1579,7 +1579,7 @@ void DrawCockpit (IDirect3DDevice9 *pd3dDevice)
 	pd3dDevice->SetRenderState( D3DRS_ZENABLE, TRUE );
 	pd3dDevice->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
 	//pd3dDevice->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_DISABLE);
-#ifdef linux
+#ifdef SCR_PORTABLE
 	if(GL_MSAA)
 		glEnable(GL_MULTISAMPLE);
 #endif

@@ -1232,7 +1232,7 @@ TRANSFORMEDVERTEX *pVertices;
 
 void DrawFilledRectangle( long x1, long y1, long x2, long y2, DWORD colour )
 {
-#ifdef linux
+#ifdef SCR_PORTABLE
 #ifdef HAVE_GLES
 	float vtx[4*2] = {
 		x1, y1,

@@ -45,21 +45,18 @@ ifeq ($(CHIP),1)
         #HAVE_GLES=1
 endif
 ifeq ($(LINUX),1)
-        # Desktop Linux. gcc predefines "linux" itself in gnu++ mode, but say it
-        # explicitly so the build does not depend on that.
-        FLAGS+= -Dlinux -DUSE_SDL2
+        # Desktop Linux.
+        FLAGS+= -DUSE_SDL2
         SDL=2
 endif
 ifeq ($(MINGW),1)
-        # Windows, cross-compiled or under MSYS2. "linux" here means "the SDL/OpenGL
-        # port rather than the DirectX one" - see the note in README.md.
-        FLAGS+= -Dlinux -DUSE_SDL2
+        # Windows, cross-compiled or under MSYS2.
+        FLAGS+= -DUSE_SDL2
         SDL=2
 endif
 ifeq ($(MACOS),1)
         # macOS build. Uses Homebrew for SDL2, SDL2_ttf, openal-soft, glm.
-        # -Dlinux activates the POSIX code paths (dx_linux.cpp, etc).
-        FLAGS+= -Dlinux -DUSE_SDL2 -DMACOS -DGL_SILENCE_DEPRECATION
+        FLAGS+= -DUSE_SDL2 -DMACOS -DGL_SILENCE_DEPRECATION
         BREW_PREFIX ?= $(shell brew --prefix)
         export PKG_CONFIG_PATH := $(BREW_PREFIX)/opt/openal-soft/lib/pkgconfig:$(BREW_PREFIX)/opt/sdl2-compat/lib/pkgconfig:$(BREW_PREFIX)/opt/sdl2_ttf/lib/pkgconfig:$(PKG_CONFIG_PATH)
         FLAGS+= -I$(BREW_PREFIX)/include
@@ -68,7 +65,7 @@ endif
 ifeq ($(EMSCRIPTEN),1)
         FLAGS= -s FULL_ES2=1 -I../gl4es/include -s USE_SDL_TTF=2 -s USE_SDL=2
         FLAGS+= -I/usr/include/glm
-        FLAGS+= -Dlinux -DUSE_SDL2
+        FLAGS+= -DUSE_SDL2
         FLAGS+= --emrun --preload-file Tracks --preload-file Sounds
         FLAGS+= --preload-file Bitmap --embed-file DejaVuSans-Bold.ttf
         FLAGS+= --shell-file template.html
@@ -76,6 +73,12 @@ ifeq ($(EMSCRIPTEN),1)
         CC= emcc
         CXX= emc++
 endif
+
+# Everything this Makefile builds is the SDL/OpenGL port. The DirectX build is the
+# MSVC .vcxproj instead, and never sees this define - that is the distinction the
+# source-level #ifdef SCR_PORTABLE draws. (It used to be spelt "#ifdef linux",
+# which relied on a gcc builtin that MinGW does not set.)
+FLAGS+= -DSCR_PORTABLE
 
 FLAGS+= -pipe -fpermissive
 CFLAGS=$(FLAGS) -Wno-conversion-null -Wno-write-strings -ICommon

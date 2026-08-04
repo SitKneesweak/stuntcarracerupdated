@@ -40,7 +40,7 @@ extern bool bTestKey;
 /*	========= */
 /*	Constants */
 /*	========= */
-#ifdef linux
+#ifdef SCR_PORTABLE
 #undef FALSE
 #undef TRUE
 #endif

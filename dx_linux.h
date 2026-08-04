@@ -6,10 +6,19 @@
 #include <OpenGL/gl.h>
 #else
 #ifdef _WIN32
-// <GL/gl.h> on Windows needs APIENTRY/WINGDIAPI, which come from windows.h.
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
+// <GL/gl.h> on Windows needs APIENTRY, WINGDIAPI and CALLBACK, which normally come
+// from windows.h - but we cannot include that: this header goes on to typedef DWORD,
+// BOOL, WCHAR, HRESULT, HWND and friends itself, with different underlying types than
+// Win32 uses. Declaring the three macros directly is the usual way out.
+#ifndef APIENTRY
+#define APIENTRY __stdcall
+#endif
+#ifndef CALLBACK
+#define CALLBACK __stdcall
+#endif
+#ifndef WINGDIAPI
+#define WINGDIAPI __declspec(dllimport)
+#endif
 #endif
 #include <GL/gl.h>
 #endif

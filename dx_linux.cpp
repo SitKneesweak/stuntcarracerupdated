@@ -1,4 +1,4 @@
-#ifdef linux
+#ifdef SCR_PORTABLE
 #include "dx_linux.h"
 // use a light version of stb_image
 #define STB_IMAGE_IMPLEMENTATION

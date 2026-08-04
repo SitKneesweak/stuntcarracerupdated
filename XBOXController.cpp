@@ -15,7 +15,7 @@ XINPUT_STATE CXBOXController::GetState()
 	ZeroMemory(&_controllerState, sizeof(XINPUT_STATE));
 
 	// Get the state
-	#ifdef linux
+	#ifdef SCR_PORTABLE
 #warning TODO...
 	_controllerState = 0;
 	#else
@@ -31,7 +31,7 @@ bool CXBOXController::IsConnected()
 	ZeroMemory(&_controllerState, sizeof(XINPUT_STATE));
 
 	// Get the state
-	#ifdef linux
+	#ifdef SCR_PORTABLE
 #warning TODO
 	DWORD Result = 0xFFFF;
 	#else
@@ -50,7 +50,7 @@ bool CXBOXController::IsConnected()
 
 void CXBOXController::Vibrate(const unsigned short leftVal, const unsigned short rightVal)
 {
-	#ifdef linux
+	#ifdef SCR_PORTABLE
 #warning TODO
 	#else
 	// Create a Vibraton State

@@ -1370,24 +1370,18 @@ long ConvertAmigaTrack( long track )
 		if (piece & 1)
 			{
 			// odd numbered section (light)
+				roadColour = SCR_BASE_COLOUR + 2;			// grey surface in both leagues
 				if(bSuperLeague) {
-					roadColour = SCR_BASE_COLOUR + 17;
-					sidesColour = SCR_BASE_COLOUR + 16;
+					sidesColour = SCR_BASE_COLOUR + 16;		// blue edges
 				} else {
-					roadColour = SCR_BASE_COLOUR + 2;
-					sidesColour = SCR_BASE_COLOUR + 10;		// 8 for SUPER LEAGUE
+					sidesColour = SCR_BASE_COLOUR + 10;
 				}
 			}
 		else
 			{
 			// even numbered section (dark)
-				if(bSuperLeague) {
-					roadColour = SCR_BASE_COLOUR + 18;
-					sidesColour = SCR_BASE_COLOUR + 15;
-				} else {
-					roadColour = SCR_BASE_COLOUR + 1;
-					sidesColour = SCR_BASE_COLOUR + 15;
-				}
+				roadColour = SCR_BASE_COLOUR + 1;			// grey surface in both leagues
+				sidesColour = SCR_BASE_COLOUR + 15;
 			}
 
 
@@ -3097,7 +3091,7 @@ static long ReadAmigaTrackData( long track )
 static void *GetTRACKResource( HMODULE hModule, LPCWSTR lpResName )
 	{
 	void		*pTRACKBytes;
-#ifdef linux
+#ifdef SCR_PORTABLE
 const WCHAR* resname[] = {L"LITTLERAMP", L"STEPPINGSTONES", L"HUMPBACK", L"BIGRAMP", L"SKIJUMP", L"DRAWBRIDGE", L"HIGHJUMP", L"ROLLERCOASTER", 0};
 const char* filename[] = {"Tracks/LittleRamp.bin", "Tracks/SteppingStones.bin", "Tracks/HumpBack.bin", "Tracks/BigRamp.bin", "Tracks/SkiJump.bin", "Tracks/DrawBridge.bin", "Tracks/HighJump.bin", "Tracks/RollerCoaster.bin"};
 	int i = 0;

@@ -918,7 +918,7 @@ void MenuScreensRender( IDirect3DDevice9 *pd3dDevice )
 /*	Input																					*/
 /*	======================================================================================= */
 
-#ifdef linux
+#ifdef SCR_PORTABLE
 #define KEY_UP		SDLK_UP
 #define KEY_DOWN	SDLK_DOWN
 #define KEY_ENTER	SDLK_RETURN

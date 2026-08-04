@@ -2,7 +2,7 @@
 #ifndef	_CAR
 #define	_CAR
 
-#ifdef linux
+#ifdef SCR_PORTABLE
 #include "dx_linux.h"
 #endif
 

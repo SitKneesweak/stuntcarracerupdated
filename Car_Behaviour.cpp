@@ -72,7 +72,7 @@ extern bool bTestKey;
 /*	========= */
 /*	Constants */
 /*	========= */
-#ifndef linux
+#ifndef SCR_PORTABLE
 #define	FALSE	0
 #define	TRUE	1
 #endif
@@ -975,7 +975,7 @@ static void CarControl (DWORD input)
 	brake = (input & KEY_P1_BRAKE);
 
 	// if none of the resulting keys are pressed then read joystick
-#ifdef linux
+#ifdef SCR_PORTABLE
 #warning TODO
 #else
 	if( !input )
@@ -5139,7 +5139,7 @@ long height;	// Not used
 	the frame with the rest of the overlays.									*/
 void DrawSceneParticles( void )
 {
-#ifdef linux
+#ifdef SCR_PORTABLE
 	// DrawFilledRectangle plots straight into GL in screen space, so it needs the flat,
 	// untextured, unculled state the 2D overlays run in.  Drawing after DrawCockpit used
 	// to leave that set up for us; here we are still in the middle of the world pass, with
@@ -5172,7 +5172,7 @@ void DrawSceneParticles( void )
 		bWorldStepDue = FALSE;
 	}
 
-#ifdef linux
+#ifdef SCR_PORTABLE
 	if (had_texture) glEnable(GL_TEXTURE_2D);
 	if (had_cull)    glEnable(GL_CULL_FACE);
 	if (had_blend)   glEnable(GL_BLEND);

@@ -85,7 +85,7 @@ void InitAtlasCoord() {
         float inset = (i >= eRoadYellowDark) ? roadLineInset : 0.0f;
         atlas_tx1[i] = ((float)x[i] + inset) / 1024.0f;
         atlas_tx2[i] = ((float)(x[i]+w[i]) - inset) / 1024.0f;
-        #ifdef linux
+        #ifdef SCR_PORTABLE
         atlas_ty1[i] = 1.0f-(float)y[i] / 1024.0f;
         atlas_ty2[i] = 1.0f-(float)(y[i]+h[i]) / 1024.0f;
         #else
