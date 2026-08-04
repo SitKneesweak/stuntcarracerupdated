@@ -5,6 +5,7 @@
 #include "Net_Socket.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #ifdef _WIN32
@@ -16,6 +17,9 @@
   // SIO_UDP_CONNRESET (used in Bind) lives here, not in winsock2.h, on
   // mingw-w64 — winsock2.h alone compiles under MSVC and fails under MinGW.
   #include <mswsock.h>
+  // GetAdaptersAddresses, for NetLocalAddresses. Must follow winsock2.h, and
+  // brings -liphlpapi with it (see the MINGW branch of the Makefile).
+  #include <iphlpapi.h>
   // Older mingw-w64 headers ship mswsock.h without it. It is a stable, publicly
   // documented control code, so spelling it out is safer than requiring a
   // particular header vintage.
@@ -36,6 +40,8 @@
   #include <netinet/in.h>
   #include <arpa/inet.h>
   #include <netdb.h>
+  #include <ifaddrs.h>
+  #include <net/if.h>
   #include <unistd.h>
   #include <fcntl.h>
   #include <errno.h>
@@ -267,6 +273,162 @@ void NetAddressToString(const NetAddress& addr, char* buf, int bufLen)
         snprintf(buf, bufLen, "[%s]:%s", host, serv);
     else
         snprintf(buf, bufLen, "%s:%s", host, serv);
+}
+
+namespace {
+
+// Append "text" to a comma-separated list already in buf, if it fits and is not
+// there twice. Silently drops anything that would overflow - a truncated list
+// is still readable, a truncated address is not.
+void AppendUnique(char* buf, int bufLen, const char* text)
+{
+    const int have = (int)strlen(buf);
+    const int want = (int)strlen(text);
+    if (want == 0)
+        return;
+
+    // Substring match is enough: these are whole addresses drawn from the same
+    // list, so a hit is the same address seen on a second interface.
+    if (strstr(buf, text) != nullptr)
+        return;
+
+    const int sep = (have > 0) ? 2 : 0;      // ", "
+    if (have + sep + want + 1 > bufLen)
+        return;
+
+    if (sep)
+        strcpy(buf + have, ", ");
+    strcpy(buf + have + sep, text);
+}
+
+// Worth reading out to the other player? Loopback only reaches this machine,
+// link-local needs a scope suffix that the join screen has no way to carry, and
+// the 169.254 autoconfiguration range means the DHCP lease never arrived.
+bool IsUsefulV4(uint32_t hostOrder)
+{
+    if ((hostOrder >> 24) == 127)
+        return false;
+    if ((hostOrder >> 16) == 0xA9FE)        // 169.254/16
+        return false;
+    return hostOrder != 0;
+}
+
+bool IsUsefulV6(const struct in6_addr* a)
+{
+    const uint8_t* b = (const uint8_t*)a;
+    if (b[0] == 0xFE && (b[1] & 0xC0) == 0x80)      // fe80::/10 link-local
+        return false;
+    for (int i = 0; i < 15; i++)                    // ::1 loopback
+        if (b[i] != 0)
+            return true;
+    return b[15] != 1;
+}
+
+} // namespace
+
+void NetLocalAddresses(char* buf, int bufLen)
+{
+    if (!buf || bufLen <= 0)
+        return;
+    buf[0] = '\0';
+
+    // Two passes so every IPv4 address comes before any IPv6 one: v4 is what a
+    // player can realistically read out loud, so it belongs at the front of a
+    // line that may well be truncated.
+#ifdef _WIN32
+    // GetAdaptersAddresses wants a buffer it can grow into; 16K covers any
+    // ordinary machine and the loop retries once if it does not.
+    ULONG size = 16 * 1024;
+    IP_ADAPTER_ADDRESSES* adapters = nullptr;
+    for (int attempt = 0; attempt < 2; attempt++)
+    {
+        adapters = (IP_ADAPTER_ADDRESSES*)malloc(size);
+        if (!adapters)
+            return;
+        const ULONG rc = GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_SKIP_ANYCAST |
+                                              GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER,
+                                              nullptr, adapters, &size);
+        if (rc == NO_ERROR)
+            break;
+        free(adapters);
+        adapters = nullptr;
+        if (rc != ERROR_BUFFER_OVERFLOW)
+            break;
+    }
+
+    for (int family = 0; adapters && (family < 2); family++)
+    {
+        const int want = (family == 0) ? AF_INET : AF_INET6;
+        for (IP_ADAPTER_ADDRESSES* a = adapters; a; a = a->Next)
+        {
+            if (a->OperStatus != IfOperStatusUp)
+                continue;
+            if (a->IfType == IF_TYPE_SOFTWARE_LOOPBACK)
+                continue;
+
+            for (IP_ADAPTER_UNICAST_ADDRESS* u = a->FirstUnicastAddress; u; u = u->Next)
+            {
+                sockaddr* sa = u->Address.lpSockaddr;
+                if (!sa || sa->sa_family != want)
+                    continue;
+                if (want == AF_INET)
+                {
+                    if (!IsUsefulV4(ntohl(((sockaddr_in*)sa)->sin_addr.s_addr)))
+                        continue;
+                }
+                else if (!IsUsefulV6(&((sockaddr_in6*)sa)->sin6_addr))
+                    continue;
+
+                char host[NI_MAXHOST];
+                if (getnameinfo(sa, (socklen_t_compat)u->Address.iSockaddrLength,
+                                host, sizeof(host), nullptr, 0, NI_NUMERICHOST) == 0)
+                    AppendUnique(buf, bufLen, host);
+            }
+        }
+    }
+    free(adapters);
+#else
+    ifaddrs* list = nullptr;
+    if (getifaddrs(&list) != 0)
+        list = nullptr;
+
+    for (int family = 0; list && (family < 2); family++)
+    {
+        const int want = (family == 0) ? AF_INET : AF_INET6;
+        for (ifaddrs* a = list; a; a = a->ifa_next)
+        {
+            if (!a->ifa_addr || (a->ifa_addr->sa_family != want))
+                continue;
+            if (!(a->ifa_flags & IFF_UP) || (a->ifa_flags & IFF_LOOPBACK))
+                continue;
+
+            socklen_t_compat len;
+            if (want == AF_INET)
+            {
+                if (!IsUsefulV4(ntohl(((sockaddr_in*)a->ifa_addr)->sin_addr.s_addr)))
+                    continue;
+                len = sizeof(sockaddr_in);
+            }
+            else
+            {
+                if (!IsUsefulV6(&((sockaddr_in6*)a->ifa_addr)->sin6_addr))
+                    continue;
+                len = sizeof(sockaddr_in6);
+            }
+
+            char host[NI_MAXHOST];
+            if (getnameinfo(a->ifa_addr, len, host, sizeof(host), nullptr, 0,
+                            NI_NUMERICHOST) == 0)
+                AppendUnique(buf, bufLen, host);
+        }
+    }
+
+    if (list)
+        freeifaddrs(list);
+#endif
+
+    if (buf[0] == '\0')
+        snprintf(buf, bufLen, "unknown");
 }
 
 UdpSocket::UdpSocket()

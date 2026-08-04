@@ -7,6 +7,7 @@
 
 #include "Det_Rand.h"
 #include "Net_Lockstep.h"
+#include "Net_Socket.h"
 #include "Physics_FloatV2.h"
 
 namespace scr {
@@ -74,8 +75,16 @@ bool NetGameHost(int trackID, double now)
     gG.active = true;
     gG.isHost = true;
     gG.track  = trackID;
+    // The joining player has to type this machine's address, and nothing else
+    // in the game ever tells them what it is, so the host screen has to. Over
+    // the internet it is the router's public address that matters and UDP
+    // kNetDefaultPort has to be forwarded - but on a LAN, which is how this
+    // gets played, one of these is the answer.
+    char local[96];
+    NetLocalAddresses(local, sizeof(local));
     snprintf(gG.status, sizeof(gG.status),
-             "Waiting for the other player on port %u...", (unsigned)NetLocalPort());
+             "Waiting on port %u. Tell the other player to join: %s",
+             (unsigned)NetLocalPort(), local);
     return true;
 }
 

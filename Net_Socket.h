@@ -54,6 +54,13 @@ bool NetResolve(const char* host, uint16_t port, NetAddress* out);
 // "<unset>" or "<bad>" rather than leaving the buffer untouched.
 void NetAddressToString(const NetAddress& addr, char* buf, int bufLen);
 
+// The machine's own addresses, as the other player would have to type them:
+// bare literals, comma separated, loopback and link-local left out. This is the
+// only way the hosting player learns what to read out down the phone, so it
+// exists purely for the wait screen. Never fails; writes "unknown" if nothing
+// usable turned up. Prefers IPv4 - it is what somebody can actually dictate.
+void NetLocalAddresses(char* buf, int bufLen);
+
 // A bound, non-blocking UDP socket.
 class UdpSocket
 {

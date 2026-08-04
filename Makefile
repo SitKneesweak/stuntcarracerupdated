@@ -159,7 +159,9 @@ LIB+= `pkg-config --libs $(TTF_)`
 
 ifeq ($(MINGW),1)
 	LIB += -lglu32 -lopengl32
-	LIB += -lws2_32 -lwinmm
+	# iphlpapi is GetAdaptersAddresses, which the host wait screen uses to show
+	# this machine's address to the player reading it out.
+	LIB += -lws2_32 -liphlpapi -lwinmm
 	LIB += `pkg-config --libs openal`
 	# MSYS2's sdl2.pc puts -mwindows in Libs, which links a GUI-subsystem exe.
 	# Those get no console, so every printf in the game is discarded - including
