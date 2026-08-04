@@ -1,12 +1,19 @@
 name: build
 
 # Compile-checks every platform the SDL/OpenGL port targets, so a change made on
-# one of them cannot quietly break the others.
+# one of them cannot quietly break the others, and leaves a runnable build of each
+# attached to the run (Actions -> pick a run -> Artifacts, at the bottom).
+#
+# Note this only ever *builds*. Nothing here launches the game, so a green run
+# means it compiles and links, not that it renders correctly.
 on:
   push:
     branches: [master, macos-port]
   pull_request:
   workflow_dispatch:
+
+# The game chdir()s to the executable's directory and loads Tracks/, Sounds/,
+# Bitmap/ and the font relatively, so each package ships them beside the binary.
 
 jobs:
   linux:
@@ -22,6 +29,15 @@ jobs:
             libgl1-mesa-dev libglu1-mesa-dev
       - name: Build
         run: make LINUX=1 -j$(nproc)
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp stuntcarracer dist/
+          cp -r Tracks Sounds Bitmap DejaVuSans-Bold.ttf dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stuntcarracer-linux
+          path: dist/
 
   macos:
     runs-on: macos-latest
@@ -31,6 +47,15 @@ jobs:
         run: brew install sdl2 sdl2_ttf openal-soft glm pkg-config
       - name: Build
         run: make MACOS=1 -j$(sysctl -n hw.ncpu)
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp stuntcarracer dist/
+          cp -r Tracks Sounds Bitmap DejaVuSans-Bold.ttf dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stuntcarracer-macos
+          path: dist/
 
   windows:
     runs-on: windows-latest
@@ -53,3 +78,22 @@ jobs:
             mingw-w64-x86_64-glm
       - name: Build
         run: make MINGW=1 -j$(nproc)
+      - name: Package
+        # Windows has no rpath and the runner's MSYS2 will not exist on a user's
+        # machine, so every MinGW DLL the exe pulls in has to ship beside it.
+        # ldd walks the transitive set, which is far more than SDL2 + OpenAL:
+        # freetype, harfbuzz, png, zlib, brotli, libstdc++, libwinpthread...
+        run: |
+          mkdir -p dist
+          cp stuntcarracer.exe dist/
+          cp -r Tracks Sounds Bitmap DejaVuSans-Bold.ttf dist/
+          ldd stuntcarracer.exe \
+            | grep -i '/mingw64/bin/' \
+            | awk '{print $3}' \
+            | sort -u \
+            | xargs -I{} cp -v {} dist/
+          echo "Packaged $(ls dist/*.dll | wc -l) DLLs"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stuntcarracer-windows
+          path: dist/
