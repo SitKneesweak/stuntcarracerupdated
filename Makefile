@@ -144,6 +144,14 @@ ifeq ($(MINGW),1)
 	LIB += -lglu32 -lopengl32
 	LIB += -lws2_32 -lwinmm
 	LIB += `pkg-config --libs openal`
+	# MSYS2's sdl2.pc puts -mwindows in Libs, which links a GUI-subsystem exe.
+	# Those get no console, so every printf in the game is discarded - including
+	# the GL/OpenAL diagnostics and the physics N/K dumps. This must come after
+	# the pkg-config lines above: the last subsystem flag on the line wins.
+	# Set WINCONSOLE=0 for a release build with no console window.
+	ifneq ($(WINCONSOLE),0)
+		LIB += -mconsole
+	endif
 else
 ifeq ($(MACOS),1)
 	LIB += -framework OpenGL
