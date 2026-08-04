@@ -26,6 +26,11 @@
 #include "AmigaMenu.h"
 #include "MenuScreens.h"
 #include "League.h"
+/*	Net_Game.h / Net_Lockstep.h include only <cstdint>.  No socket header may ever be
+	pulled in here - dx_linux.h typedefs DWORD/BOOL/HWND itself, with different
+	underlying types than Winsock's.  Net_Socket.cpp is the only TU that sees one.	*/
+#include "Net_Game.h"
+#include "Net_Lockstep.h"
 #include "version.h"
 
 #ifdef SCR_PORTABLE
@@ -1354,6 +1359,159 @@ static void DrawOpponentsCar( IDirect3DDevice9 *pd3dDevice )
 }
 
 
+/*	======================================================================================= */
+/*	Netplay: stepping both cars																*/
+/*																							*/
+/*	Description:	In a head-to-head race the AI opponent does not run at all - the other	*/
+/*					car is another player, driven by the same physics as this one.  So the	*/
+/*					step runs CarBehaviour twice, once per car, with SelectCar swapping		*/
+/*					Car_Behaviour.cpp's file-scope state in and out around each (see			*/
+/*					CAR_STATE_FIELDS there).												*/
+/*																							*/
+/*					Two things about this are load-bearing:									*/
+/*																							*/
+/*					- The local player's car is always in the PLAYER slot, because the		*/
+/*					  camera, the HUD, the engine sound and the damage readout all read the	*/
+/*					  player globals directly and must see this machine's car.				*/
+/*					- The *order* the two are stepped in is fixed by network role, host		*/
+/*					  first, NOT by which one is local.  Order is part of the simulation:	*/
+/*					  if the two peers stepped them in opposite orders they would not be	*/
+/*					  running the same simulation, which is the one thing lockstep needs.	*/
+/*	======================================================================================= */
+
+/*	The remote car's position and orientation, in CarBehaviour's own units.  Kept across
+	steps because CarBehaviour reads these back when INITIALISE_PLAYER is set - they are
+	the remote car's equivalent of player1_x..player1_z_angle.							*/
+static long remote_x = 0, remote_y = 0, remote_z = 0;
+static long remote_x_angle = 0, remote_y_angle = 0, remote_z_angle = 0;
+
+/*	The two cars' road sections.  UpdateLapData reads them per car, and with the AI gone
+	the opponent's is the remote player's.												*/
+extern long player_current_piece;		// Car_Behaviour.cpp
+extern long opponents_current_piece;	// Opponent_Behaviour.cpp
+
+static void StepOneCar( long slot, DWORD carInput )
+{
+	SelectCar(slot);
+
+	/*	Same reason as the single-player path: FloatV2 treats the road section, the
+		distance into it and the road-x as inputs, and this is their only writer.	*/
+	if (scr::gUseFloatV2Physics)
+		CalculatePlayersRoadPosition();
+
+	if (slot == PLAYER)
+		{
+		CarBehaviour(carInput,
+					 &player1_x, &player1_y, &player1_z,
+					 &player1_x_angle, &player1_y_angle, &player1_z_angle);
+		}
+	else
+		{
+		CarBehaviour(carInput,
+					 &remote_x, &remote_y, &remote_z,
+					 &remote_x_angle, &remote_y_angle, &remote_z_angle);
+
+		/*	Hand the result to the slot the renderer already draws a second car from.
+			The positions are in the same units the player's are (both go through
+			WorldF with the same sign), so they copy straight across.  The angles do
+			not: OpponentBehaviour produced radians from atan2, while CarBehaviour
+			produces Amiga angle units, 65536 to the turn.						*/
+		opponent_x = remote_x;
+		opponent_y = remote_y;
+		opponent_z = remote_z;
+
+		opponent_x_angle = (float)((double)remote_x_angle * 2.0 * D3DX_PI / 65536.0);
+		opponent_y_angle = (float)((double)remote_y_angle * 2.0 * D3DX_PI / 65536.0);
+		opponent_z_angle = (float)((double)remote_z_angle * 2.0 * D3DX_PI / 65536.0);
+
+		/*	Lap counting reads this for the OPPONENT car (UpdateLapData), and it is
+			the remote player's piece now, not the AI's.						*/
+		opponents_current_piece = player_current_piece;
+		}
+}
+
+/*	One lockstep simulation step: both cars, in role order.  Returns the state hash of the
+	step, which is what the two peers compare to notice they have diverged.				*/
+static uint64_t NetStepBothCars( DWORD hostInput, DWORD joinerInput )
+{
+	const bool localIsHost = scr::NetGameLocalIsHost();
+	const long hostSlot    = localIsHost ? PLAYER : OPPONENT;
+	const long joinerSlot  = localIsHost ? OPPONENT : PLAYER;
+
+	StepOneCar(hostSlot, hostInput);
+	const uint64_t hostHash = scr::SimTrace_HashState(scr::FloatV2_State());
+
+	StepOneCar(joinerSlot, joinerInput);
+	const uint64_t joinerHash = scr::SimTrace_HashState(scr::FloatV2_State());
+
+	/*	Leave the local car selected: everything downstream of the step - rendering,
+		sound, the HUD - reads the globals and expects this machine's car.			*/
+	SelectCar(PLAYER);
+
+	/*	Both cars in the digest, in role order, so a divergence in either one is caught
+		and both peers compute the same number from the same two cars.  Hashing only
+		"my car" would compare two different cars and report a desync every step.	*/
+	uint64_t h = hostHash;
+	h ^= joinerHash + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+
+	/*	SCR_NET_TRACE=1 prints both cars once a second - the quickest way to tell a car
+		that is not being drawn from one that is being drawn in the wrong place.		*/
+	if (getenv("SCR_NET_TRACE"))
+		{
+		const uint32_t s = scr::NetGameStep();
+		if ((s % 60) == 0)
+			{
+			printf("net step %5u  local xyz %8ld %8ld %8ld  piece %ld"
+				   "   remote xyz %8ld %8ld %8ld  piece %ld  oppID %ld\n",
+				   (unsigned)s, player1_x, player1_y, player1_z, player_current_piece,
+				   opponent_x, opponent_y, opponent_z, opponents_current_piece,
+				   opponentsID);
+			fflush(stdout);
+			}
+		}
+
+	return h;
+}
+
+/*	Hang one of the two cars on the crane at the start of a head-to-head race.  `sideOffset`
+	is picked from the network role by the caller so both peers place both cars the same
+	way; the two take opposite signs so they start beside each other rather than inside
+	one another.  See SetCarStartSideOffset for the units and why the default is wrong
+	here.																				*/
+/*	+/-24 puts each car 72 piece units from the centre line.  Road x runs 0..0xff across
+	the road with 0x80 at the centre, and 160 of these units is 640 piece coords against a
+	road half width of 384 - so one road x unit is three piece coords, and 72 is 24 road x
+	units.  The two cars therefore start 48 road x units apart, which is about what the
+	Amiga's own pair get (it leaves the player near the centre and puts the opponent at
+	0x4c, R.5a3f8).  Anything much wider and the drop start lands them on the barrier.	*/
+#define NET_START_SIDE_OFFSET	24
+static void PlaceNetCarOnChains( long slot, long sideOffset )
+{
+	SelectCar(slot);
+	SetCarStartSideOffset(sideOffset);
+
+	if (slot == PLAYER)
+		{
+		PlaceCarOnChainsForNewGame(&player1_x, &player1_y, &player1_z,
+								   &player1_x_angle, &player1_y_angle, &player1_z_angle);
+		}
+	else
+		{
+		PlaceCarOnChainsForNewGame(&remote_x, &remote_y, &remote_z,
+								   &remote_x_angle, &remote_y_angle, &remote_z_angle);
+
+		/*	So the remote car is drawn in the right place on the very first frame,
+			before any step has run.  Same conversion as StepOneCar.				*/
+		opponent_x = remote_x;
+		opponent_y = remote_y;
+		opponent_z = remote_z;
+		opponent_x_angle = (float)((double)remote_x_angle * 2.0 * D3DX_PI / 65536.0);
+		opponent_y_angle = (float)((double)remote_y_angle * 2.0 * D3DX_PI / 65536.0);
+		opponent_z_angle = (float)((double)remote_z_angle * 2.0 * D3DX_PI / 65536.0);
+		opponents_current_piece = player_current_piece;
+		}
+}
+
 static void SetOpponentsCarWorldTransform( void )
 {
 D3DXMATRIX matRot, matTemp, matTrans;
@@ -1445,6 +1603,13 @@ static float lastFrame = 0.0f;
 #endif
 	bFrameMoved = FALSE;
 //	VALUE3 = frameGap;
+
+	/*	Pump the network before anything is simulated, so this frame's steps see the
+		peer's inputs as soon as they have arrived rather than a frame later.  This is
+		also what drives a session that is still listening or connecting, and what
+		starts the race when the handshake lands - so it runs whether the menus are up
+		or a race is in progress.												*/
+	MenuScreensTick( DXUTGetTime() );
 
 	/*	Determinism trace (--simtrace).  Drive the menus straight into a race, then take
 		the controls off the keyboard: two hand-driven runs can never be diffed against
@@ -1609,7 +1774,35 @@ static float lastFrame = 0.0f;
 	{
 		if (!bPaused)
 		{
-			if ((GameMode == GAME_IN_PROGRESS) && (!bPlayerPaused))
+			if ((GameMode == GAME_IN_PROGRESS) && scr::NetGameRacing())
+			{
+				// Head-to-head. Both cars are players, and the step is gated on
+				// the network rather than on the wall clock alone: a step whose
+				// inputs are not both in hand cannot be simulated at all.
+				for (long step = 0; step < PlayerPhysicsSteps; ++step)
+				{
+					const uint32_t s = scr::NetGameStep();
+
+					// Sampled now, consumed at s + kInputDelay. That is what the
+					// input delay IS, not an off-by-one.
+					scr::NetSubmitInput(s, (uint32_t)input);
+
+					if (!scr::NetStepReady(s))
+						break;		// the peer's input has not arrived - do NOT simulate
+
+					const uint32_t localIn  = scr::NetLocalInput(s);
+					const uint32_t remoteIn = scr::NetRemoteInput(s);
+					const bool     isHost   = scr::NetGameLocalIsHost();
+
+					const uint64_t hash = NetStepBothCars(
+						(DWORD)(isHost ? localIn  : remoteIn),
+						(DWORD)(isHost ? remoteIn : localIn));
+
+					scr::NetReportDigest(s, hash);
+					scr::NetGameAdvanceStep();
+				}
+			}
+			else if ((GameMode == GAME_IN_PROGRESS) && (!bPlayerPaused))
 			{
 				// May be more than one step per render frame if the FloatV2
 				// rate is above the render rate, or if a frame ran long.
@@ -1644,7 +1837,13 @@ static float lastFrame = 0.0f;
 			// The legacy opponent has no timestep and stays on the 8.3Hz clock.
 			/*	A practise run is solo: draw.world's no.opponent4/no.opponent5 branches
 				skip opponent.movement and everything hanging off it (~line 20280).	*/
-			if (opponentsID == NO_OPPONENT)
+			if (scr::NetGameRacing())
+			{
+				// The other car is the remote player, already stepped above.
+				// The AI must not run at all: it would fight the remote player
+				// for the same slot, and it is not part of the shared simulation.
+			}
+			else if (opponentsID == NO_OPPONENT)
 			{
 				// nothing to step
 			}
@@ -1961,6 +2160,14 @@ static void HandleTrackPreviewInput( void )
 							   || (keyPress == PREVIEWENTER) || (keyPress == PREVIEWENTER2)))
 		keyPress = STARTMENU;
 
+	/*	Netplay: the handshake dropped both machines into the track, so there is nobody
+		to "hit fire to continue" - and a player who lingered on the preview would just
+		stall the other one at step 0.  Start as soon as the track is up; the lockstep
+		step counter, not the wall clock, is what keeps the two races together.		*/
+	if ((GameMode == TRACK_PREVIEW) &&
+		scr::NetGameSessionActive() && !scr::NetGameRacing() && !scr::NetGameFailed())
+		keyPress = STARTMENU;
+
 	if (keyPress == STARTMENU)
 		{
 		bNewGame = TRUE;
@@ -1991,12 +2198,40 @@ static void HandleTrackPreviewInput( void )
 		// only runs when a step is due, so the first render frame (or two) of the race
 		// would otherwise still be drawn from the track preview's car position, and the
 		// car would appear to be sitting on the ground and then snap up onto the crane.
-		PlaceCarOnChainsForNewGame(&player1_x,
-								   &player1_y,
-								   &player1_z,
-								   &player1_x_angle,
-								   &player1_y_angle,
-								   &player1_z_angle);
+		if (scr::NetGameSessionActive())
+			{
+			// Two cars to hang, and both peers must hang them identically. Side is
+			// picked from the network role, never from which car is local, so the
+			// host's car is on the same side of the road on both machines.
+			const bool isHost     = scr::NetGameLocalIsHost();
+			const long hostSlot   = isHost ? PLAYER : OPPONENT;
+			const long joinerSlot = isHost ? OPPONENT : PLAYER;
+
+			// Zeroes the step counter, seeds the shared RNG and locks the sim
+			// settings. FIRST, before either car is placed: the crane's hang time
+			// (car_on_chains_countdown, Car_Behaviour.cpp) is drawn from that RNG,
+			// so placing a car before the seed is agreed would have the two peers
+			// roll different drop times and desync on the very first step.
+			scr::NetGameRaceBegun();
+
+			PlaceNetCarOnChains(hostSlot,    NET_START_SIDE_OFFSET);
+			PlaceNetCarOnChains(joinerSlot, -NET_START_SIDE_OFFSET);
+
+			SelectCar(PLAYER);
+
+			// The AI opponent step normally clears this; it does not run here, so
+			// clear it by hand or CarBehaviour keeps seeing a new game.
+			bNewGame = FALSE;
+			}
+		else
+			{
+			PlaceCarOnChainsForNewGame(&player1_x,
+									   &player1_y,
+									   &player1_z,
+									   &player1_x_angle,
+									   &player1_y_angle,
+									   &player1_z_angle);
+			}
 		}
 
 	return;
@@ -2915,6 +3150,32 @@ HRESULT hr;
 
 		// End the scene
 		pd3dDevice->EndScene();
+
+#ifdef SCR_PORTABLE
+		/*	SCR_RACE_SHOT=<file.ppm> grabs the race view once the race has been running
+			for SCR_RACE_SHOT_FRAME frames (default 240, ~4s) and quits.  The sibling of
+			SCR_PREVIEW_SHOT above, for the race rather than the preview - it is how a
+			head-to-head session gets checked without two people at two keyboards.	*/
+		{
+		static const char *raceShotPath  = getenv("SCR_RACE_SHOT");
+		static long        raceShotFrame = 0;
+		if (raceShotPath && (GameMode == GAME_IN_PROGRESS))
+			{
+			/*	SCR_RACE_SHOT_OUTSIDE=1 takes the shot from the chase camera rather
+				than the cockpit, which is the only way to see both cars at once -
+				and so the only way to check a head-to-head session from a script. */
+			if (getenv("SCR_RACE_SHOT_OUTSIDE"))
+				bOutsideView = TRUE;
+
+			const char *n = getenv("SCR_RACE_SHOT_FRAME");
+			if (++raceShotFrame > (n ? atol(n) : 240))
+				{
+				WriteFramebufferPPM(raceShotPath);
+				exit(0);
+				}
+			}
+		}
+#endif
 	}
 }
 
@@ -3827,6 +4088,16 @@ int main(int argc, char** argv)
 				givehelp = 1;
 			}
 		}
+		/*	Netplay shortcuts.  They do nothing the Multiplayer menu cannot, but they
+			skip the menu-driving, which makes a two-machine session one command per
+			machine instead of a sequence of keypresses on each - and makes a
+			loopback session scriptable.									*/
+		else if(!strcmp(argv[i], "--net-host") && i+1 < argc) {
+			gNetAutoHostTrack = atoi(argv[++i]);
+		}
+		else if(!strcmp(argv[i], "--net-join") && i+1 < argc) {
+			snprintf(gNetAutoJoinAddress, sizeof(gNetAutoJoinAddress), "%s", argv[++i]);
+		}
 		else if(int used = scr::SimTrace_ParseArg(argc, argv, i)) {
 			i += used - 1;		// the loop's own ++i accounts for the first
 		}
@@ -3845,6 +4116,8 @@ int main(int argc, char** argv)
 		printf("\t--simtrace-track <n>\tTrack to trace on (0-7, default 0)\n");
 		printf("\t--simtrace-seed <n>\tSimulation RNG seed (default 0x12345678)\n");
 		printf("\t--simtrace-out <file>\tLog file to write (default simtrace.log)\n");
+		printf("\t--net-host <track>\tHost a two-player race on the given track (0-7)\n");
+		printf("\t--net-join <address>\tJoin a two-player race hosted at <address>\n");
 		exit(0);
 	}
 

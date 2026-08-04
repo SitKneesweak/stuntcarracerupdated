@@ -32,6 +32,8 @@
 #include "League.h"
 #include "Track.h"
 #include "Opponent_Behaviour.h"
+/*	Net_Game.h includes only <cstdint> - no socket header ever reaches dx_linux.h.		*/
+#include "Net_Game.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -115,6 +117,12 @@ static int			  gRaceTrack    = 0;	// the track the running race is on
 static char gNameBuffer[16] = "";
 static int  gNameLength     = 0;
 
+/*	The host address typed on the join screen, and whatever went wrong last time it was	*/
+/*	tried.  Long enough for a bracketed IPv6 literal or a hostname.						*/
+static char gAddressBuffer[64] = "";
+static int  gAddressLength     = 0;
+static char gAddressError[64]  = "";
+
 static char gPromoted[16]  = "";
 static char gRelegated[16] = "";
 
@@ -171,7 +179,7 @@ static void MenuScreensDumpAll( const char *prefix )
 		{
 		"name-entry", "opponents", "main", "select", "league-choice", "practise-track", "division", "fixture",
 		"race-win", "race-lost", "track-record", "result", "table", "championship", "changes", "super-league",
-		"hall-of-fame", "load-save", "link"
+		"hall-of-fame", "load-save", "mp-menu", "mp-track", "mp-join", "mp-wait"
 		};
 
 	/*	A season with two races run, so the tables have something in them.				*/
@@ -190,7 +198,12 @@ static void MenuScreensDumpAll( const char *prefix )
 	gNameLength = 6;
 	gSelection  = 1;
 
-	for (int i = 0; i <= (int)MS_LINK; i++)
+	/*	The join screen needs something in its field, and the waiting screen something	*/
+	/*	in its status line, or two of the dumps come out blank.							*/
+	snprintf(gAddressBuffer, sizeof(gAddressBuffer), "192.168.1.42");
+	gAddressLength = (int)strlen(gAddressBuffer);
+
+	for (int i = 0; i <= (int)MS_MP_WAIT; i++)
 		{
 		char path[256];
 		gScreen = (MenuScreenType)i;
@@ -413,13 +426,15 @@ static void DrawMainMenu( void )
 	/*	main.menu.selection passes d1=16, d2=2 to get.main.menu.selection, which picks		*/
 	/*	entries 16..18 of TAB.5bcd0 - offsets $0a/$1f/$71 into main.game.selection.text.		*/
 	/*	'Enter another driver' and 'Continue' are the multiplayer sub-menu, not this one.	*/
-	static const char *entries[3] =
+	/*	Only two entries now.  The Amiga's third was 'Computer Link', its null-modem		*/
+	/*	serial link-up; this port replaces it with a network game reached from			*/
+	/*	'Multiplayer', so an entry that could only ever apologise has been dropped.		*/
+	static const char *entries[2] =
 		{
 		"Single Player League",
-		"Multiplayer",
-		"Computer Link"
+		"Multiplayer"
 		};
-	DrawMenu(entries, 3, gSelection);
+	DrawMenu(entries, 2, gSelection);
 	}
 
 static void DrawSelectMenu( void )
@@ -850,14 +865,108 @@ static void DrawLoadSave( void )
 	PressAnyKeyPrompt();
 	}
 
-static void DrawLink( void )
+/*	======================================================================================= */
+/*	Multiplayer																				*/
+/*																							*/
+/*	The Amiga's own two-player mode was 'Computer Link', a null-modem cable between two		*/
+/*	Amigas at 9600 baud (establish.computer.link, StuntCarRacer.s:4037).  That is gone and	*/
+/*	is not coming back, so the entry is gone with it and 'Multiplayer' leads here instead:	*/
+/*	the same one-on-one race over a network, with one machine hosting and the other typing	*/
+/*	in its address.																			*/
+/*	======================================================================================= */
+
+static void DrawMultiplayerMenu( void )
+	{
+	static const char *entries[2] =
+		{
+		"Host a Race",
+		"Join a Race"
+		};
+	DrawMenu(entries, 2, gSelection);
+
+	/*	The Amiga font's punctuation slots below '.' hold leftover graphics rather than	*/
+	/*	glyphs - an apostrophe or a comma prints as a block of noise (see AmigaFont.h,	*/
+	/*	only the decimal point, minus and underscore are patched in).  All the text on	*/
+	/*	these screens sticks to letters, digits, dots and dashes for that reason.		*/
+	AmigaMenuSetInk(AMIGA_INK_TEXT);
+	AmigaMenuPrintCentred(23, "One hosts - the other joins.");
+	}
+
+static void DrawMultiplayerTrack( void )
+	{
+	/*	Same eight-entry layout as the practise track list - the host is choosing the	*/
+	/*	track for both players, so this is the last thing it does before opening a port.	*/
+	for (int i = 0; i < 8; i++)
+		{
+		const int row = 9 + i * 2;
+		AmigaMenuBar(row, i == gSelection);
+		AmigaMenuSetInk(AMIGA_INK_BAR_TEXT);
+		AmigaMenuPrintF(MENU_ENTRY_COLUMN, row, "%d. The %s", i + 1, kTrackNames[i]);
+		}
+	AmigaMenuSetInk(AMIGA_INK_TEXT);
+	AmigaMenuPrintCentred(24, "You are hosting - pick the track.");
+	}
+
+static void DrawMultiplayerJoin( void )
 	{
 	AmigaMenuSetInk(AMIGA_INK_TEXT);
-	AmigaMenuPrintAt(13, 11, "Computer Link");
-	AmigaMenuPrintCentred(15, "The two-player link needs two");
-	AmigaMenuPrintCentred(16, "Amigas and a null-modem cable,");
-	AmigaMenuPrintCentred(17, "so it is not available here.");
-	PressAnyKeyPrompt();
+	AmigaMenuPrintAt(14, 11, "Join a Race");
+	AmigaMenuPrintCentred(13, "Type the address to connect to.");
+
+	#define ADDRESS_ROW	16
+	AmigaMenuBar(ADDRESS_ROW, false);
+	AmigaMenuSetInk(AMIGA_INK_BAR_TEXT);
+	AmigaMenuPrintF(AMIGA_PANEL_COL0 + 1, ADDRESS_ROW, ">%s", gAddressBuffer);
+	AmigaMenuSetInk(AMIGA_INK_TEXT);
+
+	AmigaMenuPrintCentred(20, "RETURN connects. ESC goes back.");
+
+	if (gAddressError[0] != '\0')
+		{
+		AmigaMenuSetInk(AMIGA_INK_RED);
+		AmigaMenuPrintCentred(22, gAddressError);
+		AmigaMenuSetInk(AMIGA_INK_TEXT);
+		}
+	}
+
+/*	Hosting or connecting.  There is nothing to choose here - the screen exists so the		*/
+/*	player can see what the session is doing, and back out of it with ESC.					*/
+static void DrawMultiplayerWait( void )
+	{
+	AmigaMenuSetInk(AMIGA_INK_TEXT);
+	AmigaMenuPrintAt(14, 11, "Multiplayer");
+
+	/*	The status line can run longer than the panel is wide, so wrap it by hand onto	*/
+	/*	up to three rows rather than letting it disappear off the edge.					*/
+	const char *s = scr::NetGameStatusLine();
+	const int   width = 34;
+	int row = 15;
+	if (scr::NetGameFailed())
+		AmigaMenuSetInk(AMIGA_INK_RED);
+
+	while ((*s != '\0') && (row < 21))
+		{
+		char line[64];
+		int take = (int)strlen(s);
+		if (take > width)
+			{
+			/*	Break on the last space that fits, so words stay whole.			*/
+			take = width;
+			while ((take > 0) && (s[take] != ' '))
+				--take;
+			if (take == 0)
+				take = width;
+			}
+		snprintf(line, sizeof(line), "%.*s", take, s);
+		AmigaMenuPrintCentred(row++, line);
+
+		s += take;
+		while (*s == ' ')
+			++s;
+		}
+
+	AmigaMenuSetInk(AMIGA_INK_TEXT);
+	AmigaMenuPrintCentred(23, "ESC to cancel.");
 	}
 
 /*	======================================================================================= */
@@ -904,7 +1013,10 @@ static void MenuScreensDraw( void )
 		case MS_SUPER_LEAGUE:	DrawSuperLeague();		break;
 		case MS_HALL_OF_FAME:	DrawHallOfFame();		break;
 		case MS_LOADSAVE:		DrawLoadSave();			break;
-		case MS_LINK:			DrawLink();				break;
+		case MS_MP_MENU:		DrawMultiplayerMenu();	break;
+		case MS_MP_TRACK:		DrawMultiplayerTrack();	break;
+		case MS_MP_JOIN:		DrawMultiplayerJoin();	break;
+		case MS_MP_WAIT:		DrawMultiplayerWait();	break;
 		}
 	}
 
@@ -937,10 +1049,13 @@ static int EntryCount( void )
 	{
 	switch (gScreen)
 		{
-		case MS_MAIN:			return 3;
+		/*	'Computer Link' is gone - see DrawMultiplayerMenu.						*/
+		case MS_MAIN:			return 2;
 		case MS_SELECT:			return 4;
 		case MS_LEAGUE_CHOICE:	return 2;
 		case MS_PRACTISE_TRACK:	return 8;
+		case MS_MP_MENU:		return 2;
+		case MS_MP_TRACK:		return 8;
 		default:				return 0;
 		}
 	}
@@ -1004,10 +1119,127 @@ static void ActivateMain( void )
 			MenuScreensGoto(MS_NAME_ENTRY);
 			break;
 
-		/*	Neither of these is offered by this port, so both land on the apology.		*/
-		case 1:	MenuScreensGoto(MS_LINK);			break;	// Multiplayer
-		case 2:	MenuScreensGoto(MS_LINK);			break;	// Computer Link
+		case 1:	MenuScreensGoto(MS_MP_MENU);		break;	// Multiplayer
 		}
+	}
+
+/*	======================================================================================= */
+/*	Multiplayer input																		*/
+/*	======================================================================================= */
+
+/*	Both peers must draw the same opponent car, so the driver is fixed rather than rolled:	*/
+/*	SetRaceOpponent(RANDOM_OPPONENT) would draw from the RNG on each machine separately,		*/
+/*	before the shared seed is even in place.  It must also not be NO_OPPONENT - that is the	*/
+/*	practise-run value, and the render path hides the opponent's car entirely when it is		*/
+/*	set (StuntCarRacer.cpp, HideOpponentsCar).  The AI behind the car never runs; the		*/
+/*	frame loop steps the remote player's physics into that slot instead.						*/
+#define MP_OPPONENT_DRIVER	0
+
+/*	The handshake has landed.  Drop into the agreed track exactly the way a league race		*/
+/*	does, but with the opponent slot standing in for the other player.						*/
+static void EnterMultiplayerRace( void )
+	{
+	gRaceIsLeague = false;
+	gRaceTrack    = scr::NetGameTrack();
+
+	SetRaceOpponent(MP_OPPONENT_DRIVER);
+
+	if (MenuStartTrack(gRaceTrack))
+		{
+		/*	Same pair the simtrace path uses: while the menus are up OnFrameRender		*/
+		/*	returns before the track-preview input is reached, so without the			*/
+		/*	deactivate the race would never actually be entered.						*/
+		gActive = false;
+		}
+	else
+		{
+		scr::NetGameCancel();
+		MenuScreensGoto(MS_MP_MENU);
+		}
+	}
+
+static void HandleAddressEntry( int key )
+	{
+	if (key == KEY_ENTER)
+		{
+		gAddressError[0] = '\0';
+		if (scr::NetGameJoin(gAddressBuffer, DXUTGetTime()))
+			MenuScreensGoto(MS_MP_WAIT);
+		else
+			snprintf(gAddressError, sizeof(gAddressError), "%s", scr::NetGameStatusLine());
+		return;
+		}
+
+	if (key == KEY_ESCAPE)
+		{
+		MenuScreensGoto(MS_MP_MENU);
+		return;
+		}
+
+	if ((key == KEY_BACK) && (gAddressLength > 0))
+		{
+		gAddressBuffer[--gAddressLength] = '\0';
+		return;
+		}
+
+	/*	Addresses are printable ASCII - digits, dots, colons for IPv6, letters and		*/
+	/*	hyphens for a hostname.  Take the lot rather than validating here; the resolver	*/
+	/*	is the thing that actually knows what is valid, and it reports back.				*/
+	if ((key >= ' ') && (key < 127) &&
+		(gAddressLength < (int)sizeof(gAddressBuffer) - 1))
+		{
+		gAddressBuffer[gAddressLength++] = (char)key;
+		gAddressBuffer[gAddressLength]   = '\0';
+		}
+	}
+
+static void ActivateMultiplayerMenu( void )
+	{
+	switch (gSelection)
+		{
+		case 0:												// Host a Race
+			MenuScreensGoto(MS_MP_TRACK);
+			break;
+
+		case 1:												// Join a Race
+			gAddressError[0] = '\0';
+			MenuScreensGoto(MS_MP_JOIN);
+			break;
+		}
+	}
+
+int  gNetAutoHostTrack       = -1;
+char gNetAutoJoinAddress[64] = "";
+
+void MenuScreensTick( double now )
+	{
+	/*	--net-host / --net-join: open the session the menu would have opened, once.	*/
+	static bool autoDone = false;
+	if (!autoDone && !scr::NetGameSessionActive())
+		{
+		if (gNetAutoHostTrack >= 0)
+			{
+			autoDone = true;
+			if (scr::NetGameHost(gNetAutoHostTrack, now))
+				MenuScreensGoto(MS_MP_WAIT);
+			}
+		else if (gNetAutoJoinAddress[0] != '\0')
+			{
+			autoDone = true;
+			snprintf(gAddressBuffer, sizeof(gAddressBuffer), "%s", gNetAutoJoinAddress);
+			gAddressLength = (int)strlen(gAddressBuffer);
+			if (scr::NetGameJoin(gAddressBuffer, now))
+				MenuScreensGoto(MS_MP_WAIT);
+			}
+		}
+
+	if (!scr::NetGameSessionActive())
+		return;
+
+	/*	Pump whether or not the waiting screen is up: the session also has to be kept	*/
+	/*	alive across the frames between the handshake and the race starting.				*/
+	if (scr::NetGamePoll(now) && (gScreen == MS_MP_WAIT))
+		EnterMultiplayerRace();
 	}
 
 static void ActivateSelect( void )
@@ -1052,6 +1284,31 @@ void MenuScreensKey( int key )
 	if (gScreen == MS_NAME_ENTRY)
 		{
 		HandleNameEntry(key);
+		return;
+		}
+
+	if (gScreen == MS_MP_JOIN)
+		{
+		HandleAddressEntry(key);
+		return;
+		}
+
+	/*	The waiting screen has nothing to select - the only key that does anything is	*/
+	/*	the one that gives up.															*/
+	if (gScreen == MS_MP_WAIT)
+		{
+		if ((key == KEY_ESCAPE) || (key == KEY_ENTER) || (key == ' '))
+			{
+			scr::NetGameCancel();
+			MenuScreensGoto(MS_MP_MENU);
+			}
+		return;
+		}
+
+	/*	ESC backs out of the multiplayer screens rather than doing nothing.				*/
+	if ((key == KEY_ESCAPE) && ((gScreen == MS_MP_MENU) || (gScreen == MS_MP_TRACK)))
+		{
+		MenuScreensGoto((gScreen == MS_MP_TRACK) ? MS_MP_MENU : MS_MAIN);
 		return;
 		}
 
@@ -1150,7 +1407,15 @@ void MenuScreensKey( int key )
 			break;
 
 		case MS_LOADSAVE:		MenuScreensGoto(MS_SELECT);			break;
-		case MS_LINK:			MenuScreensGoto(MS_MAIN);			break;
+
+		case MS_MP_MENU:		ActivateMultiplayerMenu();			break;
+
+		case MS_MP_TRACK:
+			/*	The host's last choice before it opens a port: track, seed and dt	*/
+			/*	all go out in the handshake and the joiner adopts them wholesale.	*/
+			if (scr::NetGameHost(gSelection, DXUTGetTime()))
+				MenuScreensGoto(MS_MP_WAIT);
+			break;
 
 		default:
 			break;
@@ -1166,6 +1431,18 @@ void MenuScreensKey( int key )
 void MenuScreensAbandonRace( void )
 	{
 	gActive = true;
+
+	/*	Quitting a race quits the session with it - the other machine is told rather		*/
+	/*	than left stalled.  Done here rather than at the two 'M' key handlers in			*/
+	/*	StuntCarRacer.cpp, which are separate switch statements hundreds of lines apart	*/
+	/*	and easy to update only one of.													*/
+	if (scr::NetGameSessionActive())
+		{
+		scr::NetGameCancel();
+		MenuScreensGoto(MS_MAIN);
+		return;
+		}
+
 	if (gRaceIsLeague)
 		{
 		gRaceIsLeague = false;
@@ -1181,6 +1458,12 @@ void MenuScreensRaceFinished( bool playerWon, bool playerBestLap,
 	gActive       = true;
 	gLastLapTime  = playerLapTime;
 	gLastRaceTime = playerRaceTime;
+
+	/*	A multiplayer race is over as far as the network is concerned: stop stepping and	*/
+	/*	unlock the sim settings.  The session itself is dropped when the player leaves	*/
+	/*	the result screens.																*/
+	if (scr::NetGameSessionActive())
+		scr::NetGameRaceEnded();
 
 	/*	Note what this run took before handing the times to the record table, so the		*/
 	/*	'New track records' screen knows whether it has anything to say.					*/

@@ -32,7 +32,10 @@ enum MenuScreenType
 	MS_SUPER_LEAGUE,	// promotion to the SUPER LEAGUE
 	MS_HALL_OF_FAME,	// track records - drawn full screen, not inside the menu panel
 	MS_LOADSAVE,		// 'Load/Save/Replay', which this port does not implement
-	MS_LINK			 	// the two-player serial link, which this port cannot offer
+	MS_MP_MENU,			// 'Multiplayer' - Host a Race / Join a Race
+	MS_MP_TRACK,		// the host picks the track before hosting
+	MS_MP_JOIN,			// type the host's address
+	MS_MP_WAIT			// hosting / connecting, and what went wrong if it did
 	};
 
 /*	Enter the menus, at the name entry screen.  Safe to call more than once.					*/
@@ -49,6 +52,18 @@ void MenuScreensDeactivate( void );
 
 /*	Feed a key press in (an SDL keysym under linux, a virtual key under Windows).			*/
 void MenuScreensKey( int key );
+
+/*	Called once per rendered frame while the menus are up.  Only the multiplayer screens
+	need it: a session that is listening or connecting has to be pumped whether or not the
+	player is touching the keyboard, and it is the poll that starts the race when the
+	handshake lands.  `now` is DXUTGetTime().											*/
+void MenuScreensTick( double now );
+
+/*	The --net-host / --net-join command-line shortcuts.  They open the same session the
+	Multiplayer menu would, without the menu-driving, which is what makes a two-machine
+	session one command per machine.  -1 and "" mean "not asked for".					*/
+extern int  gNetAutoHostTrack;
+extern char gNetAutoJoinAddress[64];
 
 /*	Draw the current screen.																*/
 void MenuScreensRender( IDirect3DDevice9 *pd3dDevice );
