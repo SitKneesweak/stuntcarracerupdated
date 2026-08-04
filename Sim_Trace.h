@@ -28,6 +28,7 @@
 //   stuntcarracer --simtrace-verbose      dump every field, not just the hash
 //   stuntcarracer --simtrace-track 3      pick the track (default 0, Little Ramp)
 //   stuntcarracer --simtrace-digest       ~60 pasteable lines instead of 6000
+//   stuntcarracer --simtrace-window N C   log only steps N..N+C, verbosely
 //   stuntcarracer --simtrace-out FILE     log path (default simtrace.log)
 //
 // Comparing two machines, cheapest first:
@@ -35,7 +36,10 @@
 //      every step agreed, and there is nothing else to check.
 //   2. If it differs, compare the "#chk <step> <digest>" lines to find the first
 //      differing 100-step window.
-//   3. Re-run both with --simtrace-verbose and diff that window to get the field.
+//   3. Re-run both with --simtrace to get per-step hashes, and compare that
+//      window's 100 lines to find the exact first differing step.
+//   4. Re-run both with --simtrace-window <step> 1 and compare the single
+//      verbose line, which names the field.
 
 #pragma once
 
@@ -55,6 +59,11 @@ extern bool  gSimTraceVerbose;
 // 60 lines for a default run, small enough to paste by hand off a machine with
 // no shared terminal. That is the intended way to run this on the PC.
 extern bool  gSimTraceDigestOnly;
+// Log only steps [first, first+count) and log them verbosely. The simulation is
+// unaffected -- every step still runs and still feeds the digest -- so this only
+// changes how much has to be moved between machines.
+extern long  gSimTraceWindowFirst;
+extern long  gSimTraceWindowCount;
 // Steps to record before quitting.
 extern long  gSimTraceMaxSteps;
 // Track to race on, and the seed handed to Det_Rand at race start.

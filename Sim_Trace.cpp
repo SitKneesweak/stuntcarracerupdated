@@ -20,6 +20,8 @@ namespace scr {
 bool     gSimTraceEnabled  = false;
 bool     gSimTraceVerbose  = false;
 bool     gSimTraceDigestOnly = false;
+long     gSimTraceWindowFirst = -1;     // -1 = log every step
+long     gSimTraceWindowCount = 0;
 long     gSimTraceMaxSteps = 6000;      // 100 seconds at 60Hz
 int      gSimTraceTrack    = 0;
 uint32_t gSimTraceSeed     = 0x12345678u;
@@ -219,6 +221,18 @@ int SimTrace_ParseArg(int argc, char** argv, int i)
 			}
 		return 1;
 		}
+	// Log only a slice of the run, in full verbose form. The simulation still runs
+	// from step 0 -- only the logging is windowed -- so the numbers are identical
+	// to a full run, just far fewer of them to move between machines. This is
+	// stage 3 of the comparison protocol in the header.
+	if (!strcmp(argv[i], "--simtrace-window") && (i + 2 < argc))
+		{
+		gSimTraceEnabled      = true;
+		gSimTraceVerbose      = true;
+		gSimTraceWindowFirst  = atol(argv[i+1]);
+		gSimTraceWindowCount  = atol(argv[i+2]);
+		return 3;
+		}
 	if (!strcmp(argv[i], "--simtrace-track") && (i + 1 < argc))
 		{
 		gSimTraceTrack = atoi(argv[i+1]);
@@ -278,9 +292,16 @@ void SimTrace_RecordStep(const PhysicsStateF& s)
 {
 	if (!sLog || sStep >= gSimTraceMaxSteps) return;
 
+	// Outside the requested window nothing is written, but the step is still
+	// hashed and still feeds the digest -- so windowing cannot change the result,
+	// only how much of it is on paper.
+	const bool inWindow = (gSimTraceWindowFirst < 0) ||
+						  ((sStep >= gSimTraceWindowFirst) &&
+						   (sStep <  gSimTraceWindowFirst + gSimTraceWindowCount));
+
 	Field f{ FNV_OFFSET, nullptr };
 
-	if (gSimTraceVerbose)
+	if (gSimTraceVerbose && inWindow)
 		{
 		fprintf(sLog, "%08ld", sStep);
 		f.dump = sLog;
@@ -293,7 +314,10 @@ void SimTrace_RecordStep(const PhysicsStateF& s)
 	HashBytes(sDigest, f.h);
 
 	if (gSimTraceVerbose)
-		fprintf(sLog, " hash=%016llx\n", static_cast<unsigned long long>(f.h));
+		{
+		if (inWindow)
+			fprintf(sLog, " hash=%016llx\n", static_cast<unsigned long long>(f.h));
+		}
 	else if (!gSimTraceDigestOnly)
 		fprintf(sLog, "%08ld %016llx\n", sStep,
 				static_cast<unsigned long long>(f.h));
