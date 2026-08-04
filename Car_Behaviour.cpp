@@ -55,6 +55,7 @@
 #include "3D_Engine.h"
 #include "XBOXController.h"
 #include "Physics_FloatV2.h"
+#include "Det_Rand.h"
 
 /*	===== */
 /*	Debug */
@@ -2992,7 +2993,7 @@ static void LiftCarOntoTrack (void)
 		// The hang before the drop is random: 160..191, released once the
 		// byte reads positive again, so 33..64 Amiga frames.  (The Amiga used a fixed
 		// 0x8c in practice mode; this port has no practice mode.)
-		car_on_chains_countdown = 160 + (rand() & 0x1f);
+		car_on_chains_countdown = 160 + (SCR_Rand() & 0x1f);
 		return;
 		}
 

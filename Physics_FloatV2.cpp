@@ -7,6 +7,7 @@
 #include "Physics_FloatV2.h"
 #include "Track_FloatV2.h"
 #include "Det_Math.h"
+#include "Sim_Trace.h"
 
 #include <algorithm>
 #include <array>
@@ -1125,6 +1126,12 @@ void PhysicsStepF_Tick(PhysicsStateF& state, const PhysicsInput& input, double d
     gDbgAtSideByte    = static_cast<int>(state.AtSideByte);
     gDbgXAngle = state.XAngle; gDbgZAngle = state.ZAngle;
     gDbgXRotSpeed = state.XRotationSpeed; gDbgZRotSpeed = state.ZRotationSpeed;
+
+    // Determinism trace. Hashed here rather than in FloatV2_RunStep so what is
+    // recorded is the sim's own state, before CopyFloatV2ToLegacy round-trips it
+    // through the fixed-point globals and truncates the fractional carries.
+    // No-op (one predictable branch) unless --simtrace was given.
+    if (gSimTraceEnabled) SimTrace_RecordStep(state);
 }
 
 // --- Persistent state / step entry point -----------------------------------

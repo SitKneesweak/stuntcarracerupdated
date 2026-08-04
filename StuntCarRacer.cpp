@@ -18,6 +18,7 @@
 #include "Car.h"
 #include "Car_Behaviour.h"
 #include "Physics_FloatV2.h"
+#include "Sim_Trace.h"
 #include "Opponent_Behaviour.h"
 #include "wavefunctions.h"
 #include "Atlas.h"
@@ -1400,6 +1401,28 @@ static void StopEngineSound( void )
 }
 
 
+/*	Menu key codes.  Defined up here rather than next to HandleTrackMenu because
+	OnFrameMove needs STARTMENU too: --simtrace presses it to start the race.	*/
+#ifdef SCR_PORTABLE
+#define FIRSTMENU SDLK_1
+#define STARTMENU SDLK_s
+#define LEAGUEMENU SDLK_l
+#define PREVIEWVIEW SDLK_SPACE
+#define PREVIEWENTER SDLK_RETURN
+#define PREVIEWENTER2 SDLK_KP_ENTER
+#define PREVIEWLEFT SDLK_LEFT
+#define PREVIEWRIGHT SDLK_RIGHT
+#else
+#define FIRSTMENU '1'
+#define STARTMENU 'S'
+#define LEAGUEMENU 'L'
+#define PREVIEWVIEW ' '
+#define PREVIEWENTER VK_RETURN
+#define PREVIEWENTER2 VK_RETURN
+#define PREVIEWLEFT VK_LEFT
+#define PREVIEWRIGHT VK_RIGHT
+#endif
+
 void CALLBACK OnFrameMove( IDirect3DDevice9 *pd3dDevice, double fTime, float fElapsedTime, void *pUserContext )
 {
 static D3DXVECTOR3 vUpVec( 0.0f, 1.0f, 0.0f );
@@ -1422,6 +1445,35 @@ static float lastFrame = 0.0f;
 #endif
 	bFrameMoved = FALSE;
 //	VALUE3 = frameGap;
+
+	/*	Determinism trace (--simtrace).  Drive the menus straight into a race, then take
+		the controls off the keyboard: two hand-driven runs can never be diffed against
+		each other.  See Sim_Trace.h.												*/
+	if (scr::gSimTraceEnabled)
+	{
+		if (GameMode == TRACK_MENU)
+		{
+			// A named driver, not RANDOM_OPPONENT: which car we race against has to be
+			// the same on both platforms, and it must be settled before the RNG is
+			// seeded rather than by drawing from it.
+			SetRaceOpponent(0);
+			// Deactivate as well as start: while the Amiga menus are up OnFrameRender
+			// returns before the track-preview input is reached, so the race would
+			// never be entered. Same pair as the screenshot path below.
+			if (MenuStartTrack(scr::gSimTraceTrack))
+				MenuScreensDeactivate();
+		}
+		else if (GameMode == TRACK_PREVIEW)
+		{
+			keyPress = STARTMENU;		// "hit fire to continue" starts the race
+		}
+		else if (GameMode == GAME_IN_PROGRESS)
+		{
+			// Idempotent - opens the log and seeds the sim RNG on the first race frame.
+			scr::SimTrace_Begin();
+			input = scr::SimTrace_ScriptedInput();
+		}
+	}
 
 	if (GameMode == GAME_OVER)
 	{
@@ -1470,6 +1522,13 @@ static float lastFrame = 0.0f;
 		lastPhysicsT = nowT;
 		// Clamp to avoid spiral-of-death after pauses / stalls
 		if (elapsed > 0.25) elapsed = 0.25;
+
+		// Determinism trace: pin the clock. Otherwise the number of physics steps
+		// this frame depends on how long the last frame took to draw, which is the
+		// one input guaranteed to differ between a Mac and a PC. One player step per
+		// render frame, and the 50Hz engine/opponent clock still derived from it, so
+		// the two stay in exactly the relationship they have at run time.
+		if (scr::gSimTraceEnabled) elapsed = playerStep;
 		engineAccum += elapsed;
 		playerAccum += elapsed;
 
@@ -1741,25 +1800,6 @@ static float lastFrame = 0.0f;
 /*																							*/
 /*	Description:	Output track menu text													*/
 /*	======================================================================================= */
-#ifdef SCR_PORTABLE
-#define FIRSTMENU SDLK_1
-#define STARTMENU SDLK_s
-#define LEAGUEMENU SDLK_l
-#define PREVIEWVIEW SDLK_SPACE
-#define PREVIEWENTER SDLK_RETURN
-#define PREVIEWENTER2 SDLK_KP_ENTER
-#define PREVIEWLEFT SDLK_LEFT
-#define PREVIEWRIGHT SDLK_RIGHT
-#else
-#define FIRSTMENU '1'
-#define STARTMENU 'S'
-#define LEAGUEMENU 'L'
-#define PREVIEWVIEW ' '
-#define PREVIEWENTER VK_RETURN
-#define PREVIEWENTER2 VK_RETURN
-#define PREVIEWLEFT VK_LEFT
-#define PREVIEWRIGHT VK_RIGHT
-#endif
 
 /*	======================================================================================= */
 /*	Function:		MenuStartTrack															*/
@@ -3773,6 +3813,9 @@ int main(int argc, char** argv)
 				givehelp = 1;
 			}
 		}
+		else if(int used = scr::SimTrace_ParseArg(argc, argv, i)) {
+			i += used - 1;		// the loop's own ++i accounts for the first
+		}
 		else givehelp = 1;
 	}
 	if(givehelp) {
@@ -3783,6 +3826,11 @@ int main(int argc, char** argv)
 		printf("\t-w|--width <pixels>\tSet window width (e.g., 640, 800, 1280)\n");
 		printf("\t-h|--height <pixels>\tSet window height (e.g., 480, 600, 720)\n");
 		printf("\t-s|--scale <factor>\tSet scale factor (e.g., 1.0, 1.5, 2.0)\n");
+		printf("\t--simtrace [steps]\tRecord a per-step physics checksum to simtrace.log and quit\n");
+		printf("\t--simtrace-verbose\tAs --simtrace, but dump every state field too\n");
+		printf("\t--simtrace-track <n>\tTrack to trace on (0-7, default 0)\n");
+		printf("\t--simtrace-seed <n>\tSimulation RNG seed (default 0x12345678)\n");
+		printf("\t--simtrace-out <file>\tLog file to write (default simtrace.log)\n");
 		exit(0);
 	}
 
@@ -4087,6 +4135,20 @@ int main(int argc, char** argv)
 #else
 		SDL_GL_SwapBuffers();
 #endif
+
+		// Determinism trace: stop as soon as the requested steps are in the log,
+		// and never throttle - the trace clock is fixed, so running flat out just
+		// finishes sooner without changing a single number.
+		if (scr::gSimTraceEnabled)
+		{
+			if (scr::SimTrace_Finished())
+			{
+				scr::SimTrace_End();
+				run = false;
+			}
+			fLastTime = fTime;
+			continue;
+		}
 
 		// Cap the render rate. 50Hz matches the Amiga's PAL vsync, but the
 		// FloatV2 physics can step faster than that, and rendering slower than

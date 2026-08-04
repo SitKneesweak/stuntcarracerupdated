@@ -19,6 +19,7 @@
 #include "Car.h"		// visible car dimensions, which the shadow is built to match
 #include "3D_Engine.h"
 #include "Physics_FloatV2.h"
+#include "Det_Rand.h"
 
 /*	===== */
 /*	Debug */
@@ -310,7 +311,7 @@ static void ChooseOpponent (void)
 	else if ((gRaceOpponent >= 0) && (gRaceOpponent < NUM_OPPONENTS))
 		opponentsID = gRaceOpponent;
 	else
-		opponentsID = rand() % NUM_OPPONENTS;
+		opponentsID = SCR_Rand() % NUM_OPPONENTS;
 //	opponentsID = 9;	// Jumping Jack
 	}
 
@@ -409,7 +410,7 @@ void OpponentBehaviour (long *x,
 		// initialise.opponent.data
 		CalculateOpponentsRoadWheelPositions();
 		// Position the opponent a random amount above the road
-		int r = rand();
+		int r = SCR_Rand();
 		r &= 0x7f;
 		r += 0x68;
 		opp_actual_height[REAR_LEFT] = opp_rear_left_road_pos.y + r;
@@ -418,7 +419,7 @@ void OpponentBehaviour (long *x,
 		// end initialise.opponent.data
 
 		// Set opponent_max_speed
-		long s = static_cast<long>(rand()) & static_cast<long>(opp_track_speed_values[TrackID+(bSuperLeague?32:0)]);
+		long s = static_cast<long>(SCR_Rand()) & static_cast<long>(opp_track_speed_values[TrackID+(bSuperLeague?32:0)]);
 		s += static_cast<long>(opp_track_speed_values[TrackID+8+(bSuperLeague?32:0)]);
 		opponents_max_speed = s;
 //temp		opponents_max_speed = 10;
@@ -1182,7 +1183,7 @@ long height_adjust, touching_road, total_diff, i, acceleration, speed;
 		i = opp_y_speed[FRONT] | opp_y_acceleration[FRONT];
 		if ((i & 0xfffc) == 0)		// If front of car isn't moving much vertically
 			{
-			i = rand() & 0xf;
+			i = SCR_Rand() & 0xf;
 			if (i == 0)
 				opp_y_speed[FRONT] = 160;	// Make opponent do a wheelie
 			}
@@ -1398,7 +1399,7 @@ srd114	move.l	#opponents.speed.values,a1
 
 	long b = Piece_Angle_And_Template[pos];
 	b = sections_car_can_be_put_on[b&0x0f];
-	long B63ce1 = static_cast<long>(rand()) & static_cast<long>(opp_track_speed_values[track_id+16+(bSuperLeague?32:0)]);
+	long B63ce1 = static_cast<long>(SCR_Rand()) & static_cast<long>(opp_track_speed_values[track_id+16+(bSuperLeague?32:0)]);
 		 B63ce1 += static_cast<long>(opp_track_speed_values[track_id+24+(bSuperLeague?32:0)]);
 	long /*value,*/ d0;
 	if (b<0) {
@@ -1509,7 +1510,7 @@ ros1:
 
 	B1bbc2 = d2;
 
-	value = rand() & 0x1f;
+	value = SCR_Rand() & 0x1f;
 #ifdef TEST_AMIGA_ROS
 	GetRecordedAmigaWord(&value);
 #endif
@@ -2561,7 +2562,7 @@ static void OppFloatV2UpdateWheelHeights( double dtRatio, bool frameBoundary )
 			   | static_cast<long>(ClampShortF(accF));
 		if ((i & 0xfffc) == 0)			// front of car isn't moving much vertically
 		{
-			if ((rand() & 0xf) == 0)
+			if ((SCR_Rand() & 0xf) == 0)
 				gOppF.ySpd[FRONT] = 160.0;
 		}
 	}
