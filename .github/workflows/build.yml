@@ -87,6 +87,9 @@ jobs:
           mkdir -p dist
           cp stuntcarracer.exe dist/
           cp -r Tracks Sounds Bitmap DejaVuSans-Bold.ttf dist/
+          # --simtrace is a command-line flag, and double-clicking the exe just
+          # starts the game, so ship a launcher for it that needs no prompt.
+          cp tools/run-simtrace.bat dist/
           ldd stuntcarracer.exe \
             | grep -i '/mingw64/bin/' \
             | awk '{print $3}' \
