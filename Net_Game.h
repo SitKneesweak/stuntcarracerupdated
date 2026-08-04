@@ -79,6 +79,19 @@ const char* NetGameStatusLine();
 // status line is the explanation rather than progress.
 bool NetGameFailed();
 
+// True if a pause should be refused because a network race is running, printing
+// a one-line reason naming `what` when it refuses (so a dead key explains
+// itself). Pausing in lockstep is not a local matter: this machine would simply
+// stop submitting inputs, and the other player's race would freeze with it,
+// with nothing on their screen to say why. There is no "pause" in a two-player
+// race — only a quit, which at least tells the other end.
+//
+// Shaped like SimSettingLocked in Physics_FloatV2.h, and used the same way: the
+// pause keys live in two separate switch statements hundreds of lines apart
+// (the DirectX WM_KEYDOWN one and the SDL one), so every gate has to be done
+// twice.
+bool NetGamePauseBlocked(const char* what);
+
 // --- The race clock --------------------------------------------------------
 // The step counter is the shared clock: both peers start at 0 on the first
 // simulated step and advance together. It is not wall time and must never be

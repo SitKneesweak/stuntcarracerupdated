@@ -3258,6 +3258,7 @@ void CALLBACK KeyboardProc( UINT nChar, bool bKeyDown, bool bAltDown, void *pUse
             break;
 
         case VK_F6:
+			if (scr::NetGamePauseBlocked("Pausing the player")) break;
             bPlayerPaused = !bPlayerPaused;
             break;
 
@@ -3334,10 +3335,12 @@ void CALLBACK KeyboardProc( UINT nChar, bool bKeyDown, bool bAltDown, void *pUse
             break;
 
 		case 'O':
+			if (scr::NetGamePauseBlocked("Pausing")) break;
 			bPaused = FALSE;
             break;
 
 		case 'P':
+			if (scr::NetGamePauseBlocked("Pausing")) break;
 			bPaused = TRUE;
             break;
 
@@ -3597,6 +3600,7 @@ bool process_events()
 					break;
 
 				case SDLK_F6:
+					if (scr::NetGamePauseBlocked("Pausing the player")) break;
 					bPlayerPaused = !bPlayerPaused;
 					break;
 
@@ -3779,10 +3783,12 @@ bool process_events()
 					break;
 
 				case SDLK_o:
+					if (scr::NetGamePauseBlocked("Pausing")) break;
 					bPaused = FALSE;
 					break;
 
 				case SDLK_p:
+					if (scr::NetGamePauseBlocked("Pausing")) break;
 					bPaused = TRUE;
 					break;
 
@@ -3832,7 +3838,12 @@ bool process_events()
 					{
 						bQuitConfirm = TRUE;
 						bQuitConfirmWasPaused = bPaused;
-						bPaused = TRUE;
+						// The confirmation still goes up in a two-player race, but
+						// without the freeze: stopping the simulation here would
+						// stall the other player's game for as long as this one
+						// took to answer it.  The race carries on behind the prompt.
+						if (!scr::NetGameRacing())
+							bPaused = TRUE;
 						break;
 					}
 					return false;

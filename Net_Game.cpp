@@ -200,6 +200,17 @@ bool NetGameFailed()
     return (st == NetState_Failed) || (st == NetState_Desynced) || (st == NetState_Closed);
 }
 
+bool NetGamePauseBlocked(const char* what)
+{
+    if (!NetGameRacing())
+        return false;
+
+    printf("%s is not available in a two-player race - it would freeze the other "
+           "player's game too.\n", what ? what : "Pausing");
+    fflush(stdout);
+    return true;
+}
+
 void NetGameRaceBegun()
 {
     if (!gG.active)
