@@ -82,7 +82,9 @@ typedef int32_t INT;
 typedef BYTE *LPBYTE;
 
 #define D3DX_PI PI
-#define CALLBACK 
+#ifndef CALLBACK		// already __stdcall on Windows, see the top of this header
+#define CALLBACK
+#endif
 
 #define TRUE true
 #define FALSE false
