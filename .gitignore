@@ -24,3 +24,6 @@ SCRlog.txt
 /reference/
 
 .DS_Store
+
+# Test binaries
+tests/net_socket_test
