@@ -361,9 +361,10 @@ void NetLocalAddresses(char* buf, int bufLen)
         const int want = (family == 0) ? AF_INET : AF_INET6;
         for (IP_ADAPTER_ADDRESSES* a = adapters; a; a = a->Next)
         {
+            // No loopback test on the adapter itself: IF_TYPE_SOFTWARE_LOOPBACK
+            // lives in <ipifcons.h>, which iptypes.h does not pull in on every
+            // toolchain, and IsUsefulV4/V6 reject 127/8 and ::1 anyway.
             if (a->OperStatus != IfOperStatusUp)
-                continue;
-            if (a->IfType == IF_TYPE_SOFTWARE_LOOPBACK)
                 continue;
 
             for (IP_ADAPTER_UNICAST_ADDRESS* u = a->FirstUnicastAddress; u; u = u->Next)
