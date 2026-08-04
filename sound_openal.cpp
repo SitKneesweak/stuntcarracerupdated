@@ -364,7 +364,7 @@ sound_buffer_t * sound_load(void* data, int size, int bits, int sign, int channe
 		return NULL;
 	ALenum error;
 	ALenum format;
-	u_int8_t *wav_buffer;
+	uint8_t *wav_buffer;
 	sound_buffer_t * buffer;
 
 	// create the buffer
@@ -387,7 +387,7 @@ sound_buffer_t * sound_load(void* data, int size, int bits, int sign, int channe
 		return NULL;
 	}
 
-    wav_buffer = (u_int8_t*)data;
+    wav_buffer = (uint8_t*)data;
 
     if(bits == 8) // 8 bit
 	{
@@ -413,7 +413,7 @@ sound_buffer_t * sound_load(void* data, int size, int bits, int sign, int channe
 		{
 			int i;
 			for(i = 0;i < (int) size/2;i++)
-				((u_int16_t*)wav_buffer)[i] ^= 0x8000; // converts U16 to S16
+				((uint16_t*)wav_buffer)[i] ^= 0x8000; // converts U16 to S16
 			printf("sound_buffer: converted u16 to s16\n");
 		}
 		if(channels == 1)

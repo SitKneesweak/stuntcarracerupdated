@@ -41,6 +41,11 @@
 #endif
 #include <AL/al.h>
 #include <wchar.h>
+#include <stdint.h>		// the DWORD/BYTE/WORD typedefs below; SDL used to drag this in
+#ifdef _WIN32
+// wcscasecmp is POSIX; the MSVCRT spelling is _wcsicmp.
+#define wcscasecmp _wcsicmp
+#endif
 #define USEGLM
 #ifdef USEGLM
 #define GLM_FORCE_RADIANS
