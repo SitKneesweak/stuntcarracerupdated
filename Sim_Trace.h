@@ -87,6 +87,11 @@ void SimTrace_Begin();
 // legacy fixed-point globals.
 void SimTrace_RecordStep(const PhysicsStateF& s);
 
+// The per-step state hash on its own, with no logging and no step counting.
+// Netplay trades this between peers to detect a desync at runtime, which it has
+// to be able to do in an ordinary race with no trace running.
+uint64_t SimTrace_HashState(const PhysicsStateF& s);
+
 // True once gSimTraceMaxSteps steps have been recorded, so the main loop can
 // close the log and exit.
 bool SimTrace_Finished();

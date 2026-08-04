@@ -54,6 +54,16 @@ const double kHelloInterval = 0.25;
 
 const double kPingInterval = 1.0;
 
+// How often to repeat our inputs while stalled.
+//
+// Inputs are normally sent only when a new one is submitted, and kRedundancy
+// makes that robust *while the race is advancing*. A stall breaks that: if the
+// packet carrying our input for the step the peer is waiting on is lost, the
+// peer stalls, so it stops submitting, so it stops sending - and we then stall
+// waiting on it. Neither side ever sends again and the session deadlocks on a
+// single dropped datagram. Repeating while stalled is what breaks the tie.
+const double kStallResendInterval = 0.05;
+
 class Writer
 {
 public:
@@ -199,6 +209,7 @@ struct Session
     double         lastRecvTime;
     double         lastHelloTime;
     double         lastPingTime;
+    double         lastStallSendTime;   // see kStallResendInterval
     double         connectStart;
     uint64_t       pingToken;
     bool           pingOutstanding;
@@ -230,6 +241,7 @@ struct Session
         lastRecvTime  = 0.0;
         lastHelloTime = 0.0;
         lastPingTime  = 0.0;
+        lastStallSendTime = 0.0;
         connectStart  = 0.0;
         pingToken     = 0;
         pingOutstanding = false;
@@ -837,6 +849,15 @@ void NetPoll(double now)
             Failed(NetFail_Timeout);
             break;
         }
+        // Break a stall deadlock: see kStallResendInterval. Only while actually
+        // stalled, so a healthy race still sends exactly one packet per step.
+        if (gS.state == NetState_Stalled &&
+            now - gS.lastStallSendTime > kStallResendInterval)
+        {
+            gS.lastStallSendTime = now;
+            SendInputs();
+        }
+
         if (!gS.pingOutstanding && now - gS.lastPingTime > kPingInterval)
         {
             gS.pingToken       = BitsOfDouble(now);

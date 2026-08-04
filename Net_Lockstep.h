@@ -58,7 +58,12 @@ const uint16_t kNetProtocolVersion = 1;
 // that could alter results. Two peers on different sim versions would desync
 // immediately and mysteriously; this turns that into a clear refusal at
 // connect. THIS IS MANUAL — if you change the physics, change this.
-const uint16_t kNetSimVersion = 1;
+// 2: the two-car head-to-head wiring. The physics itself is byte-for-byte what
+//    version 1 computed (the simtrace digests are unchanged), but what a *race*
+//    depends on is not: both cars are now stepped in role order and the start
+//    placement moved off the crane's re-lift offset onto a small one. A version
+//    1 peer would place its cars elsewhere and diverge immediately.
+const uint16_t kNetSimVersion = 2;
 
 // Steps of input delay. See the header comment.
 const int kInputDelay = 3;

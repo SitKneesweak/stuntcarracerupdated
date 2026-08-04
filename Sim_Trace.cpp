@@ -301,6 +301,22 @@ void SimTrace_Begin()
 		   static_cast<unsigned long>(gSimTraceSeed));
 }
 
+uint64_t SimTrace_HashState(const PhysicsStateF& s)
+{
+	// The same per-step hash SimTrace_RecordStep computes, with no log and no
+	// step counter - for the netplay desync check, which needs the number every
+	// step of every race rather than only when --simtrace is on. Driven by the
+	// same SIMTRACE_FIELDS list, so the two can never disagree about what "the
+	// state" is.
+	Field f{ FNV_OFFSET, nullptr };
+
+	#define SIMTRACE_EMIT(name, value) f(name, value);
+	SIMTRACE_FIELDS(SIMTRACE_EMIT, s)
+	#undef SIMTRACE_EMIT
+
+	return f.h;
+}
+
 void SimTrace_RecordStep(const PhysicsStateF& s)
 {
 	if (!sLog || sStep >= gSimTraceMaxSteps) return;
