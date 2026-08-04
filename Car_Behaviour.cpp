@@ -404,9 +404,6 @@ static long spark_step_count = 0;
 	// CalculateSteering's piece hint, hoisted for the same reason as cwrh_piece.
 static long steering_piece = 0;
 
-	// Race-start lateral placement override, see SetCarStartSideOffset.  Zero means
-	// "use swing_from_left", which is every single-player placement.
-static long start_side_offset = 0;
 static void SetWheelRotationSpeed();
 
 #ifdef NOT_USED
@@ -4778,10 +4775,7 @@ static void PositionCarAbovePiece (long piece)
 	 * The side is whichever one the car left the road on (swing_from_left), so the
 	 * crane picks it up where it went off rather than always from the right.
 	 */
-	/*	A race start overrides this: see SetCarStartSideOffset.  Zero means "no override",
-		which is every single-player placement.									*/
-	long side = (start_side_offset != 0) ? start_side_offset
-										 : (swing_from_left ? -160 : 160);
+	long side = (swing_from_left ? -160 : 160);
 
 	// The Amiga's arithmetic (ptsor1, StuntCarRacer.s:8070) is
 	// (160 << 7) * trig * 2 >> 16 << 6, i.e. 160 * trig / 4 world units.  Its
@@ -6249,26 +6243,26 @@ long ActiveCar (void)
 
 
 /*	======================================================================================= */
-/*	Function:		SetCarStartSideOffset												*/
+/*	Function:		SetCarSwingFromLeft													*/
 /*																								*/
-/*	Description:	How far to the side of the piece centre the crane sets this car down,	*/
-/*					in the units of player.to.side.of.road (StuntCarRacer.s:8070) - negative	*/
-/*					is left.  Zero restores the normal behaviour, which is +/-160 on whichever	*/
-/*					side the car left the road (swing_from_left), and is what every			*/
-/*					single-player placement uses.											*/
+/*	Description:	Which side of the road the crane holds this car on, and therefore which	*/
+/*					way it swings as it lowers.  Normally this is wherever the car left the	*/
+/*					road (UpdateOffMapStatus sets it), which is all a single-player race		*/
+/*					ever needs.																*/
 /*																								*/
-/*					A head-to-head start needs this because +/-160 is a *re-lift* offset: it	*/
-/*					puts the car 640 piece units out, past the road edge at 384, which is	*/
-/*					right for picking a car up where it went off but puts two cars nearly two	*/
-/*					road widths apart at the start of a race.  The two cars want to be beside	*/
-/*					each other on the track, the way the Amiga starts its opponent (road x	*/
-/*					0x4c against a centre of 0x80, R.5a3f8).									*/
+/*					A head-to-head start is the one place it has to be dictated.  The Amiga	*/
+/*					does exactly this on its link-up: before set.players.restart.position at	*/
+/*					the start of a two-player race it writes swing.from.left = $80 if the	*/
+/*					machine is the SLAVE and leaves it clear on the MASTER					*/
+/*					(StuntCarRacer.s:10268), so the two cars hang on opposite sides of the	*/
+/*					road and swing in towards each other.  Get this wrong and both cars are	*/
+/*					craned in from the same side, on top of one another.						*/
 /*																								*/
-/*					The caller picks the value from the network role, never from which car is	*/
+/*					The caller picks the side from the network role, never from which car is	*/
 /*					local, so both peers place both cars identically.						*/
 /*	======================================================================================= */
 
-void SetCarStartSideOffset (long side)
+void SetCarSwingFromLeft (long fromLeft)
 	{
-	start_side_offset = side;
+	swing_from_left = (fromLeft ? TRUE : FALSE);
 	}

@@ -75,7 +75,7 @@ extern long ActiveCar (void);
 	default, +/-160 on whichever side the car left the road, which is what every
 	single-player placement uses.  Head-to-head passes a much smaller value so the two
 	cars start beside each other on the track rather than off both edges of it.			*/
-extern void SetCarStartSideOffset (long side);
+extern void SetCarSwingFromLeft (long fromLeft);
 
 extern long AmigaVolumeToDirectX (long amiga_volume);
 

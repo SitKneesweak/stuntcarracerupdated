@@ -1390,6 +1390,11 @@ static long remote_x_angle = 0, remote_y_angle = 0, remote_z_angle = 0;
 extern long player_current_piece;		// Car_Behaviour.cpp
 extern long opponents_current_piece;	// Opponent_Behaviour.cpp
 
+/*	Each car's across-road position as of its own step, for the trace below.  Reading it
+	after both steps would report the local car twice - it is per-car context.		*/
+extern long players_road_x_position;	// Car_Behaviour.cpp
+static long net_trace_road_x[NUM_CARS] = { 0, 0 };
+
 static void StepOneCar( long slot, DWORD carInput )
 {
 	SelectCar(slot);
@@ -1428,6 +1433,8 @@ static void StepOneCar( long slot, DWORD carInput )
 			the remote player's piece now, not the AI's.						*/
 		opponents_current_piece = player_current_piece;
 		}
+
+	net_trace_road_x[slot] = players_road_x_position;
 }
 
 /*	One lockstep simulation step: both cars, in role order.  Returns the state hash of the
@@ -1461,11 +1468,12 @@ static uint64_t NetStepBothCars( DWORD hostInput, DWORD joinerInput )
 		const uint32_t s = scr::NetGameStep();
 		if ((s % 60) == 0)
 			{
-			printf("net step %5u  local xyz %8ld %8ld %8ld  piece %ld"
-				   "   remote xyz %8ld %8ld %8ld  piece %ld  oppID %ld\n",
+			printf("net step %5u  local xyz %8ld %8ld %8ld  piece %ld roadx %ld"
+				   "   remote xyz %8ld %8ld %8ld  piece %ld roadx %ld  oppID %ld\n",
 				   (unsigned)s, player1_x, player1_y, player1_z, player_current_piece,
+				   net_trace_road_x[PLAYER],
 				   opponent_x, opponent_y, opponent_z, opponents_current_piece,
-				   opponentsID);
+				   net_trace_road_x[OPPONENT], opponentsID);
 			fflush(stdout);
 			}
 		}
@@ -1473,22 +1481,16 @@ static uint64_t NetStepBothCars( DWORD hostInput, DWORD joinerInput )
 	return h;
 }
 
-/*	Hang one of the two cars on the crane at the start of a head-to-head race.  `sideOffset`
-	is picked from the network role by the caller so both peers place both cars the same
-	way; the two take opposite signs so they start beside each other rather than inside
-	one another.  See SetCarStartSideOffset for the units and why the default is wrong
-	here.																				*/
-/*	+/-24 puts each car 72 piece units from the centre line.  Road x runs 0..0xff across
-	the road with 0x80 at the centre, and 160 of these units is 640 piece coords against a
-	road half width of 384 - so one road x unit is three piece coords, and 72 is 24 road x
-	units.  The two cars therefore start 48 road x units apart, which is about what the
-	Amiga's own pair get (it leaves the player near the centre and puts the opponent at
-	0x4c, R.5a3f8).  Anything much wider and the drop start lands them on the barrier.	*/
-#define NET_START_SIDE_OFFSET	24
-static void PlaceNetCarOnChains( long slot, long sideOffset )
+/*	Hang one of the two cars on the crane at the start of a head-to-head race.  `swingFromLeft`
+	is picked from the network role by the caller, never from which car is local, so both
+	peers hang both cars the same way - and the two take opposite sides, which is what keeps
+	the cars off one another.  This is the Amiga's own link-up arrangement: the SLAVE sets
+	swing.from.left before set.players.restart.position and the MASTER leaves it clear
+	(StuntCarRacer.s:10268).  See SetCarSwingFromLeft.									*/
+static void PlaceNetCarOnChains( long slot, long swingFromLeft )
 {
 	SelectCar(slot);
-	SetCarStartSideOffset(sideOffset);
+	SetCarSwingFromLeft(swingFromLeft);
 
 	if (slot == PLAYER)
 		{
@@ -2214,8 +2216,9 @@ static void HandleTrackPreviewInput( void )
 			// roll different drop times and desync on the very first step.
 			scr::NetGameRaceBegun();
 
-			PlaceNetCarOnChains(hostSlot,    NET_START_SIDE_OFFSET);
-			PlaceNetCarOnChains(joinerSlot, -NET_START_SIDE_OFFSET);
+			// Host is the MASTER's side, joiner the SLAVE's, as on the Amiga.
+			PlaceNetCarOnChains(hostSlot,   FALSE);
+			PlaceNetCarOnChains(joinerSlot, TRUE);
 
 			SelectCar(PLAYER);
 
