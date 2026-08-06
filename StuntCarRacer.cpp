@@ -95,6 +95,11 @@ bool bWorldStepDue = FALSE;
 // to draw the same trajectory at the display's refresh rate instead of in 8.3Hz jumps.
 double gWorldStepSeconds = static_cast<double>(DEFAULT_FRAME_GAP) / 50.0;
 
+// TRUE once the swap interval has been accepted, in which case the buffer swap paces the
+// main loop and its wall-clock SDL_Delay stands down.  See the setup in the SDL init and
+// the cap at the bottom of the main loop.
+static bool bVsyncPacing = FALSE;
+
 bool bShowStats = FALSE;
 bool bNewGame = FALSE;
 bool bPaused = FALSE;
@@ -152,6 +157,35 @@ static long player1_x = 0,
 static long player1_x_angle = (0<<6),
 			player1_y_angle = (0<<6),
 			player1_z_angle = (0<<6);
+
+/*	Render interpolation.  The physics runs on a fixed clock and must keep doing so - the
+	handling is an artifact of the discrete step, and lockstep netplay needs every peer to
+	compute the same numbers - but the *display* has no such obligation.  So keep the last
+	two physics states and draw the car and camera at a blend between them, chosen by how
+	much of a step the accumulator is still holding.  The simulation never sees this: the
+	blended values are written into the globals just long enough to build the transforms
+	and are put straight back afterwards (see PLAYER_STATE_RESTORE at the end of the
+	GAME_IN_PROGRESS branch).
+
+	This is what makes motion smooth without making the physics frame-rate-dependent, and
+	it is the reason we can render above the physics rate at all.						*/
+struct PLAYER_STATE
+{
+	long x, y, z;
+	long x_angle, y_angle, z_angle;
+};
+
+static PLAYER_STATE gPlayerPrev = { 0,0,0, 0,0,0 };		// state before the most recent step
+static PLAYER_STATE gPlayerCurr = { 0,0,0, 0,0,0 };		// state after it
+static bool         gPlayerStatesValid = false;
+static double       gInterpAlpha = 0.0;					// 0 = on gPlayerPrev, 1 = on gPlayerCurr
+bool                gRenderInterpolation = true;		// F3 toggles, for A/B comparison
+
+/*	A position jump this big in one step is a teleport, not motion: the crane placing the
+	car, a respawn, the 'R' turnaround.  Interpolating across one would smear the car
+	across the track, so snap instead.  One step at racing speed moves the car a small
+	fraction of this.															*/
+#define INTERP_TELEPORT_LIMIT	(2048 << LOG_PRECISION)		// world units; a car is ~240 long
 
 // Opponent orientation
 static long opponent_x = 0,
@@ -1239,6 +1273,70 @@ static long CalcAmigaYPerspectiveShift( void )
 	return (shift << AMIGA_Y_SHIFT_LOG);
 }
 
+/*	======================================================================================= */
+/*	Render interpolation helpers - see the PLAYER_STATE comment above.						*/
+/*	======================================================================================= */
+
+static void PlayerStateCapture( PLAYER_STATE *s )
+{
+	s->x = player1_x;			s->y = player1_y;			s->z = player1_z;
+	s->x_angle = player1_x_angle;	s->y_angle = player1_y_angle;	s->z_angle = player1_z_angle;
+}
+
+static void PlayerStateApply( const PLAYER_STATE *s )
+{
+	player1_x = s->x;			player1_y = s->y;			player1_z = s->z;
+	player1_x_angle = s->x_angle;	player1_y_angle = s->y_angle;	player1_z_angle = s->z_angle;
+}
+
+/*	Blend one angle the short way round.  These are 16-bit angles: y_angle wraps through
+	zero freely, so a car crossing north goes 65500 -> 40 and the straight average would
+	spin it the long way round the compass.  Take the difference into signed range first,
+	then step a fraction of it.  x_angle and z_angle are clamped well inside the range and
+	never wrap, but the same arithmetic is correct for them anyway.					*/
+static long LerpAngle( long from, long to, double alpha )
+{
+	long delta = (to - from) & (MAX_ANGLE - 1);
+	if (delta >= (MAX_ANGLE / 2))
+		delta -= MAX_ANGLE;
+
+	long result = from + static_cast<long>(static_cast<double>(delta) * alpha);
+
+	/*	x_angle and z_angle are held as signed values around zero (the +-11264 pitch/roll
+		clamps), while y_angle is a 0..65535 compass bearing that the game masks.  Masking
+		here would turn a small negative pitch into a value near 65536, so only bring the
+		result back into range when the input was already in it.					*/
+	if ((from >= 0) && (to >= 0))
+		result &= (MAX_ANGLE - 1);
+
+	return result;
+}
+
+static void PlayerStateLerp( PLAYER_STATE *out, const PLAYER_STATE *a, const PLAYER_STATE *b, double alpha )
+{
+	/*	A teleport, not motion - the crane setting the car down, a respawn, the 'R'
+		turnaround.  Blending across it would drag the car through the scenery, so take
+		the new state whole.													*/
+	long long dx = static_cast<long long>(b->x) - a->x;
+	long long dy = static_cast<long long>(b->y) - a->y;
+	long long dz = static_cast<long long>(b->z) - a->z;
+	if ((llabs(dx) > INTERP_TELEPORT_LIMIT) ||
+		(llabs(dy) > INTERP_TELEPORT_LIMIT) ||
+		(llabs(dz) > INTERP_TELEPORT_LIMIT))
+	{
+		*out = *b;
+		return;
+	}
+
+	out->x = a->x + static_cast<long>(static_cast<double>(dx) * alpha);
+	out->y = a->y + static_cast<long>(static_cast<double>(dy) * alpha);
+	out->z = a->z + static_cast<long>(static_cast<double>(dz) * alpha);
+
+	out->x_angle = LerpAngle(a->x_angle, b->x_angle, alpha);
+	out->y_angle = LerpAngle(a->y_angle, b->y_angle, alpha);
+	out->z_angle = LerpAngle(a->z_angle, b->z_angle, alpha);
+}
+
 static void CalcGameViewpoint( void )
 {
 long x_offset, y_offset, z_offset;
@@ -1496,6 +1594,9 @@ static void PlaceNetCarOnChains( long slot, long swingFromLeft )
 		{
 		PlaceCarOnChainsForNewGame(&player1_x, &player1_y, &player1_z,
 								   &player1_x_angle, &player1_y_angle, &player1_z_angle);
+		// The car has been put somewhere new outright - there is no motion between the
+		// old state and this one for the renderer to blend.
+		gPlayerStatesValid = false;
 		}
 	else
 		{
@@ -1721,7 +1822,20 @@ static float lastFrame = 0.0f;
 
 		// How many player physics steps are due this render frame.
 		PlayerPhysicsSteps = 0;
-		while (playerAccum >= playerStep)
+		/*	Take the step slightly early.  The physics rate and the display rate are both
+			60Hz, so the accumulator sits exactly on its threshold and a frame that runs
+			a fraction of a millisecond long takes two steps while the next takes none.
+			The world is then advancing 0, 2, 1, 1, 0, 2... and a rotating view shears
+			by a double-sized angle every few frames.  The margin absorbs that: accum
+			goes marginally negative instead, and the next frame's elapsed pays it back,
+			so no time is created or lost over any span longer than a frame.
+
+			2% is well inside the slop we are trying to swallow and well below the point
+			where a genuinely different frame rate would be mistaken for this one.  The
+			trace clock feeds in exactly playerStep, so it still takes exactly one step
+			per frame and the determinism run is unaffected.									*/
+		const double stepMargin = playerStep * 0.02;
+		while (playerAccum >= playerStep - stepMargin)
 		{
 			playerAccum -= playerStep;
 			++PlayerPhysicsSteps;
@@ -1733,6 +1847,13 @@ static float lastFrame = 0.0f;
 			// Legacy: the player moves on the frameGap clock, as before.
 			PlayerPhysicsSteps = ranLegacyStep ? 1 : 0;
 		}
+
+		/*	Whatever the accumulator still holds is how far past the last physics state
+			the display clock has reached - which is exactly the blend factor for the
+			render.  The step margin above can leave it marginally negative; clamp.	*/
+		gInterpAlpha = playerAccum / playerStep;
+		if (gInterpAlpha < 0.0) gInterpAlpha = 0.0;
+		if (gInterpAlpha > 1.0) gInterpAlpha = 1.0;
 
 		bOpponentStepDue = ranLegacyStep;
 
@@ -1748,9 +1869,15 @@ static float lastFrame = 0.0f;
 		// animate ~7x too fast, so gate it on the legacy clock explicitly.
 		bDrawBridgeStepDue = ranLegacyStep;
 
-		// Nothing to do at all this render frame?
+		/*	Nothing to do at all this render frame?  With interpolation there still is:
+			no new physics state, but a new point in time to draw the old ones at, which
+			is the whole reason the display can run above the physics rate.  The step
+			loops below are all count-gated, so falling through costs nothing.	*/
 		if ((PlayerPhysicsSteps == 0) && !ranLegacyStep)
-			return;
+		{
+			if (!(gRenderInterpolation && (GameMode == GAME_IN_PROGRESS) && gPlayerStatesValid))
+				return;
+		}
 	}
 	else if (GameMode == TRACK_MENU)
 	{
@@ -1792,6 +1919,10 @@ static float lastFrame = 0.0f;
 					if (!scr::NetStepReady(s))
 						break;		// the peer's input has not arrived - do NOT simulate
 
+					// Snapshot before the step, so the pair the renderer blends is
+					// always the last two states - see PLAYER_STATE.
+					PlayerStateCapture(&gPlayerPrev);
+
 					const uint32_t localIn  = scr::NetLocalInput(s);
 					const uint32_t remoteIn = scr::NetRemoteInput(s);
 					const bool     isHost   = scr::NetGameLocalIsHost();
@@ -1802,6 +1933,9 @@ static float lastFrame = 0.0f;
 
 					scr::NetReportDigest(s, hash);
 					scr::NetGameAdvanceStep();
+
+					PlayerStateCapture(&gPlayerCurr);
+					gPlayerStatesValid = true;
 				}
 			}
 			else if ((GameMode == GAME_IN_PROGRESS) && (!bPlayerPaused))
@@ -1821,6 +1955,10 @@ static float lastFrame = 0.0f;
 				if (scr::gUseFloatV2Physics)
 					CalculatePlayersRoadPosition();
 
+				// Snapshot before the step, so the pair the renderer blends is always
+				// the last two states - see PLAYER_STATE.
+				PlayerStateCapture(&gPlayerPrev);
+
 				CarBehaviour(input,
 							 &player1_x,
 							 &player1_y,
@@ -1828,6 +1966,9 @@ static float lastFrame = 0.0f;
 							 &player1_x_angle,
 							 &player1_y_angle,
 							 &player1_z_angle);
+
+				PlayerStateCapture(&gPlayerCurr);
+				gPlayerStatesValid = true;
 				}
 			}
 
@@ -1921,6 +2062,22 @@ static float lastFrame = 0.0f;
 	}
 	else if (GameMode == GAME_IN_PROGRESS)
 	{
+		/*	Draw at a blend of the last two physics states rather than at the newest one.
+			Everything below - the camera basis, the eye point, the car's own transform -
+			is derived from these globals, so writing the blended state here interpolates
+			all of it at once.  The real state goes back at the end of the branch, before
+			anything else can see it: the simulation must never read a blended value.	*/
+		PLAYER_STATE trueState;
+		const bool bInterp = gRenderInterpolation && gPlayerStatesValid && !bPaused
+							 && !scr::gSimTraceEnabled;
+		if (bInterp)
+		{
+			PLAYER_STATE blended;
+			PlayerStateCapture(&trueState);
+			PlayerStateLerp(&blended, &gPlayerPrev, &gPlayerCurr, gInterpAlpha);
+			PlayerStateApply(&blended);
+		}
+
 		CalcGameViewpoint();
 
 		// The eye point keeps its fraction here -- see WorldF(). The track preview
@@ -1989,6 +2146,11 @@ static float lastFrame = 0.0f;
 		D3DXMatrixMultiply(&matView, &matView, &matTrans);
 #endif
 		pd3dDevice->SetTransform( D3DTS_VIEW, &matView );
+
+		// PLAYER_STATE_RESTORE.  The transforms are built; put the simulation's own
+		// state back before anything else reads it.
+		if (bInterp)
+			PlayerStateApply(&trueState);
 	}
 
 	if (!bPaused)
@@ -2263,6 +2425,7 @@ static void HandleTrackPreviewInput( void )
 									   &player1_x_angle,
 									   &player1_y_angle,
 									   &player1_z_angle);
+			gPlayerStatesValid = false;
 			}
 		}
 
@@ -3626,6 +3789,13 @@ bool process_events()
 					DXUTReset3DEnvironment();
 					break;
 
+				case SDLK_F3:
+					// Render interpolation on/off, for an A/B against the raw
+					// physics rate.  Display only - see PLAYER_STATE.
+					gRenderInterpolation = !gRenderInterpolation;
+					printf("Render interpolation: %s\n", gRenderInterpolation ? "on" : "off");
+					break;
+
 				case SDLK_F4:
 					NextSceneryType();
 					break;
@@ -4300,6 +4470,16 @@ int main(int argc, char** argv)
 	// Resolve the post-GL-1.1 entry points now the context is current. Failure is not
 	// fatal: the game falls back to fixed-function, minus fog and sharp-pixel filtering.
 	SCR_LoadGLProcs();
+	{
+		int r=0,g=0,b=0,d=0,ms=0,msb=0;
+		SDL_GL_GetAttribute(SDL_GL_RED_SIZE,&r);
+		SDL_GL_GetAttribute(SDL_GL_GREEN_SIZE,&g);
+		SDL_GL_GetAttribute(SDL_GL_BLUE_SIZE,&b);
+		SDL_GL_GetAttribute(SDL_GL_DEPTH_SIZE,&d);
+		SDL_GL_GetAttribute(SDL_GL_MULTISAMPLEBUFFERS,&msb);
+		SDL_GL_GetAttribute(SDL_GL_MULTISAMPLESAMPLES,&ms);
+		printf("GL framebuffer: colour %d/%d/%d  depth %d  msaa %dx%d\n", r,g,b,d,msb,ms);
+	}
 	// Drawable size, not window size: on a HiDPI display these differ and the
 	// GL viewport is in pixels. dpiFactor rescales the point-based -s/-w/-h
 	// options so a requested size still means the same physical size.
@@ -4313,10 +4493,35 @@ int main(int argc, char** argv)
 			dpiFactor = 1.0f;
 	}
 	SDL_SetWindowTitle(window, maintitle);
-	// Disable vsync so the main loop's wall-clock cap governs frame rate.
-	// Without this, high-refresh displays (e.g. 120Hz on macOS) drive OnFrameMove
-	// faster than 50Hz and the physics (gated per-frame) runs too fast.
-	SDL_GL_SetSwapInterval(0);
+	/*	Frame pacing.  The physics is driven by a wall-clock accumulator now (see
+		OnFrameMove), so a faster display no longer makes the world run fast, and vsync
+		is the better clock: SDL_Delay only has millisecond granularity plus scheduling
+		slop, so a self-paced loop swaps at arbitrary points in the scanout and every
+		frame is a few ms long or short.  That jitter is what shows up as judder when
+		the whole view rotates - on the crane swing, say - because then every pixel on
+		screen is moving rather than just the car.
+
+		On a high-refresh display take every 2nd (120Hz) or 3rd (180Hz) refresh so the
+		presented rate still lands near 60: drawing at 120 with 60Hz physics would just
+		show each state twice.  If the driver refuses the interval, fall back to the
+		wall-clock cap.												*/
+	{
+		int interval = 1;
+#ifdef USE_SDL2
+		SDL_DisplayMode mode;
+		if (SDL_GetCurrentDisplayMode(SDL_GetWindowDisplayIndex(window), &mode) == 0 && mode.refresh_rate > 0)
+		{
+			interval = (mode.refresh_rate + 30) / 60;	// nearest multiple of 60Hz
+			if (interval < 1) interval = 1;
+			if (interval > 4) interval = 4;
+		}
+#endif
+		bVsyncPacing = (SDL_GL_SetSwapInterval(interval) == 0);
+		if (!bVsyncPacing && interval != 1)
+			bVsyncPacing = (SDL_GL_SetSwapInterval(1) == 0);
+		if (!bVsyncPacing)
+			SDL_GL_SetSwapInterval(0);
+	}
 #endif
 	{
 		// icon...
@@ -4481,6 +4686,14 @@ int main(int argc, char** argv)
 				scr::SimTrace_End();
 				run = false;
 			}
+			fLastTime = fTime;
+			continue;
+		}
+
+		// Vsync is pacing the loop, so there is nothing to wait for: sleeping on top of
+		// it would only push the next swap past a refresh and drop a frame.
+		if (bVsyncPacing)
+		{
 			fLastTime = fTime;
 			continue;
 		}

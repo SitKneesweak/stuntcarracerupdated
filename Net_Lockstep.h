@@ -63,7 +63,11 @@ const uint16_t kNetProtocolVersion = 1;
 //    depends on is not: both cars are now stepped in role order and the start
 //    placement moved off the crane's re-lift offset onto a small one. A version
 //    1 peer would place its cars elsewhere and diverge immediately.
-const uint16_t kNetSimVersion = 2;
+// 3: the crane's roll is interpolated across the steps between Amiga frames
+//    (UpdateSwingRollBetweenFrames) instead of being held. The crane sequence is
+//    frame-exact either way, but the roll feeds the lift direction, so the two
+//    versions drift apart while a car is on the chains.
+const uint16_t kNetSimVersion = 3;
 
 // Steps of input delay. See the header comment.
 const int kInputDelay = 3;

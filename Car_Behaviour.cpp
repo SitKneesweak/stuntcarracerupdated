@@ -202,6 +202,9 @@ static long car_on_chains_countdown = 0;
 	// the roll decays towards +/-16 (high byte) before the crane lets go.
 static long swing_from_left = FALSE;
 static long swing_magnitude = 0;
+	// What the next crane frame will add to swing_magnitude, so the physics steps in
+	// between can walk the roll towards it.  See UpdateSwingRollBetweenFrames.
+static long swing_pending_step = 0;
 static long required_raise_height = 0;
 
 	// Set in CarControl, read by the "press fire to be dropped" path of a re-lift.
@@ -489,6 +492,7 @@ void ResetPlayer (void)
 	// car went off, and UpdateOffMapStatus set it well before this reset runs.
 	car_on_chains_countdown = 0;
 	swing_magnitude = 0;
+	swing_pending_step = 0;
 	required_raise_height = 0;
 	chain_fire_pressed = FALSE;
 	chain_frame_phase = 0.0;
@@ -2899,6 +2903,19 @@ static long RaiseCarOffGround (long amount)
 
 #define	SWING_REDUCTION		238		// REDUCTION, StuntCarRacer.s:29
 
+	// The roll the crane holds the car at, for a given swing magnitude.  Split out of
+	// SwingCar so the between-frames interpolation writes it exactly the same way.
+static void WriteSwingRoll (long magnitude)
+	{
+	// players.x.offset.from.road.centre, from set.road.centre.values (StuntCarRacer.s:13452)
+	long x_offset = players_road_x_position - (ROAD_WIDTH/2);
+	if (Track[player_current_piece].oppositeDirection)
+		x_offset = -x_offset;
+
+	player_z_angle = ((magnitude - (x_offset << 5)) & (MAX_ANGLE - 1));
+	}
+
+
 	// Decays the roll towards +/-16 (swing_magnitude's high byte) when adjust is -1,
 	// and writes the resulting roll angle.  Returns TRUE once the roll has settled.
 static long SwingCar (long adjust)
@@ -2913,19 +2930,21 @@ static long SwingCar (long adjust)
 
 	long step = ((adjust << 8) * SWING_REDUCTION) >> 8;
 
-	// players.x.offset.from.road.centre, from set.road.centre.values (StuntCarRacer.s:13452)
-	long x_offset = players_road_x_position - (ROAD_WIDTH/2);
-	if (Track[player_current_piece].oppositeDirection)
-		x_offset = -x_offset;
-
 	if (static_cast<signed char>(swing_magnitude >> 8) != target)
 		swing_magnitude = static_cast<int16_t>(swing_magnitude + step);
 
-	player_z_angle = ((swing_magnitude - (x_offset << 5)) & (MAX_ANGLE - 1));
+	WriteSwingRoll(swing_magnitude);
 
 	overall_difference_below_road = 0;
 
-	return (static_cast<signed char>(swing_magnitude >> 8) == target ? TRUE : FALSE);
+	long settled = (static_cast<signed char>(swing_magnitude >> 8) == target ? TRUE : FALSE);
+
+	// Stage 2 is the only caller that passes a non-zero adjust, and it keeps calling
+	// until the decay settles - so once it has, or when the caller is not decaying at
+	// all, the next frame will leave the magnitude where it is.
+	swing_pending_step = (settled ? 0 : step);
+
+	return settled;
 	}
 
 
@@ -3118,6 +3137,29 @@ static void LiftCarOntoTrack (void)
 	}
 
 
+	// Between crane frames.  swing.car only runs on Amiga frames, so at 60Hz the roll
+	// would hold for five steps and jump on the sixth - a 10Hz staircase in an angle
+	// that rotates the whole view, which reads as judder on the hoist even though the
+	// car's translation is smooth.  Both terms of the roll move smoothly, so both can
+	// be carried across the gap: the x.offset term is read fresh (the car is still
+	// drifting sideways under the chains), and the magnitude is walked towards the
+	// value the next crane frame will set it to.  The crane's own state is untouched -
+	// the frame still applies the whole step - so the sequence stays frame-exact.
+
+static void UpdateSwingRollBetweenFrames (void)
+	{
+	// Before the lift (countdown >= 230) the crane has not taken hold: swing.car does
+	// not run, and the roll is not yet the crane's to write.
+	if (car_on_chains_countdown >= 230)
+		return;
+
+	long magnitude = static_cast<int16_t>(
+		swing_magnitude + static_cast<long>(swing_pending_step * chain_frame_phase));
+
+	WriteSwingRoll(magnitude);
+	}
+
+
 	// Drives the crane from the FloatV2 step, which runs at some other rate.
 
 static void LiftCarOntoTrackFloatV2 (double dt)
@@ -3133,6 +3175,8 @@ static void LiftCarOntoTrackFloatV2 (double dt)
 		chain_frame_phase -= 1.0;
 		LiftCarOntoTrack();
 		}
+	else
+		UpdateSwingRollBetweenFrames();
 	}
 
 
@@ -3440,13 +3484,12 @@ void CopyFloatV2ToLegacy (const PhysicsStateF& s)
 	player_x_angle = FV2_ToUnsignedAngle(s.XAngle);
 	player_y_angle = FV2_ToUnsignedAngle(s.YAngle);
 	// ...except the roll while the crane has the car.  swing.car writes the roll
-	// outright, but it only runs on Amiga frames, and at 60Hz that is one step in
-	// six.  Letting the step's own integration own the angle for the other five and
-	// then snapping it back on the sixth is a sawtooth - a jerk during the hoist,
-	// and a violent one once the wheels touch and suspension roll starts feeding
-	// ZRotationSpeed.  Pinning it here keeps the pushed-in value (see
-	// CopyLegacyRoadStateToFloatV2) in force for every step of the frame.  At
-	// dt == 0.1 every step is a crane frame, so this changes nothing.
+	// outright, and letting the step's own integration have it back in between would
+	// be a sawtooth - a jerk during the hoist, and a violent one once the wheels touch
+	// and suspension roll starts feeding ZRotationSpeed.  Pinning it here keeps the
+	// pushed-in value (see CopyLegacyRoadStateToFloatV2) in force; the steps between
+	// crane frames get theirs from UpdateSwingRollBetweenFrames rather than from the
+	// integrator.  At dt == 0.1 every step is a crane frame, so this changes nothing.
 	if (! ON_CHAINS)
 		player_z_angle = FV2_ToUnsignedAngle(s.ZAngle);
 
@@ -4739,6 +4782,7 @@ static void PositionCarAbovePiece (long piece)
 			   piece, drop_start_done, height, height, (height << 8), player_y, required_raise_height);
 
 	swing_magnitude = 0;
+	swing_pending_step = 0;
 	chain_frame_phase = 0.0;
 #if defined(DEBUG) || defined(_DEBUG)
 	fprintf(out, "PositionCarAbovePiece player_y 0x%x\n", player_y);
@@ -6109,6 +6153,7 @@ void CloseAmigaRecording( void )
 	X(long, car_on_chains_countdown)									\
 	X(long, swing_from_left)											\
 	X(long, swing_magnitude)											\
+	X(long, swing_pending_step)											\
 	X(long, required_raise_height)										\
 	X(long, chain_fire_pressed)											\
 	X(double, chain_frame_phase)										\

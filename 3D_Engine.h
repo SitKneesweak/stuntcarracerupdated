@@ -166,6 +166,15 @@ typedef struct
 	long	y;
 	} COORD_2D;
 
+/*	Sub-pixel screen coordinate.  The backdrop works in a fixed 640x480 space that is then
+	scaled to the drawable, so a whole unit there is several physical pixels - see
+	ProjectToScreenF.															*/
+typedef struct
+	{
+	double	x;
+	double	y;
+	} COORD_2DF;
+
 /*	============================== */
 /*	External function declarations */
 /*	============================== */
@@ -245,6 +254,12 @@ extern void LockViewpointToTarget( long viewpoint_x,
 
 extern HRESULT CreatePolygonVertexBuffer (IDirect3DDevice9 *pd3dDevice);
 extern void FreePolygonVertexBuffer (void);
+
+extern void ProjectToScreenF( long trans_x, long trans_y, long trans_z,
+							  double *screen_x, double *screen_y );
+
+extern void DrawPolygonF( const COORD_2DF *pptr,
+						  long sides );
 
 extern void DrawPolygon( POINT *pptr,
 						 long sides );

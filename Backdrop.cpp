@@ -42,7 +42,7 @@ static long current_scenery_type = MIN_SCENERY_TYPE;
 
 // Unclipped screen-space horizon line, stored by DrawHorizon for DrawScenery's use.
 // The two points come straight out of the projection loop, before ClipLine touches them.
-static COORD_2D horizon_line[2];
+static COORD_2DF horizon_line[2];
 static long horizon_line_valid = FALSE;
 
 /*	===================== */
@@ -130,7 +130,7 @@ static void DrawHorizon( long viewpoint_y,
 
 	// set up two co-ordinates defining horizon line
 	COORD_3D plane[2];
-	COORD_2D screen_coords[2];
+	COORD_2DF screen_coords[2];
 
 	// left co-ordinate
 	plane[0].x = -0x00010000;
@@ -180,11 +180,9 @@ static void DrawHorizon( long viewpoint_y,
 
 		// perspective projection (shares its focal lengths with the projection matrix,
 		// so the horizon keeps sitting on the track's vanishing point - 3D_Engine.cpp)
-		ProjectToScreen(trans_x, trans_y, trans_z, &x, &y);
-
-		// store screen x and screen y
-		screen_coords[i].x = x;
-		screen_coords[i].y = y;
+		// Sub-pixel: the line this produces is what DrawScenery rests the mountains
+		// on, and rounding it here put them on a three-physical-pixel lattice.
+		ProjectToScreenF(trans_x, trans_y, trans_z, &screen_coords[i].x, &screen_coords[i].y);
 		}
 
 	// remember the unclipped horizon line so that DrawScenery can rest the
@@ -193,8 +191,10 @@ static void DrawHorizon( long viewpoint_y,
 	horizon_line[1] = screen_coords[1];
 	horizon_line_valid = TRUE;
 
-	x1 = screen_coords[0].x; y1 = screen_coords[0].y;
-	x2 = screen_coords[1].x; y2 = screen_coords[1].y;
+	// The sky/ground fill below tiles the screen with whole-pixel rectangles, so it takes
+	// the rounded line.  Only the scenery needs (and gets) the unrounded one.
+	x1 = lround(screen_coords[0].x); y1 = lround(screen_coords[0].y);
+	x2 = lround(screen_coords[1].x); y2 = lround(screen_coords[1].y);
 
 	//fprintf(out, "(x1,y1) = (%d,%d), (x2,y2) = (%d,%d)\n", x1, y1, x2, y2);
 
@@ -523,12 +523,12 @@ static void GetHorizonDownDirection( short sin_z,
 // The horizon line is perpendicular to the "down" direction, so the projection can never
 // be parallel to the line and the signed distance is always well defined.
 
-static double HorizonDistance( const COORD_2D *point,
+static double HorizonDistance( const COORD_2DF *point,
 							   double nx,
 							   double ny )
 	{
-	return (((double)(point->x - horizon_line[0].x) * nx) +
-			((double)(point->y - horizon_line[0].y) * ny));
+	return (((point->x - horizon_line[0].x) * nx) +
+			((point->y - horizon_line[0].y) * ny));
 	}
 
 /*	======================================================================================= */
@@ -886,7 +886,7 @@ static void DrawScenery( long viewpoint_y,
 	SCENERY *scenery;
 
 	COORD_3D *scenery_coords;
-	COORD_2D screen_coords[MAX_SCENERY_COORDS];
+	COORD_2DF screen_coords[MAX_SCENERY_COORDS];
 
 	long m, i, j, number, sides, offset;
 	long position, y_angle, visible;
@@ -900,7 +900,7 @@ static void DrawScenery( long viewpoint_y,
 	long base_count;
 
 	BYTE colour;
-	POINT points[MAX_POLY_SIDES];
+	COORD_2DF points[MAX_POLY_SIDES];
 
 
 	// start of code
@@ -973,11 +973,10 @@ static void DrawScenery( long viewpoint_y,
 			// viewing pyramid, although the saving would probably be negligible
 
 			// perspective projection (see the note in DrawHorizon)
-			ProjectToScreen(trans_x, trans_y, trans_z, &x, &y);
-
-			// store screen x and screen y
-			screen_coords[i].x = x;
-			screen_coords[i].y = y;
+			// Sub-pixel - see ProjectToScreenF.  Rounding here is what made the
+			// silhouettes step three physical pixels at a time.
+			ProjectToScreenF(trans_x, trans_y, trans_z,
+							 &screen_coords[i].x, &screen_coords[i].y);
 
 			// a vertex sitting on the object's base belongs on the horizon, so note how
 			// far off the line it landed - the object is slid by the average once every
@@ -1002,7 +1001,6 @@ static void DrawScenery( long viewpoint_y,
 			double nx, ny;
 			double t;
 			double dx, dy;
-			long ox, oy;
 
 			GetHorizonDownDirection(sin_z, cos_z, cos_x, &nx, &ny);
 
@@ -1010,13 +1008,14 @@ static void DrawScenery( long viewpoint_y,
 			dx = nx * t;
 			dy = ny * t;
 
-			ox = (long)(dx + ((dx >= 0.0) ? 0.5 : -0.5));
-			oy = (long)(dy + ((dy >= 0.0) ? 0.5 : -0.5));
-
+			// No rounding: the offset that beds the silhouette onto the horizon is a
+			// fraction of a unit, and rounding it to a whole one both threw the base
+			// off the line - the sky leaking under the mountains - and made the whole
+			// object jump as the rounding flipped.
 			for (i = 0; i < number; i++)
 				{
-				screen_coords[i].x += ox;
-				screen_coords[i].y += oy;
+				screen_coords[i].x += dx;
+				screen_coords[i].y += dy;
 				}
 			}
 
@@ -1039,7 +1038,7 @@ static void DrawScenery( long viewpoint_y,
 			// draw current polygon
 			SetTextureColour(SCR_BASE_COLOUR+colour);
 			if (sides >= 3)
-				DrawPolygon(points, sides);
+				DrawPolygonF(points, sides);
 			}
 		}
 	}

@@ -529,7 +529,7 @@ static void DrawMainMenu( void )
 	/*	'Multiplayer', so an entry that could only ever apologise has been dropped.		*/
 	static const char *entries[2] =
 		{
-		"Single Player League",
+		"Single Player",
 		"Multiplayer"
 		};
 	DrawMenu(entries, 2, gSelection);
@@ -547,10 +547,10 @@ static void DrawSelectMenu( void )
 	/*	against a driver you choose, in whichever league you choose, outside the season.	*/
 	static const char *entries[5] =
 		{
-		"Hall of Fame",
 		"Time Trial",
 		"Single Race",
 		"Start the Racing Season",
+		"Hall of Fame",
 		"Load/Save/Replay"
 		};
 	DrawDivisionHeading();
@@ -1711,19 +1711,15 @@ static void ActivateSelect( void )
 	{
 	switch (gSelection)
 		{
-		case 0:												// Hall of Fame
-			gHallFromMenu = true;
-			MenuScreensGoto(MS_HALL_OF_FAME);
-			break;
-		case 1:	MenuScreensGoto(MS_PRACTISE_TRACK);	break;	// Time Trial
-		case 2:												// Single Race
+		case 0:	MenuScreensGoto(MS_PRACTISE_TRACK);	break;	// Time Trial
+		case 1:												// Single Race
 			/*	The league starts on the career's own, which is what a player who	*/
 			/*	just wants "this track again, properly" expects to get.				*/
 			gSingleSuper = gLeagueSuperLeague;
 			MenuScreensGoto(MS_SINGLE_RACE);
 			gSingleField = 0;
 			break;
-		case 3:												// Start the Racing Season
+		case 2:												// Start the Racing Season
 			/*	mgs9 goes straight to the fixture screen (R.64664) and from there	*/
 			/*	into set.and.preview.road - there is no division screen in between.	*/
 			/*	The port asks which league first; the fixture screen follows from	*/
@@ -1741,6 +1737,10 @@ static void ActivateSelect( void )
 
 			MenuScreensGoto(MS_LEAGUE_CHOICE);
 			gSelection = gLeagueSuperLeague ? 1 : 0;
+			break;
+		case 3:												// Hall of Fame
+			gHallFromMenu = true;
+			MenuScreensGoto(MS_HALL_OF_FAME);
 			break;
 		case 4:	MenuScreensGoto(MS_LOADSAVE);		break;	// Load/Save/Replay
 		}

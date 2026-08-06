@@ -236,6 +236,58 @@ void ProjectToScreen( long trans_x, long trans_y, long trans_z,
 }
 
 /*	======================================================================================= */
+/*	Function:		ProjectToScreenF														*/
+/*																							*/
+/*	Description:	ProjectToScreen without the truncation to whole pixels					*/
+/*																							*/
+/*					The backdrop projects into a fixed 640x480 space (GetScreenDimensions),	*/
+/*					which is then scaled up to the drawable - a factor of 3 on a HiDPI		*/
+/*					display.  Rounding to a whole unit in that space is therefore worth		*/
+/*					three physical pixels, so the horizon and the scenery silhouettes could	*/
+/*					only ever move in three-pixel jumps while the road, which is real 3D		*/
+/*					geometry with float vertices, moved smoothly.  That is what made the		*/
+/*					mountains judder against an otherwise smooth world, and what left the	*/
+/*					rounding slop under them that HORIZON_OVERLAP has to cover.				*/
+/*																							*/
+/*					Same arithmetic, carried in double.  ProjectToScreen itself is left		*/
+/*					alone: its legacy branch is deliberately bit-exact and other callers		*/
+/*					depend on that.															*/
+/*	======================================================================================= */
+
+void ProjectToScreenF( long trans_x, long trans_y, long trans_z,
+					   double *screen_x, double *screen_y )
+{
+	long screen_width, screen_height;
+	GetScreenDimensions(&screen_width, &screen_height);
+
+	long centre_x, centre_y;
+	GetProjectionCentre(&centre_x, &centre_y);
+
+	if (! gAmigaFov)
+	{
+		// The integer path shifts by LOG_FOCUS and clamps a zero quotient to 1; in
+		// double there is no truncation to clamp, only the true zero to keep away from.
+		double z = static_cast<double>(trans_z) / static_cast<double>(1 << LOG_FOCUS);
+		if ((z > -1.0) && (z < 1.0)) z = (z < 0.0) ? -1.0 : 1.0;
+
+		*screen_x = (static_cast<double>(trans_x) / z) + (screen_width / 2);
+		*screen_y = (static_cast<double>(trans_y) / z) + (screen_height / 2);
+		return;
+	}
+
+	long focal_x, focal_y;
+	GetProjectionFocals(&focal_x, &focal_y);
+
+	double zx = static_cast<double>(trans_z) / static_cast<double>(focal_x);
+	double zy = static_cast<double>(trans_z) / static_cast<double>(focal_y);
+	if ((zx > -1.0) && (zx < 1.0)) zx = (zx < 0.0) ? -1.0 : 1.0;
+	if ((zy > -1.0) && (zy < 1.0)) zy = (zy < 0.0) ? -1.0 : 1.0;
+
+	*screen_x = (static_cast<double>(trans_x) / zx) + centre_x;
+	*screen_y = (static_cast<double>(trans_y) / zy) + centre_y;
+}
+
+/*	======================================================================================= */
 /*	Function:		CreateSinCosTable														*/
 /*																							*/
 /*	Description:	Calculate and store sine/cosine values needed for 3D rotation			*/
@@ -1220,6 +1272,44 @@ TRANSFORMEDVERTEX *pVertices;
 		pVertices[i].color = Fill_Colour;
 
         }
+	pPolygonVB->Unlock();
+
+	pd3dDevice->SetStreamSource( 0, pPolygonVB, 0, sizeof(TRANSFORMEDVERTEX) );
+	pd3dDevice->SetFVF( D3DFVF_TRANSFORMEDVERTEX );
+	pd3dDevice->DrawPrimitive( D3DPT_TRIANGLEFAN, 0, sides-2 );
+
+	return;
+	}
+
+
+/*	As DrawPolygon, but the caller keeps its sub-pixel precision.  DrawPolygon converts to
+	float vertices the moment it receives them, so the integer POINT was only ever throwing
+	precision away - see ProjectToScreenF.												*/
+void DrawPolygonF( const COORD_2DF *pptr,
+				   long sides)
+{
+long i;
+IDirect3DDevice9 *pd3dDevice = DXUTGetD3DDevice();
+
+TRANSFORMEDVERTEX *pVertices;
+
+	if (sides > MAX_POLY_SIDES)
+		return;
+
+	if( FAILED( pPolygonVB->Lock( 0, sides*sizeof(TRANSFORMEDVERTEX), (void**)&pVertices, 0 ) ) )
+	{
+		OutputDebugStringW(L"ERROR: Failed to lock polygon vertex buffer\n");
+		return;
+	}
+
+	for (i = 0; i < sides; i++)
+		{
+		pVertices[i].x = static_cast<float>(pptr[i].x);		// screen x
+		pVertices[i].y = static_cast<float>(pptr[i].y);		// screen y
+		pVertices[i].z = static_cast<float>(0.5f);			// not needed unless Z buffering
+		pVertices[i].rhw = static_cast<float>(1.0f);
+		pVertices[i].color = Fill_Colour;
+		}
 	pPolygonVB->Unlock();
 
 	pd3dDevice->SetStreamSource( 0, pPolygonVB, 0, sizeof(TRANSFORMEDVERTEX) );
