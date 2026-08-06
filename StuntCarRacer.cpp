@@ -3351,6 +3351,148 @@ static void WriteFramebufferPPM( const char *path )
 		}
 	free(pixels);
 	}
+
+
+/*	======================================================================================= */
+/*	Function:		PreviewLowResBegin / PreviewLowResEnd									*/
+/*																							*/
+/*	Description:	Render the whole preview screen at the Amiga's own 320x200 and blow it	*/
+/*					up, so the road is made of the same pixels as the picture behind it.		*/
+/*																							*/
+/*					Everything else on this screen is 320x200 art scaled to the window, but	*/
+/*					the road is real geometry and comes out at the window's resolution: a	*/
+/*					hairline-thin, hard-edged HD line laid over a chunky pixel picture.  The	*/
+/*					Amiga drew both into the same 320x200 bitplanes, so its road was as		*/
+/*					coarse as its scenery - a chain of fat two-pixel blocks, not a wire.		*/
+/*																							*/
+/*					So the whole screen - picture and road - is rasterised into the bottom	*/
+/*					left 320x200 of the back buffer (the ortho projection is untouched, so	*/
+/*					base space simply lands on a smaller grid), copied to a texture and		*/
+/*					drawn back as one quad.  Going through the device's own textured-quad	*/
+/*					path means the upscale gets the sharp-bilinear filter the menus and		*/
+/*					cockpit already use, so it matches them rather than out-crisping them.	*/
+/*																							*/
+/*					D3D build unaffected: this is the SDL/GL path only.						*/
+/*	======================================================================================= */
+
+/*	Off gives the sharp, full-resolution road the port drew before.							*/
+bool bAmigaPreviewLowRes = true;
+
+static IDirect3DTexture9	*pPreviewLowResTexture	= NULL;
+static IDirect3DVertexBuffer9 *pPreviewLowResVB	= NULL;
+static GLint				 gPreviewSavedViewport[4];
+static bool					 gPreviewLowResActive	= false;
+static bool					 gPreviewSavedMultisample = false;
+
+struct PREVIEWVERTEX
+	{
+	float x, y, z, rhw;
+	float u, v;
+	};
+#define D3DFVF_PREVIEWVERTEX	(D3DFVF_XYZRHW|D3DFVF_TEX1)
+
+static bool PreviewLowResBegin( void )
+	{
+	gPreviewLowResActive = false;
+	if (!bAmigaPreviewLowRes)
+		return false;
+
+	glGetIntegerv(GL_VIEWPORT, gPreviewSavedViewport);
+
+	/*	A window small enough that the presented picture is under 320x200 has nothing to	*/
+	/*	gain here, and the copy below would read outside the viewport.					*/
+	if ((gPreviewSavedViewport[2] < AMIGA_SCREEN_WIDTH) ||
+		(gPreviewSavedViewport[3] < AMIGA_SCREEN_HEIGHT))
+		return false;
+
+	/*	Multisampling is deliberately left ON.  A road piece 30 squares out is a fraction	*/
+	/*	of an Amiga pixel wide, and with hard coverage it breaks into a dotted line as		*/
+	/*	pieces fall between pixel centres; the samples keep it a continuous ribbon while		*/
+	/*	the pixels stay 320x200-sized, which is what the Amiga's own thicker road read as.	*/
+	gPreviewSavedMultisample = false;
+
+	glViewport(0, 0, AMIGA_SCREEN_WIDTH, AMIGA_SCREEN_HEIGHT);
+
+	gPreviewLowResActive = true;
+	return true;
+	}
+
+static void PreviewLowResEnd( IDirect3DDevice9 *pd3dDevice )
+	{
+	if (!gPreviewLowResActive)
+		return;
+	gPreviewLowResActive = false;
+
+	const int w = AMIGA_SCREEN_WIDTH, h = AMIGA_SCREEN_HEIGHT;
+
+	static unsigned char *pixels = NULL;
+	if (pixels == NULL)
+		pixels = (unsigned char *)malloc((size_t)w * h * 3);
+	if (pixels == NULL)
+		return;
+
+	glPixelStorei(GL_PACK_ALIGNMENT, 1);
+	glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, pixels);
+	glPixelStorei(GL_PACK_ALIGNMENT, 4);
+
+	glViewport(gPreviewSavedViewport[0], gPreviewSavedViewport[1],
+			   gPreviewSavedViewport[2], gPreviewSavedViewport[3]);
+	if (gPreviewSavedMultisample)
+		glEnable(GL_MULTISAMPLE);
+
+	if (pPreviewLowResTexture == NULL)
+		pPreviewLowResTexture = new IDirect3DTexture9();
+	/*	Linear, not point: the sharp-bilinear shader does the sampling, and it needs the	*/
+	/*	filter left alone (same as the menu surface).									*/
+	pPreviewLowResTexture->CreateFromMemory(pixels, w, h, 3, false, false);
+
+	if (pPreviewLowResVB == NULL)
+		{
+		if (FAILED(pd3dDevice->CreateVertexBuffer(4 * sizeof(PREVIEWVERTEX), D3DUSAGE_WRITEONLY,
+												  D3DFVF_PREVIEWVERTEX, D3DPOOL_DEFAULT,
+												  &pPreviewLowResVB, NULL)))
+			return;
+		}
+
+	/*	Back to where the Amiga's screen sits in base space - the same rectangle every		*/
+	/*	other menu is presented in, so nothing shifts as the low-res pass is toggled.		*/
+	float x0, y0, qw, qh;
+	AmigaMenuGetScreenRect(0, 0, AMIGA_SCREEN_WIDTH, AMIGA_SCREEN_HEIGHT, &x0, &y0, &qw, &qh);
+
+	PREVIEWVERTEX *pVertices;
+	if (FAILED(pPreviewLowResVB->Lock(0, 0, (void **)&pVertices, 0)))
+		return;
+
+	// glReadPixels is bottom-up, so v = 0 is the bottom of the picture.
+	pVertices[0].x = x0;      pVertices[0].y = y0;      pVertices[0].u = 0.0f; pVertices[0].v = 1.0f;
+	pVertices[1].x = x0 + qw; pVertices[1].y = y0;      pVertices[1].u = 1.0f; pVertices[1].v = 1.0f;
+	pVertices[2].x = x0 + qw; pVertices[2].y = y0 + qh; pVertices[2].u = 1.0f; pVertices[2].v = 0.0f;
+	pVertices[3].x = x0;      pVertices[3].y = y0 + qh; pVertices[3].u = 0.0f; pVertices[3].v = 0.0f;
+	for (int i = 0; i < 4; i++)
+		{
+		pVertices[i].z   = 0.5f;
+		pVertices[i].rhw = 1.0f;
+		}
+	pPreviewLowResVB->Unlock();
+
+	// The 320x200 pass painted the corner of the back buffer; wipe it before it shows.
+	pd3dDevice->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0);
+
+	pd3dDevice->SetRenderState(D3DRS_ZENABLE, FALSE);
+	pd3dDevice->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+	pd3dDevice->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+
+	pd3dDevice->SetTextureStageState(0, D3DTSS_COLOROP, D3DTSS_COLORARG1);
+	pd3dDevice->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+	pd3dDevice->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+
+	pd3dDevice->SetTexture(0, pPreviewLowResTexture);
+	pd3dDevice->SetStreamSource(0, pPreviewLowResVB, 0, sizeof(PREVIEWVERTEX));
+	pd3dDevice->SetFVF(D3DFVF_PREVIEWVERTEX);
+	pd3dDevice->DrawPrimitive(D3DPT_TRIANGLEFAN, 0, 2);
+
+	pd3dDevice->SetRenderState(D3DRS_ZENABLE, TRUE);
+	}
 #endif
 
 //--------------------------------------------------------------------------------------
@@ -3439,6 +3581,12 @@ HRESULT hr;
     {
 		if (previewScreen)
 		{
+#ifdef SCR_PORTABLE
+			// Everything up to PreviewLowResEnd goes into a 320x200 corner of the back
+			// buffer, so the road is drawn at the Amiga's resolution rather than the
+			// window's.  See PreviewLowResBegin.
+			PreviewLowResBegin();
+#endif
 			DrawAmigaPreviewScreen( pd3dDevice );
 
 			pd3dDevice->SetRenderState( D3DRS_ZENABLE, FALSE );
@@ -3467,6 +3615,9 @@ HRESULT hr;
 
 			SetPreviewWindowClip( false );
 			pd3dDevice->SetRenderState( D3DRS_ZENABLE, TRUE );
+#ifdef SCR_PORTABLE
+			PreviewLowResEnd( pd3dDevice );
+#endif
 			pd3dDevice->EndScene();
 
 #ifdef SCR_PORTABLE
