@@ -70,6 +70,34 @@
 #define COCKPIT_WINDOW_WIDTH        257.0f  // x 31..287 inclusive
 #define COCKPIT_WINDOW_HEIGHT       144.0f  // y 16..159 inclusive
 
+/*	--- Crane chains ---------------------------------------------------------------------
+	The two chains the crane hangs the car from, in the Amiga's 320x200 screen space.
+
+	draw.chains ("Reference only/StuntCarRacer.s":21821) blits a 16-pixel-tall link as two
+	8-line halves, stepping up the screen from the bottom of the chain until the next tile
+	would cross the top of the playfield window at y 16.  The blit is word aligned - see
+	copy.graphic, which adds (x position in words) * 2 bytes to the screen pointer and never
+	shifts - so the chains sit in words 4 and 15, at x 64 and 240.  Where the 10-pixel-wide
+	artwork sits inside its 16-pixel word is baked into the graphic data rather than the
+	table, and is not the same on both sides: measured off an Amiga screenshot the left
+	chain runs x 69..78 and the right x 240..249.
+
+	The bottom end comes from B.1bbea, which draw.chains calls d2: the lowest tile's top
+	edge is d2-40, so the chain ends at d2-32.  It holds at 176 while the car is on the
+	chains and, once released, is whipped upwards by a step that grows 8 a frame -
+	176, 168, 152, 128, 96 - after which the chains are gone.									*/
+#define CHAIN_LEFT_X                69.0f   // left chain, x 69..78 within word 4  (64..79)
+#define CHAIN_RIGHT_X               240.0f  // right chain, x 240..249 within word 15 (240..255)
+#define CHAIN_WIDTH                 10.0f   // as authored in Bitmap/ChainLeft.png
+#define CHAIN_LINK_HEIGHT           16      // the artwork's vertical period, in Amiga lines
+#define CHAIN_TILE_HEIGHT           8       // the Amiga blits a link as two halves
+#define CHAIN_TEX_HEIGHT            116.0f  // Bitmap/ChainLeft.png is 7 links plus a stub
+#define CHAIN_HELD_D2               176     // B.1bbea while the car is on the chains
+#define CHAIN_RETRACTED_D2          96      // the value at which draw.chains gives up
+#define CHAIN_RETRACT_STEP          8       // B.1bbe9, and how much it grows each frame
+#define CHAIN_D2_TO_BOTTOM          32      // chain bottom edge = d2 - this
+#define CHAIN_TOP_CLIP              16      // top of the playfield window; tiles above it go
+
 // Dashboard readout positions, in the Amiga's 320x200 screen space.  Each is the original's
 // print column/row scaled by the 7x8 font cell plus its fine.x/fine.y nudge - see
 // print.lap.boost.text, boost.print and display.opponents.distance in the 68k source.

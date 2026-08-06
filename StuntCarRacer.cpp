@@ -79,6 +79,11 @@ IDirectSoundBuffer8 *EngineSoundBuffers[8] = {NULL};
 
 IDirect3DTexture9 *g_pAtlas = NULL;
 
+	// The crane's chains.  Kept out of atlas.png: it is a 10x116 strip of 16-line links
+	// that DrawCockpit tiles up the screen, so it wants its own texture rather than a
+	// cell somebody could nudge.
+IDirect3DTexture9 *g_pChain = NULL;
+
 int wideScreen = 0;
 float gCustomScale = 0.0f;	// -s option, in points; 0 = auto-fit the window
 
@@ -139,6 +144,8 @@ extern long front_left_amount_below_road, front_right_amount_below_road,
 extern long INITIALISE_PLAYER;
 extern bool raceFinished, raceWon;
 extern long lapNumber[];
+// Counts the frames between the car wrecking and the race ending; drives the prompt.
+extern long wreck_countdown;
 
 // League / Super League variable
 extern long damaged_limit;
@@ -823,6 +830,18 @@ HRESULT CALLBACK OnResetDevice( IDirect3DDevice9 *pd3dDevice,
 
 	InitAtlasCoord();
 
+	// D3DX would round the 10x116 chain strip up to a power of two and leave the UVs
+	// pointing at the padding, so ask for the size as authored.
+	if (FAILED(D3DXCreateTextureFromResourceEx(pd3dDevice, NULL, L"CHAIN",
+	                                           D3DX_DEFAULT_NONPOW2, D3DX_DEFAULT_NONPOW2,
+	                                           1, 0, D3DFMT_UNKNOWN, D3DPOOL_MANAGED,
+	                                           D3DX_DEFAULT, D3DX_DEFAULT, 0,
+	                                           NULL, NULL, &g_pChain)))
+	{
+		OutputDebugStringW(L"ERROR: Failed to create texture from CHAIN resource\n");
+		return E_FAIL;
+	}
+
 	if ((hr = CreatePolygonVertexBuffer(pd3dDevice)) != S_OK)
 	{
 		OutputDebugStringW(L"ERROR: Failed to create polygon vertex buffer\n");
@@ -898,6 +917,23 @@ void LoadTextures()
 	if (!g_pAtlas) g_pAtlas = new IDirect3DTexture9();
 	g_pAtlas->LoadTexture("Bitmap/atlas.png");
 	InitAtlasCoord();
+
+	// Not LoadTexture(): that flips the image vertically, so the chain's UVs would have
+	// to be worked out upside down here and the right way up in the DirectX build.
+	// CreateFromMemory uploads the rows as they are, which is what the tiling in
+	// DrawCockpit assumes.
+	{
+		int cw, ch, cn;
+		unsigned char *chain = stbi_load("Bitmap/ChainLeft.png", &cw, &ch, &cn, STBI_rgb_alpha);
+		if (chain == NULL)
+			printf("Warning, image \"Bitmap/ChainLeft.png\" not loaded\n");
+		else
+		{
+			if (!g_pChain) g_pChain = new IDirect3DTexture9();
+			g_pChain->CreateFromMemory(chain, cw, ch, 4, false /*nearest*/, false /*repeat V*/);
+			stbi_image_free(chain);
+		}
+	}
 #ifdef SCR_ROAD_TEXTURE
 	// Reads the road cells back out of atlas.png, so it has to follow InitAtlasCoord()
 	CreateRoadTextures();
@@ -2352,6 +2388,11 @@ bool MenuStartTrack( int trackID )
 		return false;
 		}
 
+	/*	Damage is cumulative across a league season and nowhere else: a season race is	*/
+	/*	started in the car the last one left behind, everything else in a fresh one.		*/
+	/*	Set before ResetPlayer, which is what puts the carried holes into the bar.		*/
+	carried_nholes = MenuScreensRaceIsLeague() ? gLeagueDamageHoles : 0;
+
 	bNewGame = TRUE;		// resets the opponent's car, shown during the preview
 	ResetPlayer();
 	GameMode = TRACK_PREVIEW;
@@ -2765,6 +2806,28 @@ void RenderText( double fTime )
 			}
 
 			txtHelper.End();
+
+			// The Amiga's WRECKED prompt, up for the sixty frames between the damage bar
+			// filling and the race ending, flashing white on the (countdown>>2)&1 beat
+			// that dlt6 sets white.prompts from (StuntCarRacer.s:10826).
+			if (!raceFinished && (wreck_countdown > 0))
+			{
+				#ifdef SCR_PORTABLE
+				static
+				#endif
+				CDXUTTextHelper txtHelperWreck( g_pFontLarge, g_pSprite, static_cast<int>(25 * textScale) );
+
+				txtHelperWreck.Begin();
+				if ((wreck_countdown >> 2) & 1)
+					txtHelperWreck.SetForegroundColor( D3DXCOLOR( 1.0f, 1.0f, 1.0f, 1.0f ) );
+				else
+					txtHelperWreck.SetForegroundColor( D3DXCOLOR( 0.0f, 0.0f, 0.0f, 1.0f ) );
+
+				txtHelperWreck.SetInsertionPos( static_cast<int>((250+(wideScreen?80:0)) * textScale),
+												static_cast<int>(pd3dsdBackBuffer->Height-25*12*textScale) );
+				txtHelperWreck.DrawTextLine( L"WRECKED" );
+				txtHelperWreck.End();
+			}
 
 			if (raceFinished)
 			{
@@ -3337,7 +3400,8 @@ HRESULT hr;
         GameMode = TRACK_MENU;
         MenuScreensRaceFinished( raceWon != FALSE, playerBestLap,
                                  bBestLapTimeSet ? bestLapTime : 0.0, raceTime,
-                                 bRaceMarginSet ? raceMarginTime : 0.0 );
+                                 bRaceMarginSet ? raceMarginTime : 0.0,
+                                 CarIsWreckedNow() );
     }
 
     // The Amiga menus replace the display entirely, exactly as they did on the Amiga, so
@@ -3779,6 +3843,7 @@ void CALLBACK OnLostDevice( void *pUserContext )
 	FreeCockpitVertexBuffer();
 
 	if (g_pAtlas) g_pAtlas->Release(), g_pAtlas = NULL;
+	if (g_pChain) g_pChain->Release(), g_pChain = NULL;
 #ifdef SCR_ROAD_TEXTURE
 	FreeRoadTextures();
 #endif

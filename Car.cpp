@@ -1403,11 +1403,15 @@ struct TRANSFORMEDCOLVERTEX
 };
 #define D3DFVF_TRANSFORMEDCOLVERTEX (D3DFVF_XYZRHW|D3DFVF_DIFFUSE)
 
-static IDirect3DVertexBuffer9 *pCockpitVB = NULL, *pSpeedBarCB = NULL;
+static IDirect3DVertexBuffer9 *pCockpitVB = NULL, *pSpeedBarCB = NULL, *pChainVB = NULL;
 #define MAX_COCKIPTVB 512
+// Two chains, at most (144-16)/8 = 16 half-link tiles each, six vertices a tile.
+#define MAX_CHAINVB   (2*16*6)
 static int old_speedbar = -1;
 
 extern IDirect3DTexture9 *g_pAtlas;
+extern IDirect3DTexture9 *g_pChain;
+extern long car_on_chains_countdown;
 extern long front_left_height_difference, front_right_height_difference;
 extern long leftwheel_angle, rightwheel_angle;
 extern long boost_activated;
@@ -1513,6 +1517,15 @@ HRESULT CreateCockpitVertexBuffer (IDirect3DDevice9 *pd3dDevice)
 			return E_FAIL;
 		}
 	}
+	if (pChainVB == NULL)
+	{
+		if( FAILED( pd3dDevice->CreateVertexBuffer( MAX_CHAINVB*sizeof(TRANSFORMEDTEXVERTEX),
+				D3DUSAGE_WRITEONLY, D3DFVF_TRANSFORMEDTEXVERTEX, D3DPOOL_DEFAULT, &pChainVB, NULL ) ) )
+		{
+			OutputDebugStringW(L"ERROR: Failed to create chain vertex buffer\n");
+			return E_FAIL;
+		}
+	}
 	if (pSpeedBarCB == NULL)
 	{
 		if ( FAILED( pd3dDevice->CreateVertexBuffer( 4*sizeof(TRANSFORMEDCOLVERTEX),
@@ -1529,6 +1542,7 @@ HRESULT CreateCockpitVertexBuffer (IDirect3DDevice9 *pd3dDevice)
 void FreeCockpitVertexBuffer (void)
 {
 	if (pCockpitVB) pCockpitVB->Release(), pCockpitVB = NULL;
+	if (pChainVB) pChainVB->Release(), pChainVB = NULL;
 	if (pSpeedBarCB) pSpeedBarCB->Release(), pSpeedBarCB = NULL;
 	/*if (pLeftwheelVB) pLeftwheelVB->Release(), pLeftwheelVB = NULL;
 	if (pRightwheelVB) pRightwheelVB->Release(), pRightwheelVB = NULL;*/
@@ -1559,6 +1573,84 @@ static void AddQuad(TRANSFORMEDTEXVERTEX *pVertices, float x1, float y1, float x
 	pVertices[1].u = u2; pVertices[1].v = v2;
 	pVertices[2].u = u1; pVertices[2].v = v2;
 	cockpit_vtx += 3;
+}
+
+/*	--- The crane's chains ----------------------------------------------------------------
+	draw.chains ("Reference only/StuntCarRacer.s":21821), quad for blit.  See the CHAIN_*
+	notes in Car.h for the geometry; this holds the two bytes of state the Amiga keeps.
+
+	The retraction is deliberately per drawn frame rather than per simulated one, exactly
+	as on the Amiga, where draw.chains both animates and blits.  It is four frames long
+	either way and nothing else reads it.												*/
+static int chain_d2            = CHAIN_HELD_D2;			// B.1bbea
+static int chain_retract_step  = CHAIN_RETRACT_STEP;	// B.1bbe9
+
+static int chain_vtx = 0;
+static void AddChainTile(TRANSFORMEDTEXVERTEX *pVertices,
+                         float x1, float y1, float x2, float y2, float v1, float v2)
+{
+	pVertices += chain_vtx;
+	const float z = 0.85f;			// under the cockpit art, over the world
+	const float verts[6][4] = { {x1,y1,0.0f,v1}, {x2,y1,1.0f,v1}, {x2,y2,1.0f,v2},
+	                            {x1,y1,0.0f,v1}, {x2,y2,1.0f,v2}, {x1,y2,0.0f,v2} };
+	for (int i=0; i<6; i++)
+	{
+		pVertices[i].x = verts[i][0]; pVertices[i].y = verts[i][1];
+		pVertices[i].z = z;           pVertices[i].rhw = 1.0f;
+		pVertices[i].u = verts[i][2]; pVertices[i].v = verts[i][3];
+	}
+	chain_vtx += 6;
+}
+
+/*	Fills pChainVB and returns the vertex count - zero once the chains have whipped away. */
+static int BuildChains(TRANSFORMEDTEXVERTEX *pVertices, float Wide, float scaleX, float scaleY)
+{
+	chain_vtx = 0;
+
+	if (car_on_chains_countdown != 0)
+	{
+		// Hanging: the bottom end is parked, and the whip is re-armed for the release.
+		chain_d2           = CHAIN_HELD_D2;
+		chain_retract_step = CHAIN_RETRACT_STEP;
+	}
+	else
+	{
+		if (chain_d2 == CHAIN_RETRACTED_D2)
+			return 0;						// dch3 - gone until the next lift
+
+		// The frame that lands on CHAIN_RETRACTED_D2 is still drawn; the next is not.
+		chain_d2           -= chain_retract_step;
+		chain_retract_step += CHAIN_RETRACT_STEP;
+	}
+
+	const float chainX[2] = { CHAIN_LEFT_X, CHAIN_RIGHT_X };
+
+	for (int side=0; side<2; side++)
+	{
+		const float x1 = (Wide + chainX[side])               * 2.0f * scaleX;
+		const float x2 = (Wide + chainX[side] + CHAIN_WIDTH) * 2.0f * scaleX;
+
+		// dch2: two 8-line halves a link, stepping up the screen until the next tile
+		// would cross the top of the playfield window.
+		for (int d2 = chain_d2; ; d2 -= CHAIN_LINK_HEIGHT)
+		{
+			const int top    = d2 - 48;					// the link's top half
+			const int bottom = top + CHAIN_TILE_HEIGHT;	// and its bottom half
+
+			if (bottom < CHAIN_TOP_CLIP) break;
+			AddChainTile(pVertices, x1, bottom*2.4f*scaleY,
+			                        x2, (bottom+CHAIN_TILE_HEIGHT)*2.4f*scaleY,
+			             CHAIN_TILE_HEIGHT/CHAIN_TEX_HEIGHT,
+			             CHAIN_LINK_HEIGHT/CHAIN_TEX_HEIGHT);
+
+			if (top < CHAIN_TOP_CLIP) break;
+			AddChainTile(pVertices, x1, top*2.4f*scaleY,
+			                        x2, (top+CHAIN_TILE_HEIGHT)*2.4f*scaleY,
+			             0.0f, CHAIN_TILE_HEIGHT/CHAIN_TEX_HEIGHT);
+		}
+	}
+
+	return chain_vtx;
 }
 
 #ifdef SCR_PORTABLE
@@ -1635,6 +1727,19 @@ void DrawCockpit (IDirect3DDevice9 *pd3dDevice)
 
 	pCockpitVB->Unlock();
 
+	// Prepare the crane's chains
+	int chainVertices = 0;
+	{
+		TRANSFORMEDTEXVERTEX *pChainVertices;
+		if( FAILED( pChainVB->Lock( 0, 0, (void**)&pChainVertices, 0 ) ) )
+			OutputDebugStringW(L"ERROR: Failed to lock chain vertex buffer\n");
+		else
+		{
+			chainVertices = BuildChains(pChainVertices, Wide, scaleX, scaleY);
+			pChainVB->Unlock();
+		}
+	}
+
 	// Prepare speedbar
 	if (old_speedbar != CalculateDisplaySpeed()) {
 		old_speedbar = CalculateDisplaySpeed();
@@ -1679,6 +1784,16 @@ void DrawCockpit (IDirect3DDevice9 *pd3dDevice)
 	pd3dDevice->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
 	pd3dDevice->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
 #endif
+	// Draw the chains first, so the cockpit's frame and the car's own sprites go over the
+	// top of them - the Amiga blits them into the playfield, behind everything else.
+	if (chainVertices > 0 && g_pChain != NULL)
+	{
+		pd3dDevice->SetTexture( 0, g_pChain );
+		pd3dDevice->SetStreamSource( 0, pChainVB, 0, sizeof(TRANSFORMEDTEXVERTEX) );
+		pd3dDevice->SetFVF( D3DFVF_TRANSFORMEDTEXVERTEX );
+		pd3dDevice->DrawPrimitive( D3DPT_TRIANGLELIST, 0, chainVertices/3 );
+	}
+
 	// Draw Cockpit
 	pd3dDevice->SetTexture( 0, g_pAtlas );
 	pd3dDevice->SetStreamSource( 0, pCockpitVB, 0, sizeof(TRANSFORMEDTEXVERTEX) );

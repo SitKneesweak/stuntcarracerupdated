@@ -169,6 +169,10 @@ void ProfileSave( void )
 	fprintf(f, "race %d\n",   gLeagueRace);
 	fprintf(f, "super %d\n",  gLeagueSuperLeague ? 1 : 0);
 
+	/*	The damage carried into the next fixture.  A build from before this key existed	*/
+	/*	skips it and starts the race in a whole car, which is what it did anyway.		*/
+	fprintf(f, "damage %d\n", gLeagueDamageHoles);
+
 	fprintf(f, "ladder");
 	for (int i = 0; i < NUM_LEAGUE_DRIVERS; i++)
 		fprintf(f, " %d", gLeagueLadder[i]);
@@ -263,6 +267,11 @@ bool ProfileLoad( void )
 		if (sscanf(line, "season %d", &value) == 1) { gLeagueSeason = value; continue; }
 		if (sscanf(line, "race %d",   &value) == 1) { gLeagueRace   = value; continue; }
 		if (sscanf(line, "super %d",  &value) == 1) { gLeagueSuperLeague = (value != 0); continue; }
+		if (sscanf(line, "damage %d", &value) == 1)
+			{
+			gLeagueDamageHoles = (value < 0) ? 0 : ((value > 10) ? 10 : value);
+			continue;
+			}
 
 		if (strncmp(line, "ladder", 6) == 0)
 			{

@@ -118,6 +118,11 @@ long damaged = 0;
 long new_damage = 0;
 long nholes = 0;
 
+/*	Holes the car brings to the line, from earlier races in the same league season - see	*/
+/*	SetCarriedDamageHoles.  ResetPlayer starts the bar here rather than at zero, which is	*/
+/*	what makes a season's damage cumulative the way the Amiga's is.							*/
+long carried_nholes = 0;
+
 /*	The Amiga keeps damage.hole.position, which starts at 10 and counts DOWN as each		*/
 /*	smash punches a hole out of the damage bar - so the first hole appears in the			*/
 /*	rightmost slot and later ones march leftwards, towards the crack.  nholes is the			*/
@@ -210,11 +215,20 @@ static long smaller_limit_required = FALSE;
 
 static long wreck_wheel_height_reduction = 0;		// 0x200 if wrecked
 
+	/*	car.is.wrecked (StuntCarRacer.s:11690).  When the crack reaches the end of the		*/
+	/*	damage bar the car is wrecked: the body drops onto the road and B.1bb6c starts a		*/
+	/*	60-frame countdown, at the end of which the race is over.  The countdown is what		*/
+	/*	flashes the WRECKED prompt, so it is public - RenderText reads it.					*/
+#define	WRECK_COUNTDOWN_FRAMES	60
+long wreck_countdown = 0;
+
 	// Amiga StuntCarRacer's crane sequence (lift.car.onto.track, StuntCarRacer.s:7869).
 	// car_on_chains_countdown is kept in the Amiga's 0..255 byte form because the
 	// release test is a *signed* byte one - values >= 128 mean "still hanging" - and
 	// because the countdown doubles as left.right.value while the car is chained.
-static long car_on_chains_countdown = 0;
+	// Not static: DrawCockpit reads it to decide whether to hang the crane's chains in
+	// front of the windscreen (Car.cpp DrawChains).
+long car_on_chains_countdown = 0;
 #define	ON_CHAINS	(car_on_chains_countdown != 0)
 
 	// swing.car state.  The car does not oscillate: it hangs rolled to one side and
@@ -509,6 +523,7 @@ void ResetPlayer (void)
 	smaller_limit_required = FALSE;
 
 	wreck_wheel_height_reduction = 0;		// 0x200 if wrecked
+	wreck_countdown = 0;
 
 	drop_start_done = TRUE;
 	touching_road = FALSE;
@@ -561,7 +576,11 @@ void ResetPlayer (void)
 	new_damage = 0;
 	damage_line_x = 0;
 	smashed_countdown = 0;
-	nholes = 0;
+
+	/*	Not zero: a league car starts the race as wrecked as its last one finished.		*/
+	/*	SetCarriedDamageHoles puts this back to zero for anything that is not a season	*/
+	/*	race, so a practice or single race is always in a fresh car.						*/
+	nholes = carried_nholes;
 
 	// calculated
 	car_collision_x_acceleration = 0;
@@ -736,11 +755,17 @@ void CarBehaviour (DWORD input,
 		long saved_new_damage         = new_damage;
 		long saved_damage_line_x      = damage_line_x;
 		long saved_nholes             = nholes;
+		// A wreck is not repaired by a trip on the crane either: the car comes back
+		// down still wrecked, with its countdown to the end of the race still running.
+		long saved_wreck_height       = wreck_wheel_height_reduction;
+		long saved_wreck_countdown    = wreck_countdown;
 
 		ResetPlayer();
 
 		if (relift)
 			{
+			wreck_wheel_height_reduction = saved_wreck_height;
+			wreck_countdown              = saved_wreck_countdown;
 			front_left_damage  = saved_front_left_damage;
 			front_right_damage = saved_front_right_damage;
 			rear_damage        = saved_rear_damage;
@@ -5666,6 +5691,61 @@ static bool DamageLineInHole (long x)
 }
 
 /*	======================================================================================= */
+/*	Function:		CarIsWrecked															*/
+/*																							*/
+/*	Description:	car.is.wrecked (StuntCarRacer.s:11690).  The body drops onto the road	*/
+/*					(wreck.wheel.height.reduction = 0x200, which is what makes it scrape		*/
+/*					and throw sparks) and a 60-frame countdown to the end of the race		*/
+/*					starts.  Called once - a car already counting down cannot wreck again.	*/
+/*	======================================================================================= */
+
+bool CarIsWreckedNow (void)
+{
+	return WRECKED;
+}
+
+static void CarIsWrecked (void)
+{
+	if (wreck_countdown != 0) return;			// wrck2: already wrecked
+
+	wreck_wheel_height_reduction = 0x200;
+	wreck_countdown = WRECK_COUNTDOWN_FRAMES;	// move.b #$3c,B.1bb6c
+}
+
+/*	======================================================================================= */
+/*	Function:		UpdateWreckCountdown													*/
+/*																							*/
+/*	Description:	dlt6 in display.lap.time (StuntCarRacer.s:10822).  The countdown only	*/
+/*					runs while the car is on the road (or on the chains), and in the air it	*/
+/*					stops short of zero - the race is not allowed to end mid-flight.  When	*/
+/*					it does reach zero the race is over and lost.							*/
+/*	======================================================================================= */
+
+extern bool raceFinished, raceWon;
+
+static void UpdateWreckCountdown (void)
+{
+	if (wreck_countdown <= 0) return;
+
+	if (! ON_CHAINS && ! touching_road && (wreck_countdown < 6))
+		return;
+
+	// The Amiga skips the tick on the one frame in fourteen that this clock marks.
+	if (fourteen_frames_elapsed != 0) return;
+
+	if (--wreck_countdown == 0)
+	{
+		// dlt8: B.1bb6f, the end-of-race flag.  The port's equivalent is raceFinished,
+		// which hands the race to the RESULT screen after its own six-second message.
+		if (! raceFinished)
+		{
+			raceFinished = true;
+			raceWon = false;
+		}
+	}
+}
+
+/*	======================================================================================= */
 /*	Function:		DamageLine																*/
 /*																							*/
 /*	Description:	Walks the crack out to new_damage, one pixel at a time, as damage.line	*/
@@ -5685,14 +5765,16 @@ static void DamageLine (void)
 
 		if (damage_line_x >= 0xf0)
 		{
-			// Amiga: car.is.wrecked.  Wrecking from damage is not modelled yet, so
-			// park the crack at the end of the bar instead of running off it.
+			// dl7/car.is.wrecked: the crack has run off the end of the bar, so the car
+			// is wrecked.  The Amiga backs the crack up a pixel (subq.b #1,B.1bb55) and
+			// leaves it there - the bar cannot say any more than "full".
 			damage_line_x = 0xef;
 			if (new_damage > 0xef)
 			{
 				new_damage = 0xef;
 				front_left_damage = front_right_damage = rear_damage = new_damage;
 			}
+			CarIsWrecked();
 			return;
 		}
 
@@ -5709,6 +5791,8 @@ static void DamageLine (void)
 
 void UpdateDamage (void)
 {
+	UpdateWreckCountdown();
+
 	if (damaged)
 	{
 		long d = (front_left_damage + front_right_damage) / 2;	// average front damage
@@ -6298,6 +6382,7 @@ void CloseAmigaRecording( void )
 	X(long, damage_value)												\
 	X(long, damaged_count)												\
 	X(long, wreck_wheel_height_reduction)								\
+	X(long, wreck_countdown)											\
 	X(long, smashed_countdown)											\
 	X(long, grounded_delay)												\
 	X(long, grounded_count)												\

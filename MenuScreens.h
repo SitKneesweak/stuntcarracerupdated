@@ -25,6 +25,7 @@ enum MenuScreenType
 	MS_FIXTURE,			// 'RACE n' - The X V The Y, and the track
 	MS_RACE_WIN,		// the winner's picture - drawn full screen
 	MS_RACE_LOST,		// the loser's picture - drawn full screen
+	MS_RACE_WRECKED,	// the wreck picture, in place of the loser's - drawn full screen
 	MS_TRACK_RECORD,	// 'New track records' - only when the race just beat one
 	MS_RESULT,			// 'RESULT' - the two portraits, Winner 2pts / Best Lap 1pt
 	MS_TABLE,			// the division table, as three portraits with their figures
@@ -79,9 +80,11 @@ void MenuScreensRender( IDirect3DDevice9 *pd3dDevice );
 /*	fastest lap and total race time, which feed the Hall of Fame.  marginTime is how far		*/
 /*	behind the loser was when the flag fell, in seconds, or 0 when there is no margin to		*/
 /*	show (a practise run, or a beating too heavy to estimate a time for).					*/
+/*	playerWrecked is the car's state as the flag fell: a race lost with the body scraping		*/
+/*	along the road shows the wreck picture rather than the loser's.							*/
 void MenuScreensRaceFinished( bool playerWon, bool playerBestLap,
 							  double playerLapTime, double playerRaceTime,
-							  double marginTime );
+							  double marginTime, bool playerWrecked );
 
 /*	True if the race that is running (or about to) counts towards the season.				*/
 bool MenuScreensRaceIsLeague( void );

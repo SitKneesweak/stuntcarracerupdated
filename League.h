@@ -80,6 +80,12 @@ extern int  gLeagueSeason;			// seasons completed
 extern bool gLeagueSuperLeague;		// league.offset != 0
 extern char gPlayerName[16];
 
+/*	Holes in the damage bar carried from one fixture to the next, 0..10.  The Amiga keeps	*/
+/*	damage.hole.position through a season and never repairs it (see Car_Behaviour.h); this	*/
+/*	is the same count the other way up, and it is part of the career, so it goes into the	*/
+/*	profile and a new driver starts with a whole car.										*/
+extern int  gLeagueDamageHoles;
+
 /*	--- Queries -------------------------------------------------------------------------	*/
 
 /*	Driver name, as printed.  Trimmed of the leading space the original stores.				*/

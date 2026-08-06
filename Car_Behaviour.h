@@ -44,6 +44,17 @@ typedef enum
 /*	============================== */
 extern void ResetPlayer (void);
 
+/*	Holes punched out of the damage bar so far, and the number a new race starts with.		*/
+/*																							*/
+/*	The Amiga keeps damage.hole.position across a league season: a race with an opponent		*/
+/*	leaves it where the race left it (StuntCarRacer.s:10445-10471 falls through to rap14),	*/
+/*	while practice restores the value saved at the start.  There is no repair, so a season	*/
+/*	is driven in a car that only ever gets worse.  MenuStartTrack sets the carried count	*/
+/*	from the career before each race - to zero for anything that is not a season race -		*/
+/*	and the menus read nholes back when a league race is scored.								*/
+extern long nholes;
+extern long carried_nholes;
+
 extern void PlaceCarOnChainsForNewGame (long *x,
 										long *y,
 										long *z,
@@ -76,6 +87,12 @@ extern long ActiveCar (void);
 	single-player placement uses.  Head-to-head passes a much smaller value so the two
 	cars start beside each other on the track rather than off both edges of it.			*/
 extern void SetCarSwingFromLeft (long fromLeft);
+
+/*	True once the selected car's damage bar has run out and the body has dropped onto the	*/
+/*	road.  It stays true for the rest of the race - the wreck countdown runs down to zero	*/
+/*	and ends it - so the menus can ask after the flag has fallen whether the race was lost	*/
+/*	by wrecking rather than by being beaten.												*/
+extern bool CarIsWreckedNow (void);
 
 extern long AmigaVolumeToDirectX (long amiga_volume);
 

@@ -121,6 +121,7 @@ LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_UK
 //
 
 ATLAS					RCDATA					"Bitmap\\atlas.png"
+CHAIN					RCDATA					"Bitmap\\ChainLeft.png"
 
 #endif    // English (U.K.) resources
 /////////////////////////////////////////////////////////////////////////////

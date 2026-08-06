@@ -740,10 +740,14 @@ static void DrawFixture( void )
 /*	crowd cheering the winner in, or watching you trail past.  Like the opponents ladder		*/
 /*	they are full-screen artwork rather than something inside the menu panel, so they paint	*/
 /*	their own background and print nothing over the top.									*/
-static void DrawRacePicture( bool won )
+/*	A race lost with the car wrecked has its own picture in place of the loser's - you did	*/
+/*	not trail past the crowd, you did not finish at all.									*/
+static void DrawRacePicture( MenuScreenType screen )
 	{
 	AmigaMenuClear(AMIGA_INK_BLACK);
-	AmigaMenuBlit(won ? "racewin.png" : "racelost.png", 0, 0);
+	AmigaMenuBlit((screen == MS_RACE_WIN)     ? "racewin.png"
+				: (screen == MS_RACE_WRECKED) ? "wrecked.png"
+											  : "racelost.png", 0, 0);
 	}
 
 /*	'New track records', shown straight after the race picture when the run just beaten a	*/
@@ -1430,9 +1434,10 @@ static void MenuScreensDraw( void )
 		return;
 		}
 
-	if ((gScreen == MS_RACE_WIN) || (gScreen == MS_RACE_LOST))
+	if ((gScreen == MS_RACE_WIN) || (gScreen == MS_RACE_LOST) ||
+		(gScreen == MS_RACE_WRECKED))
 		{
-		DrawRacePicture(gScreen == MS_RACE_WIN);
+		DrawRacePicture(gScreen);
 		return;
 		}
 
@@ -1452,6 +1457,7 @@ static void MenuScreensDraw( void )
 		case MS_OPPONENTS:								break;	// handled above
 		case MS_RACE_WIN:								break;	// handled above
 		case MS_RACE_LOST:								break;	// handled above
+		case MS_RACE_WRECKED:							break;	// handled above
 		case MS_MAIN:			DrawMainMenu();			break;
 		case MS_SELECT:			DrawSelectMenu();		break;
 		case MS_LEAGUE_CHOICE:	DrawLeagueChoice();		break;
@@ -2116,6 +2122,7 @@ void MenuScreensKey( int key )
 		/*	with anything to choose on it.											*/
 		case MS_RACE_WIN:
 		case MS_RACE_LOST:
+		case MS_RACE_WRECKED:
 			/*	The record screen only appears when the race actually beat one.	*/
 			/*	gRecordScreenReturn is the RESULT screen for a league race and	*/
 			/*	the menu for anything else - a single race has no season figures	*/
@@ -2233,7 +2240,7 @@ void MenuScreensAbandonRace( void )
 
 void MenuScreensRaceFinished( bool playerWon, bool playerBestLap,
 							  double playerLapTime, double playerRaceTime,
-							  double marginTime )
+							  double marginTime, bool playerWrecked )
 	{
 	gActive        = true;
 	gLastLapTime   = playerLapTime;
@@ -2285,6 +2292,14 @@ void MenuScreensRaceFinished( bool playerWon, bool playerBestLap,
 		gRaceIsSingle        = false;
 		gRecordScreenReturn  = single ? MS_SINGLE_RACE : MS_SELECT;
 
+		/*	A wrecked car gets its picture whatever the race was: a time trial has	*/
+		/*	no crowd to trail past, but it can still end with the car on its belly.	*/
+		if (playerWrecked)
+			{
+			MenuScreensGoto(MS_RACE_WRECKED);
+			return;
+			}
+
 		if (single && (gSingleOpponent != NO_OPPONENT))
 			{
 			MenuScreensGoto(playerWon ? MS_RACE_WIN : MS_RACE_LOST);
@@ -2298,6 +2313,16 @@ void MenuScreensRaceFinished( bool playerWon, bool playerBestLap,
 
 	gRecordScreenReturn = MS_RESULT;
 
+	/*	The damage bar carries into the next fixture, and there is no repair between		*/
+	/*	them - so a season is driven in a car that only gets worse.  Only a race that	*/
+	/*	was seen through counts: abandoning one puts the fixture back to be run again	*/
+	/*	(MenuScreensAbandonRace), and it would be a poor bargain to hand back a wrecked	*/
+	/*	car with it.																	*/
+	{
+	extern long nholes;					// Car_Behaviour.cpp - see Car_Behaviour.h
+	gLeagueDamageHoles = (nholes > 10) ? 10 : static_cast<int>(nholes);
+	}
+
 	LeagueRecordResult(playerWon, playerBestLap);
 	gRaceIsLeague = false;
 
@@ -2307,7 +2332,9 @@ void MenuScreensRaceFinished( bool playerWon, bool playerBestLap,
 
 	/*	The picture comes first and the RESULT screen behind it, so you see how the race	*/
 	/*	went before you are told what it was worth.										*/
-	MenuScreensGoto(playerWon ? MS_RACE_WIN : MS_RACE_LOST);
+	MenuScreensGoto(playerWon    ? MS_RACE_WIN
+				  : playerWrecked ? MS_RACE_WRECKED
+								  : MS_RACE_LOST);
 	}
 
 /*	Record a lap or race time against a track, for the Hall of Fame.						*/

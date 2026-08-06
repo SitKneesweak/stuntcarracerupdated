@@ -97,6 +97,9 @@ int main( void )
 	LeagueRecordResult(true,  true);		// race 1: won it, and set the fastest lap
 	LeagueRecordResult(false, false);		// race 2: lost
 
+	/*	Damage carried out of race 2 and into race 3 - the season is driven in one car.	*/
+	gLeagueDamageHoles = 3;
+
 	const int  savedTrack   = gLeagueFixtures[0].trackID;
 	const int  savedOpponent = gLeagueFixtures[2].opponent;
 	const int  savedPoints  = gLeagueTable[PLAYER_DRIVER].points;
@@ -115,6 +118,7 @@ int main( void )
 	LeagueNewCareer("");
 	MenuScreensClearRecords();
 	Check(gLeagueRace == 0, "the in-memory career really was wiped");
+	Check(gLeagueDamageHoles == 0, "a new driver starts with an undamaged car");
 
 	/*	--- And back ------------------------------------------------------------------	*/
 	Check(ProfileLoad(), "the profile loads");
@@ -123,6 +127,7 @@ int main( void )
 	Check(gLeagueRace == 2,                            "the season resumes at race 3");
 	Check(gLeagueSeason == 0,                          "the season number comes back");
 	Check(!gLeagueSuperLeague,                         "the Super League flag comes back");
+	Check(gLeagueDamageHoles == 3,                     "the carried damage comes back");
 	Check(LeagueDriverPosition(PLAYER_DRIVER) == savedPosition, "the ladder comes back");
 	Check(gLeagueTable[PLAYER_DRIVER].points == savedPoints,    "the points come back");
 	Check(gLeagueTable[PLAYER_DRIVER].wins == 1,       "the win comes back");

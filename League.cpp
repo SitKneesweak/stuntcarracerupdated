@@ -64,6 +64,7 @@ LeagueFixture gLeagueFixtures[RACES_PER_SEASON];
 int  gLeagueRace       = 0;
 int  gLeagueSeason     = 0;
 bool gLeagueSuperLeague = false;
+int  gLeagueDamageHoles = 0;
 char gPlayerName[16]   = "";
 
 /*	======================================================================================= */
@@ -130,6 +131,7 @@ void LeagueNewCareer( const char *name )
 	gLeagueRace        = 0;
 	gLeagueSeason      = 0;
 	gLeagueSuperLeague = false;
+	gLeagueDamageHoles = 0;			// a new driver is given a car in one piece
 
 	LeagueStartSeason();
 	}
