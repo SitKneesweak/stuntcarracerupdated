@@ -94,4 +94,8 @@ extern bool OpponentTuningActive( void );
 /*	maximum speed or 24 for the per-piece target, matching the table's own layout.		*/
 extern long OpponentTuningBase( long trackID, long group, bool superLeague );
 
+/*	Generates the track's per-piece opponent speed table for one race (Amiga srd1e..srd116).	*/
+/*	Must run before MoveDrawBridge(), which overwrites the Draw Bridge entries as it steps.	*/
+extern void InitialiseOpponentSpeedValues( long trackID );
+
 #endif	/* _OPPONENT_BEHAVIOUR */

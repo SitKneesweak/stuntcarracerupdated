@@ -22,6 +22,7 @@
 #include "3D_Engine.h"
 #include "Physics_FloatV2.h"
 #include "Det_Rand.h"
+#include "Opponent_Speeds.h"
 
 /*	===== */
 /*	Debug */
@@ -77,9 +78,18 @@ extern bool bSuperLeague;
 extern unsigned char sections_car_can_be_put_on[]; 				// both array are used for opponents speed values computation
 extern char Piece_Angle_And_Template[MAX_PIECES_PER_TRACK];
 
-// SEB: The opponents_speed_values, that is pre-computed, is not used anymore and Opponents_Speed_Value function is used now
-// Values for each piece of each track (Global because MoveDrawBridge() modifies the Draw Bridge values)
-// NOTE: These are for the Standard league.  Super league values are different
+// Required opponent speed for each piece of each track.  Global because MoveDrawBridge()
+// rewrites the Draw Bridge entries as the bridge steps.
+//
+// InitialiseOpponentSpeedValues() regenerates the current track's row at the start of every
+// race, so what follows is only the initial content.  It is kept because it is a capture of
+// the Amiga's own output and is therefore the reference the generator is checked against:
+// with the base speeds 72, 65, 69, 72, 79, 88, 79, 86 respectively, the generator reproduces
+// every row here byte for byte.  The two exceptions are Draw Bridge pieces 51 and 52, which
+// MoveDrawBridge() overwrites at runtime and which were captured with the bridge raised.
+//
+// NOTE: these rows were captured in the Standard league.  The per-piece overrides that shape
+// them come from the track data and so are league-independent; only the base speed differs.
 unsigned char opponents_speed_values[NUM_TRACKS][MAX_PIECES_PER_TRACK] =
 {
 	{
@@ -230,10 +240,9 @@ static signed char gOppSpeedTuning[2][NUM_TRACKS] = { { 0 }, { 0 } };
 #define OPP_TUNING_FILE		"tuning.txt"
 #define OPP_TUNING_VERSION	1
 
-/*	Bumped on every edit, so Opponent_Speed_Value's one-entry cache cannot answer from		*/
-/*	before a change - the tuning screen is reached between races, exactly when the piece		*/
-/*	and track it caches on are unchanged.													*/
-static long gOppSpeedTuningEdits = 0;
+/*	Tuning offsets feed the base speed in InitialiseOpponentSpeedValues(), so an edit		*/
+/*	takes effect at the start of the next race - which is when the tuning screen is			*/
+/*	left anyway.																			*/
 
 /*	Set while the file is being read back, so the writes that reading does are not each		*/
 /*	written straight out again over the file still being read.								*/
@@ -332,7 +341,6 @@ void OpponentTuningSet( long trackID, bool superLeague, long offset )
 	if (offset > OPPONENT_TUNING_MAX) offset = OPPONENT_TUNING_MAX;
 
 	gOppSpeedTuning[superLeague ? 1 : 0][trackID] = (signed char)offset;
-	gOppSpeedTuningEdits++;
 
 	/*	Written out on every edit rather than on the way out of the game: the bench is	*/
 	/*	used by racing, and a race is left by whatever route the tester feels like,		*/
@@ -346,7 +354,6 @@ void OpponentTuningClear( void )
 		for (int track = 0; track < NUM_TRACKS; track++)
 			gOppSpeedTuning[league][track] = 0;
 
-	gOppSpeedTuningEdits++;
 	OpponentTuningSave();		// removes the file - a reset leaves nothing behind
 	}
 
@@ -589,6 +596,11 @@ void OpponentBehaviour (long *x,
 		s += OpponentTuningBase(TrackID, OPP_SPEED_GROUP_MAX_SPEED, bSuperLeague);
 		opponents_max_speed = s;
 //temp		opponents_max_speed = 10;
+
+		// Build this race's per-piece speed table (Amiga srd1.sub4 then srd1e..srd116, which
+		// sit together at the end of road setup - the base speed and the table it feeds are
+		// drawn in that order there too)
+		InitialiseOpponentSpeedValues(TrackID);
 
 		bNewGame = FALSE;
 		}
@@ -1521,67 +1533,37 @@ static void AverageWheelYSpeeds( long wheel1, long wheel2 )
 	opp_y_speed[wheel2] = average;
 }
 
+/*	The required speed for one piece.  Built for the whole track once a race by
+	InitialiseOpponentSpeedValues(), so this is now just the lookup the Amiga does at
+	srd114's counterpart in AdjustOpponentsEngineAcceleration.  Bit 7 may be set - see
+	Opponent_Speeds.h - so callers that care about the sign must test it as a signed byte. */
 static long Opponent_Speed_Value( long track_id, long pos )
 {
-/*srd111a	move.l	#road.section.angle.and.piece,a1
-	move.b	(a1,d1.w),d0
-	andi.b	#$f,d0
-	move.b	d0,d2
-	move.l	#sections.car.can.be.put.on,a2
-	move.b	(a2,d2.w),d0
-	bpl	srd112
-
-	move.b	B.63ce1,d0
-	subi.b	#10,d0
-	move.b	d0,value
-	move.b	B.63ce1,d0
-	jmp	srd113a
-
-srd112	move.b	value,d0
-	addi.b	#10,d0
-	bmi	srd113
-	move.b	d0,value
-
-srd113	move.b	value,d0
-
-srd113a	move.b	prompt.chars,d2
-	beq	srd114
-
-	subq.b	#1,prompt.chars
-	ori.b	#$80,d0
-
-srd114	move.l	#opponents.speed.values,a1
-	move.b	d0,(a1,d1.w)
-*/
-	static long oldpos = -1;
-	static long oldtrack = -1;
-	static bool oldleague = false;
-	static long oldspeed = 0;
-	static long oldedits = -1;
-	if(pos==oldpos && oldtrack==track_id && oldleague==bSuperLeague && oldedits==gOppSpeedTuningEdits)
-		return oldspeed;
-	oldpos = pos;
-	oldleague = bSuperLeague;
-	oldtrack = track_id;
-	oldedits = gOppSpeedTuningEdits;
-
-	long b = Piece_Angle_And_Template[pos];
-	b = sections_car_can_be_put_on[b&0x0f];
-	long B63ce1 = static_cast<long>(SCR_Rand()) & static_cast<long>(opp_track_speed_values[track_id+16+(bSuperLeague?32:0)]);
-		 B63ce1 += OpponentTuningBase(track_id, OPP_SPEED_GROUP_PER_PIECE, bSuperLeague);
-	long /*value,*/ d0;
-	if (b<0) {
-		//value = B63ce1-10;
-		d0 = B63ce1;
-	} else {
-		if (B63ce1<(0x7f-10))
-			d0 = /*value =*/ B63ce1+10;
-		else
-			d0 = /*value =*/ B63ce1;
-	}
-	oldspeed = d0;
-	return d0;
+	return opponents_speed_values[track_id][pos];
 }
+
+
+/*	======================================================================================= */
+/*	Function:		InitialiseOpponentSpeedValues											*/
+/*																							*/
+/*	Description:	Draws the one per-race base speed (Amiga B.63ce1, set in srd1.sub4) and	*/
+/*					generates the track's speed table from it.  Note the base is drawn once	*/
+/*					for the whole race, not once per piece - drawing it per piece was what	*/
+/*					turned the authored profile into noise.									*/
+/*	======================================================================================= */
+
+void InitialiseOpponentSpeedValues( long track_id )
+	{
+	long base = static_cast<long>(SCR_Rand()) & static_cast<long>(opp_track_speed_values[track_id+16+(bSuperLeague?32:0)]);
+	base += OpponentTuningBase(track_id, OPP_SPEED_GROUP_PER_PIECE, bSuperLeague);
+
+	BuildOpponentSpeedValues(track_id,
+							 NumTrackPieces,
+							 Piece_Angle_And_Template,
+							 sections_car_can_be_put_on,
+							 base,
+							 opponents_speed_values[track_id]);
+	}
 
 
 /*	======================================================================================= */
@@ -1660,7 +1642,10 @@ long value;
 
 ros1:
 	d2 = opponents_current_piece;
-	if (/*opponents_speed_values[TrackID][d2]*/Opponent_Speed_Value(TrackID, d2) < 0)
+	// Bit 7 marks a jump piece and its run-up, where the opponent holds its line rather
+	// than wandering.  The Amiga tests the byte's sign, so this has to be a signed *byte*
+	// test - the old long-returning version could never go negative and so never fired.
+	if (static_cast<signed char>(Opponent_Speed_Value(TrackID, d2)) < 0)
 		goto ros2;
 
 	if (opponent_behind_player)
@@ -1768,7 +1753,7 @@ long speed_value, speed, opponents_required_z_speed;
 	if (!opp_touching_road)
 		return;
 
-	speed_value = /*opponents_speed_values[TrackID][opponents_current_piece]*/Opponent_Speed_Value(TrackID, opponents_current_piece);
+	speed_value = Opponent_Speed_Value(TrackID, opponents_current_piece);
 	speed = speed_value;
 	if ((speed & 0x80) == 0)
 	{
@@ -3074,16 +3059,12 @@ bool draw_shadow = TRUE;
 		? ((opponents_x_span * base_width) / slope_width)
 		: opponents_x_span;
 
-	/*	The footprint above is the car's road width - what the wheels ran on when the car
-		was as wide as its contact patch at both ends. The drawn car isn't: the rears are
-		pulled in a little and the fronts a long way, so a shadow of that footprint spills
-		out from under the car, worst at the nose. Narrow each end to the wheels that are
-		actually there and the shadow becomes the car's own outline: a trapezium, wide at
-		the back, tucked in at the front.											*/
-	double shadow_span_rear  = opponents_shadow_x_span
-							 * (2.0 * WHEEL_REAR_OUTER)  / static_cast<double>(VCAR_WIDTH);
-	double shadow_span_front = opponents_shadow_x_span
-							 * (2.0 * WHEEL_FRONT_OUTER) / static_cast<double>(VCAR_WIDTH);
+	/*	The footprint above is the car's road width, and the opponent is drawn with the
+		original model, which is exactly that wide at both ends - so the shadow is the
+		footprint, unscaled. (The player's car has narrower wheels than this, but you
+		never see your own shadow from the cockpit.)								*/
+	double shadow_span_rear  = opponents_shadow_x_span;
+	double shadow_span_front = opponents_shadow_x_span;
 
 	double sx, sz;
 	sz = distance - (floor(distance / 256.0) * 256.0);	// z position of rear wheels

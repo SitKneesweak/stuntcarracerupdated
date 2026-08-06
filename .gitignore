@@ -30,3 +30,4 @@ tests/net_socket_test
 tests/net_lockstep_test
 tests/profile_test
 tests/physics_rate_test
+tests/opponent_speed_test
