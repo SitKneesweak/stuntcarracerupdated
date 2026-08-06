@@ -592,7 +592,9 @@ static void DrawCarLeftWheelTread( long offset )	// offset into co-ordinates
 /*	======================================================================================= */
 static IDirect3DVertexBuffer9 *pCarVB = NULL;
 static IDirect3DVertexBuffer9 *pOpponentCarVB = NULL;
-static long numCarVertices = 0;
+static long numCarVertices = 0;			// the mesh being built, by StoreCarTriangle()
+static long numPlayerCarVertices = 0;	// what each buffer ended up holding - the two
+static long numOpponentCarVertices = 0;	// cars are different models, so different counts
 
 // Per-wheel suspension compression, written by both the legacy and FloatV2 physics paths
 extern long front_left_amount_below_road, front_right_amount_below_road, rear_amount_below_road;
@@ -1064,6 +1066,106 @@ static void StoreCarBody( UTVERTEX *pVertices )
 	StoreCarDetail(pVertices, side_colour, deck_colour);
 }
 
+/*	The original car, kept for the opponent.
+
+	This is the model as it was before the body was lofted and the wheels turned into
+	cylinders: a six sided wedge with a flat quad at each corner for a wheel. Seen from
+	another car that is what Stunt Car Racer's opponent has always looked like, and the
+	new model - a cockpit tub, a roll hoop, spoked wheels - is detail you only ever get
+	close enough to read on your own car anyway.
+
+	The one thing it keeps from the rewrite is the suspension: the four wheel quads still
+	ride up into their arches by the current compression, exactly as the cylinders do, so
+	the opponent's wheels work over bumps rather than sitting welded to the body.
+
+	Layout matches car_rest - four wheels of four vertices each in the order rear left,
+	rear right, front left, front right - and then eight body points, rear four first. */
+static const COORD_3D legacy_car_rest[16+8] = {
+//x,					y,					z
+{-VCAR_WIDTH/2,			-VCAR_HEIGHT/4,		-VCAR_LENGTH/2},		// rear left wheel
+{-VCAR_WIDTH/2,			0,					-VCAR_LENGTH/2},
+{-VCAR_WIDTH/4,			0,					-VCAR_LENGTH/2},
+{-VCAR_WIDTH/4,			-VCAR_HEIGHT/4,		-VCAR_LENGTH/2},
+
+{VCAR_WIDTH/4,			-VCAR_HEIGHT/4,		-VCAR_LENGTH/2},		// rear right wheel
+{VCAR_WIDTH/4,			0,					-VCAR_LENGTH/2},
+{VCAR_WIDTH/2,			0,					-VCAR_LENGTH/2},
+{VCAR_WIDTH/2,			-VCAR_HEIGHT/4,		-VCAR_LENGTH/2},
+
+{-VCAR_WIDTH/2,			-VCAR_HEIGHT/4,		VCAR_LENGTH/2},			// front left wheel
+{-VCAR_WIDTH/2,			0,					VCAR_LENGTH/2},
+{-VCAR_WIDTH/4,			0,					VCAR_LENGTH/2},
+{-VCAR_WIDTH/4,			-VCAR_HEIGHT/4,		VCAR_LENGTH/2},
+
+{VCAR_WIDTH/4,			-VCAR_HEIGHT/4,		VCAR_LENGTH/2},			// front right wheel
+{VCAR_WIDTH/4,			0,					VCAR_LENGTH/2},
+{VCAR_WIDTH/2,			0,					VCAR_LENGTH/2},
+{VCAR_WIDTH/2,			-VCAR_HEIGHT/4,		VCAR_LENGTH/2},
+
+{-VCAR_WIDTH/4,			-VCAR_HEIGHT/8,		-VCAR_LENGTH/2},		// car rear points
+{-(3*VCAR_WIDTH)/16,	VCAR_HEIGHT/4,		-VCAR_LENGTH/2},
+{(3*VCAR_WIDTH)/16,		VCAR_HEIGHT/4,		-VCAR_LENGTH/2},
+{VCAR_WIDTH/4,			-VCAR_HEIGHT/8,		-VCAR_LENGTH/2},
+
+{-VCAR_WIDTH/4,			-VCAR_HEIGHT/8,		VCAR_LENGTH/2},			// car front points
+{-VCAR_WIDTH/4,			0,					VCAR_LENGTH/2},
+{VCAR_WIDTH/4,			0,					VCAR_LENGTH/2},
+{VCAR_WIDTH/4,			-VCAR_HEIGHT/8,		VCAR_LENGTH/2}};
+
+/*	One wheel quad, stored both ways round - the car is drawn with backface culling on
+	and a flat quad has to be visible from either flank.							*/
+static void StoreLegacyWheel( const COORD_3D *quad, UTVERTEX *pVertices, DWORD colour )
+{
+	StoreCarQuad(&quad[0], &quad[1], &quad[2], &quad[3], pVertices, colour);
+	StoreCarQuad(&quad[3], &quad[2], &quad[1], &quad[0], pVertices, colour);
+}
+
+static void CreateLegacyCarInVB( UTVERTEX *pVertices, const CAR_SUSPENSION *susp )
+{
+COORD_3D car[16+8];
+
+	memcpy(car, legacy_car_rest, sizeof(car));
+
+	// Ride the four wheel groups up into their arches by the current compression
+	for (long i = 0; i < 4; i++)
+	{
+		car[ 0+i].y += susp->rear_left;
+		car[ 4+i].y += susp->rear_right;
+		car[ 8+i].y += susp->front_left;
+		car[12+i].y += susp->front_right;
+	}
+
+	DWORD wheel_colour = SCRGB(SCR_BASE_COLOUR+0);
+	StoreLegacyWheel(&car[0],  pVertices, wheel_colour);	// rear left
+	StoreLegacyWheel(&car[4],  pVertices, wheel_colour);	// rear right
+	StoreLegacyWheel(&car[8],  pVertices, wheel_colour);	// front left
+	StoreLegacyWheel(&car[12], pVertices, wheel_colour);	// front right
+
+	const COORD_3D *b = &car[16];			// body: rear four points, then front four
+
+	DWORD side_colour, end_colour, floor_colour;
+	if (bSuperLeague)
+	{
+		side_colour  = SCRGB(SCR_BASE_COLOUR+21);
+		end_colour   = SCRGB(SCR_BASE_COLOUR+20);
+		floor_colour = SCRGB(SCR_BASE_COLOUR+19);
+	}
+	else
+	{
+		side_colour  = SCRGB(SCR_BASE_COLOUR+12);
+		end_colour   = SCRGB(SCR_BASE_COLOUR+10);
+		floor_colour = SCRGB(SCR_BASE_COLOUR+9);
+	}
+
+	StoreCarQuad(&b[4], &b[5], &b[1], &b[0], pVertices, side_colour);	// left
+	StoreCarQuad(&b[3], &b[2], &b[6], &b[7], pVertices, side_colour);	// right
+	StoreCarQuad(&b[0], &b[1], &b[2], &b[3], pVertices, end_colour);	// back
+	StoreCarQuad(&b[7], &b[6], &b[5], &b[4], pVertices, end_colour);	// front
+	StoreCarQuad(&b[1], &b[5], &b[6], &b[2], pVertices, SCRGB(SCR_BASE_COLOUR+15));	// top
+	StoreCarQuad(&b[3], &b[7], &b[4], &b[0], pVertices, floor_colour);	// bottom
+}
+
+
 static void CreateCarInVB( UTVERTEX *pVertices, const CAR_SUSPENSION *susp, double roll )
 {
 COORD_3D car[16];
@@ -1095,9 +1197,13 @@ COORD_3D car[16];
 
 /*	Rebuild one car into its buffer. The two cars are drawn in the same frame at different
 	ride heights and wheel angles, so they cannot share a buffer - hence the pair. The mesh
-	is 780 triangles at most, so refilling both every frame is nothing.				*/
+	is 780 triangles at most, so refilling both every frame is nothing.
+
+	'legacy' picks the original wedge-and-quads model, which is what the opponent gets; it
+	has its own triangle count, so the count is handed back for the draw call.		*/
 static HRESULT RebuildCarVB( IDirect3DDevice9 *pd3dDevice, IDirect3DVertexBuffer9 **ppVB,
-							 const CAR_SUSPENSION *susp, double roll )
+							 const CAR_SUSPENSION *susp, double roll,
+							 bool legacy, long *pnumVertices )
 {
 	if (*ppVB == NULL)
 	{
@@ -1116,7 +1222,11 @@ static HRESULT RebuildCarVB( IDirect3DDevice9 *pd3dDevice, IDirect3DVertexBuffer
 		return E_FAIL;
 	}
 	numCarVertices = 0;
-	CreateCarInVB(pVertices, susp, roll);
+	if (legacy)
+		CreateLegacyCarInVB(pVertices, susp);
+	else
+		CreateCarInVB(pVertices, susp, roll);
+	*pnumVertices = numCarVertices;
 	(*ppVB)->Unlock();
 	return S_OK;
 }
@@ -1127,8 +1237,10 @@ HRESULT CreateCarVertexBuffer (IDirect3DDevice9 *pd3dDevice)
 	// Both cars start at rest; UpdateCarSuspension() takes over from the first frame
 	static const CAR_SUSPENSION rest = {0, 0, 0, 0};
 
-	if (RebuildCarVB(pd3dDevice, &pCarVB, &rest, 0.0) != S_OK) return E_FAIL;
-	if (RebuildCarVB(pd3dDevice, &pOpponentCarVB, &rest, 0.0) != S_OK) return E_FAIL;
+	if (RebuildCarVB(pd3dDevice, &pCarVB, &rest, 0.0, false, &numPlayerCarVertices) != S_OK)
+		return E_FAIL;
+	if (RebuildCarVB(pd3dDevice, &pOpponentCarVB, &rest, 0.0, true, &numOpponentCarVertices) != S_OK)
+		return E_FAIL;
 	return S_OK;
 }
 
@@ -1219,7 +1331,7 @@ void UpdateCarSuspension (IDirect3DDevice9 *pd3dDevice, float fElapsedTime)
 {
 CAR_SUSPENSION susp;
 long rear_left, rear_right, front;
-static double player_roll = 0.0, opponent_roll = 0.0;
+static double player_roll = 0.0;
 
 #define	PLAYER_TRAVEL(v)	SuspensionTravel((v), SUSP_PLAYER_REST, \
 											 SUSP_PLAYER_DROOP, SUSP_PLAYER_LOAD)
@@ -1233,7 +1345,7 @@ static double player_roll = 0.0, opponent_roll = 0.0;
 					PLAYER_TRAVEL(rear_amount_below_road),
 					true);
 	player_roll = AdvanceWheelRoll(player_roll, player_z_speed, fElapsedTime);
-	RebuildCarVB(pd3dDevice, &pCarVB, &susp, player_roll);
+	RebuildCarVB(pd3dDevice, &pCarVB, &susp, player_roll, false, &numPlayerCarVertices);
 
 	// Opponent: the other way round - the rear pair are free, the front wheels share
 	GetOpponentWheelCompression(&rear_left, &rear_right, &front);
@@ -1242,8 +1354,8 @@ static double player_roll = 0.0, opponent_roll = 0.0;
 					OPPONENT_TRAVEL(rear_right),
 					OPPONENT_TRAVEL(front),
 					false);
-	opponent_roll = AdvanceWheelRoll(opponent_roll, GetOpponentZSpeed(), fElapsedTime);
-	RebuildCarVB(pd3dDevice, &pOpponentCarVB, &susp, opponent_roll);
+	// The opponent's model is the original one - flat wheel quads, with nothing to roll
+	RebuildCarVB(pd3dDevice, &pOpponentCarVB, &susp, 0.0, true, &numOpponentCarVertices);
 }
 
 
@@ -1254,26 +1366,27 @@ void FreeCarVertexBuffer (void)
 }
 
 
-static void DrawCarVB (IDirect3DDevice9 *pd3dDevice, IDirect3DVertexBuffer9 *pVB)
+static void DrawCarVB (IDirect3DDevice9 *pd3dDevice, IDirect3DVertexBuffer9 *pVB,
+					   long numVertices)
 {
 	pd3dDevice->SetRenderState( D3DRS_ZENABLE, TRUE );
 	pd3dDevice->SetRenderState( D3DRS_CULLMODE, D3DCULL_CCW );
 
 	pd3dDevice->SetStreamSource( 0, pVB, 0, sizeof(UTVERTEX) );
 	pd3dDevice->SetFVF( D3DFVF_UTVERTEX );
-	pd3dDevice->DrawPrimitive( D3DPT_TRIANGLELIST, 0, numCarVertices/3 );	// 3 points per triangle
+	pd3dDevice->DrawPrimitive( D3DPT_TRIANGLELIST, 0, numVertices/3 );	// 3 points per triangle
 }
 
 
 void DrawCar (IDirect3DDevice9 *pd3dDevice)
 {
-	DrawCarVB(pd3dDevice, pCarVB);
+	DrawCarVB(pd3dDevice, pCarVB, numPlayerCarVertices);
 }
 
 
 void DrawOpponentCar (IDirect3DDevice9 *pd3dDevice)
 {
-	DrawCarVB(pd3dDevice, pOpponentCarVB);
+	DrawCarVB(pd3dDevice, pOpponentCarVB, numOpponentCarVertices);
 }
 
 struct TRANSFORMEDTEXVERTEX

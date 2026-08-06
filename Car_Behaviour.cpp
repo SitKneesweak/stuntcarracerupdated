@@ -245,6 +245,14 @@ static long chain_touchdown_frames = 0;
 static long chain_release_hold = 0;
 static long chain_last_road_x  = -1;
 
+	// Where the crane picks the car up from, sideways, and how hard it is swinging
+	// when it does.  The drop start is the Amiga's (player.to.side.of.road's 160, and
+	// the full 44 << 8 swing); a re-lift after going off the track starts at the
+	// swing's own resting point instead, so there is nothing left to swing.  See the
+	// two comment blocks in PositionCarAbovePiece and LiftCarOntoTrack.
+#define	CHAIN_SIDE_OFFSET		(drop_start_done ?  64  :  160)
+#define	CHAIN_PICKUP_MAGNITUDE	(drop_start_done ? (16 << 8) : (44 << 8))
+
 static long player_distance_off_road;	// used to determine the value below
 static long off_map_status = 0;	// not set exactly like Amiga StuntCarRacer
 
@@ -2983,10 +2991,15 @@ static void LiftCarOntoTrack (void)
 
 	if (d1 >= 230)
 		{
-		// Being picked up: hold the full swing, to whichever side the car left the road.
+		// Being picked up, to whichever side the car left the road.  The drop start
+		// takes the Amiga's full 44 << 8 and lets it decay; a re-lift is picked up
+		// already at the 16 << 8 minimum, paired with the smaller side offset in
+		// PositionCarAbovePiece, so it hangs at the roll and the position the swing
+		// would have settled to.  Stage 2 then finds the magnitude already at target
+		// and moves straight on to the hang.
 		// (The Amiga also syncs the side with the other machine here, coll1.sub2.sub3,
 		// which has no equivalent in this port - there is no link-up.)
-		swing_magnitude = (swing_from_left ? -(44 << 8) : (44 << 8));
+		swing_magnitude = (swing_from_left ? -CHAIN_PICKUP_MAGNITUDE : CHAIN_PICKUP_MAGNITUDE);
 
 		--car_on_chains_countdown;
 		return;
@@ -4779,7 +4792,7 @@ static void PositionCarAbovePiece (long piece)
 	if (getenv("SCR_CRANE_TRACE") != NULL)
 		printf("PositionCarAbovePiece piece=%ld drop_start_done=%ld road height=%ld (0x%lx) "
 			   "ground player_y would be 0x%lx, set player_y=0x%lx, required=%ld\n",
-			   piece, drop_start_done, height, height, (height << 8), player_y, required_raise_height);
+			   piece, static_cast<long>(drop_start_done), height, height, (height << 8), player_y, required_raise_height);
 
 	swing_magnitude = 0;
 	swing_pending_step = 0;
@@ -4818,8 +4831,23 @@ static void PositionCarAbovePiece (long piece)
 	 *
 	 * The side is whichever one the car left the road on (swing_from_left), so the
 	 * crane picks it up where it went off rather than always from the right.
+	 *
+	 * 160 is the Amiga's, and is what the drop start uses: it puts the car well
+	 * outside the road (x.offset 320 against a road half width of 192), so it is
+	 * lifted in from beside the track.  A re-lift after going off the track hangs
+	 * the car much lower - just above the road, not high in the air - and the
+	 * swing that carries it back in from 320 is what throws it into the side of
+	 * the track on the way past.
+	 *
+	 * So a re-lift starts where the swing would have taken it anyway.  swing.car
+	 * writes players.z.angle = magnitude - (x.offset << 5), so once the magnitude
+	 * has decayed to its 16 << 8 minimum the servo's null is x.offset = 4096/32 =
+	 * 128, and x.offset is twice this offset (640 piece units against the road's
+	 * 384 half width is x.offset 320, so 128 wants 64).  Placed there, with the
+	 * magnitude already at its settled value below, there is no swing left to
+	 * travel: the car hangs over the track and comes straight down.
 	 */
-	long side = (swing_from_left ? -160 : 160);
+	long side = (swing_from_left ? -CHAIN_SIDE_OFFSET : CHAIN_SIDE_OFFSET);
 
 	// The Amiga's arithmetic (ptsor1, StuntCarRacer.s:8070) is
 	// (160 << 7) * trig * 2 >> 16 << 6, i.e. 160 * trig / 4 world units.  Its

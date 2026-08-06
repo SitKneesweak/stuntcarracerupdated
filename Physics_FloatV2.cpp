@@ -506,6 +506,10 @@ inline int16_t FixMul(int16_t a, int16_t b) {
 // One wheel's penetration into the road, plus the damage it takes for it.
 // The returned "amount below road" is what the suspension pushes back against.
 double ProcessWheel(PhysicsStateF& s, double heightDiff, double& oldDiff,
+                    // damageRemainder carries the fractional part of a landing's
+                    // damage, so that a run of small landings adds up the way the
+                    // Amiga's whole-frame accumulation did instead of each one
+                    // rounding away to nothing.
                     double& amountBelowRoad, uint8_t& damage, double& damageRemainder,
                     double& damageValue, uint8_t& groundedCount, bool& grounded,
                     double dtRatio) {
@@ -531,45 +535,103 @@ double ProcessWheel(PhysicsStateF& s, double heightDiff, double& oldDiff,
     // the Amiga's previous-step test at its own rate, but it still fires when
     // a finer time step walks the wheel through the band gradually - which is
     // why hitting the foot of the big ramp made no sound at 60Hz.
+    bool justLanded = false;
     if (below < 512.0) {
         grounded = false;
     } else if (below >= 1024.0 && !grounded) {
         grounded = true;
+        justLanded = true;
         groundedCount++;
     }
 
-    // Impacts beyond the road "cushion" do damage - but not while the crane has
-    // the car. On the Amiga the chained car never reached the road, so the case
-    // could not arise; the port's crane sets it down on the track before letting
-    // go, and being handed a damaged car on the start line is not the deal.
-    double impact = below - static_cast<double>(s.RoadCushionValue << 8);
+    // --- Landing damage -----------------------------------------------------
+    //
+    // The Amiga tests penetration depth: car.collision.detection
+    // (StuntCarRacer.s:15948) does `cmpi.w #$700,d0` on
+    // front.left.amount.below.road minus the cushion, then `subi.w #$600,d0`
+    // and scales the top byte by 1.5. Those constants are kept verbatim below.
+    //
+    // What cannot be kept is *evaluating them per step on the depth itself*.
+    // Penetration depth is a discretisation artifact, not a physical quantity:
+    // at 10Hz the wheel plunges deep in one jump before the suspension can push
+    // back, while at 60Hz the response reacts sooner and the wheel never gets
+    // as deep. Measured over a crest-and-dip run, peak depth was 2270 at 10Hz
+    // but 1719 at 60Hz -- so the 0x700 threshold was crossed twelve times at
+    // the Amiga rate and *not once* at the rate we actually ship. The car took
+    // no landing damage at all at 60Hz. See tests/physics_rate_test.cpp.
+    //
+    // What is rate-independent is the contact event and the closing speed at
+    // it. Over that same run the wheels registered exactly 21 impacts at every
+    // one of 10/25/60/120Hz, with mean closing speed 1115/1153/1189/1318 --
+    // stable, where peak depth was not. `rate` is already normalised to a
+    // 10Hz step (the 1.078125 above is the Amiga's 276>>8 from
+    // calculate.difference, StuntCarRacer.s:15354), so it carries no dt.
+    //
+    // So: evaluate the Amiga's formula once per landing, on closing speed
+    // scaled into the depth domain the constants were tuned for. kImpactToDepth
+    // is calibrated so the 10Hz totals stay put -- the Amiga rate remains the
+    // reference, and the faster rates now follow it instead of escaping it.
+    const double kImpactToDepth = 1.84;
+
+    // The other half of what per-step evaluation gave for free: *dwell*. On the
+    // Amiga a wheel that lands hard stays past 0x700 for several frames and is
+    // charged on each of them, up to damaged.limit (StuntCarRacer.s:15966) --
+    // so a big drop costs several times what a scrape costs, on top of each
+    // charge being larger. Firing exactly once per landing threw that away, and
+    // the loss is invisible on gentle landings (dwell ~1 frame, which is why the
+    // crest-and-dip calibration matched) but severe on the real drops: Little
+    // Ramp's big jump barely marked the car.
+    //
+    // Deeper landings dwell proportionally longer, so estimate the dwell in
+    // 10Hz frames from the impact itself. The damage then goes as roughly
+    // impact x (impact - 1536), i.e. energy-like, which is the shape the
+    // per-frame accumulation had. Clamped below at one frame (never less than
+    // the single charge the Amiga always makes) and above by damaged.limit,
+    // the same cap the Amiga applies to one sustained battering.
+    const double kDwellFrames = 1792.0;
+
     if (s.CarOnChainsCountdown != 0) {
+        // Not while the crane has the car. On the Amiga the chained car never
+        // reached the road so the case could not arise; the port's crane sets
+        // it down on the track before letting go, and being handed a damaged
+        // car on the start line is not the deal.
         s.DamagedCount = 0;
-    } else if (impact >= 0.0 && impact >= 1792.0) {
-        if (impact > damageValue) damageValue = impact;
-        double excess = impact - 1536.0;
-        if (static_cast<int8_t>(s.FourteenFramesElapsed) >= 0) {
-            s.DamagedCount++;
-            // DamagedLimit counts steps, so it scales with the tick rate.
-            if (s.DamagedCount < static_cast<int>(static_cast<double>(s.DamagedLimit) / dtRatio)) {
-                double clamped = std::round(excess);
-                if (clamped > 65535.0) clamped = 65535.0;
-                if (clamped < 0.0) clamped = 0.0;
-                int hi = (static_cast<int>(clamped) >> 8) & 0xFF;
-                int scaled = (hi + (hi >> 1)) & 0xFF;   // x1.5
-                // Fractional damage carries between steps so the total dealt
-                // per second is rate-independent.
-                double amount = static_cast<double>(scaled) * dtRatio + damageRemainder;
-                int whole = static_cast<int>(amount);
-                damageRemainder = amount - static_cast<double>(whole);
-                int total = whole + damage;
-                if (total > 255) total = 255;
-                damage = static_cast<uint8_t>(total);
-                s.Damaged = 128;
+        damageRemainder = 0.0;
+    } else if (justLanded) {
+        double impact = (rate * kImpactToDepth) - static_cast<double>(s.RoadCushionValue << 8);
+        if (impact >= 1792.0) {
+            if (impact > damageValue) damageValue = impact;
+            double excess = impact - 1536.0;
+            if (static_cast<int8_t>(s.FourteenFramesElapsed) >= 0) {
+                // Frames this landing would have spent past the threshold, and
+                // how many of them the battering cap still allows.
+                double dwell = impact / kDwellFrames;
+                if (dwell < 1.0) dwell = 1.0;
+                double budget = static_cast<double>(s.DamagedLimit) - 1.0
+                              - static_cast<double>(s.DamagedCount);
+                if (dwell > budget) dwell = budget;
+                if (dwell > 0.0) {
+                    s.DamagedCount = static_cast<uint8_t>(
+                        std::min(255.0, static_cast<double>(s.DamagedCount) + std::ceil(dwell)));
+                    double clamped = std::round(excess);
+                    if (clamped > 65535.0) clamped = 65535.0;
+                    if (clamped < 0.0) clamped = 0.0;
+                    int hi = (static_cast<int>(clamped) >> 8) & 0xFF;
+                    int scaled = (hi + (hi >> 1)) & 0xFF;   // x1.5, per frame
+                    // Fractional dwell is carried, not rounded away.
+                    damageRemainder += static_cast<double>(scaled) * dwell;
+                    double whole = std::floor(damageRemainder);
+                    damageRemainder -= whole;
+                    double total = static_cast<double>(damage) + whole;
+                    if (total > 255.0) total = 255.0;
+                    damage = static_cast<uint8_t>(total);
+                    s.Damaged = 128;
+                }
             }
         }
-    } else {
+    } else if (below <= 0.0) {
         s.DamagedCount = 0;
+        damageRemainder = 0.0;
     }
 
     if (amountBelowRoad >= 4608.0) amountBelowRoad = 4607.0;

@@ -194,6 +194,31 @@ static long opponent_x = 0,
 
 static float opponent_x_angle = 0.0f, opponent_y_angle = 0.0f, opponent_z_angle = 0.0f;
 
+/*	Render interpolation for the opponent - the same idea as PLAYER_STATE above, and for
+	an even more visible reason.  The other car's state is written on a clock that is not
+	the display's: the legacy AI moves on the 8.3Hz frameGap clock, the FloatV2 AI and the
+	netplay remote car move once per physics step.  Drawn straight from those globals at
+	60fps or more the car does not move for several frames and then jumps, which reads as
+	the opponent jerking around however smooth your own car is.
+
+	So keep the last two states it was written into, along with when each arrived, and
+	draw at a blend between them.  Timing the samples rather than reusing the player's
+	alpha is what lets one piece of code cover all three clocks: the gap between the last
+	two updates IS the step length, whatever produced it.  The cost is that the opponent
+	is drawn one such gap in the past, which is the ordinary price of interpolation and is
+	invisible next to the stepping it removes.										*/
+struct OPPONENT_STATE
+{
+	long  x, y, z;
+	float x_angle, y_angle, z_angle;
+};
+
+static OPPONENT_STATE gOppPrev = { 0,0,0, 0.0f,0.0f,0.0f };		// state before the most recent update
+static OPPONENT_STATE gOppCurr = { 0,0,0, 0.0f,0.0f,0.0f };		// state after it
+static double         gOppPrevTime = 0.0;						// when each was taken, so the
+static double         gOppCurrTime = 0.0;						// blend can be paced by the clock
+static bool           gOppStatesValid = false;					// two samples in hand?
+
 // Viewpoint 1 orientation
 static long viewpoint1_x, viewpoint1_y, viewpoint1_z;
 static long viewpoint1_x_angle, viewpoint1_y_angle, viewpoint1_z_angle;
@@ -1337,6 +1362,108 @@ static void PlayerStateLerp( PLAYER_STATE *out, const PLAYER_STATE *a, const PLA
 	out->z_angle = LerpAngle(a->z_angle, b->z_angle, alpha);
 }
 
+
+/*	The same for the opponent - see OPPONENT_STATE.  Its angles are radians rather than
+	Amiga angle units (OpponentBehaviour builds them with atan2, and the netplay path
+	converts into the same form), so this is the float twin of the code above.		*/
+
+/*	Set by anything that moves the opponent; consumed once per render frame by
+	OpponentStateAdvance().  Sampling per frame rather than per step is deliberate: at a
+	physics rate near the display rate a frame takes two steps now and then, and
+	timestamping each step separately would leave the pair a fraction of a millisecond
+	apart, which the blend would cross in one frame - the stepping we are removing.  What
+	the display actually needs is where the car was when it was last drawn and where it
+	is now, spanning however long that frame took.								*/
+static bool gOppStepped = false;
+
+static void OpponentStateMark( void )
+{
+	gOppStepped = true;
+}
+
+/*	Rolls the previous sample down and timestamps the new one, which is what paces
+	the blend.  Called once per render frame, after all of that frame's stepping.	*/
+static void OpponentStateAdvance( void )
+{
+	if (!gOppStepped)
+		return;			// no new state - hold the pair, and let alpha run out to 1
+	gOppStepped = false;
+
+	gOppPrev     = gOppCurr;
+	gOppPrevTime = gOppCurrTime;
+
+	gOppCurr.x = opponent_x;					gOppCurr.y = opponent_y;					gOppCurr.z = opponent_z;
+	gOppCurr.x_angle = opponent_x_angle;		gOppCurr.y_angle = opponent_y_angle;		gOppCurr.z_angle = opponent_z_angle;
+	gOppCurrTime = DXUTGetTime();
+
+	// Two samples and a positive gap between them, or there is nothing to blend along.
+	if (gOppCurrTime > gOppPrevTime)
+		gOppStatesValid = true;
+}
+
+/*	The car has been put somewhere outright rather than driven there - a new race, the
+	crane.  There is no motion to blend, so start the pair again.					*/
+static void OpponentStateReset( void )
+{
+	gOppStatesValid = false;
+	gOppStepped = false;
+	gOppPrevTime = gOppCurrTime = 0.0;
+}
+
+/*	Blend one angle the short way round, radians.  Same wrap problem as LerpAngle: a car
+	crossing north goes from just under 2pi to just over 0.						*/
+static float LerpAngleF( float from, float to, double alpha )
+{
+	const double kTwoPi = 2.0 * D3DX_PI;
+
+	double delta = static_cast<double>(to) - static_cast<double>(from);
+	while (delta >  D3DX_PI) delta -= kTwoPi;
+	while (delta < -D3DX_PI) delta += kTwoPi;
+
+	return static_cast<float>(static_cast<double>(from) + delta * alpha);
+}
+
+/*	Where to draw the opponent this render frame: the two samples, blended by how far the
+	display clock has run past the newer one.  Falls back to the newest state whenever
+	there is nothing sane to interpolate along, so the car is never left undrawn.	*/
+static void OpponentStateForRender( OPPONENT_STATE *out )
+{
+	if (!gOppStatesValid || !gRenderInterpolation || bPaused || scr::gSimTraceEnabled)
+	{
+		out->x = opponent_x;					out->y = opponent_y;					out->z = opponent_z;
+		out->x_angle = opponent_x_angle;		out->y_angle = opponent_y_angle;		out->z_angle = opponent_z_angle;
+		return;
+	}
+
+	/*	The gap between the last two updates is the step length, whichever clock produced
+		it.  Clamping alpha to 1 means a stalled opponent simply holds its newest state
+		rather than being extrapolated off into the distance.					*/
+	const double interval = gOppCurrTime - gOppPrevTime;
+	double alpha = (DXUTGetTime() - gOppCurrTime) / interval;
+	if (alpha < 0.0) alpha = 0.0;
+	if (alpha > 1.0) alpha = 1.0;
+
+	// A teleport, not motion - take the new state whole.  Same test as PlayerStateLerp.
+	long long dx = static_cast<long long>(gOppCurr.x) - gOppPrev.x;
+	long long dy = static_cast<long long>(gOppCurr.y) - gOppPrev.y;
+	long long dz = static_cast<long long>(gOppCurr.z) - gOppPrev.z;
+	if ((llabs(dx) > INTERP_TELEPORT_LIMIT) ||
+		(llabs(dy) > INTERP_TELEPORT_LIMIT) ||
+		(llabs(dz) > INTERP_TELEPORT_LIMIT))
+	{
+		*out = gOppCurr;
+		return;
+	}
+
+	out->x = gOppPrev.x + static_cast<long>(static_cast<double>(dx) * alpha);
+	out->y = gOppPrev.y + static_cast<long>(static_cast<double>(dy) * alpha);
+	out->z = gOppPrev.z + static_cast<long>(static_cast<double>(dz) * alpha);
+
+	out->x_angle = LerpAngleF(gOppPrev.x_angle, gOppCurr.x_angle, alpha);
+	out->y_angle = LerpAngleF(gOppPrev.y_angle, gOppCurr.y_angle, alpha);
+	out->z_angle = LerpAngleF(gOppPrev.z_angle, gOppCurr.z_angle, alpha);
+}
+
 static void CalcGameViewpoint( void )
 {
 long x_offset, y_offset, z_offset;
@@ -1527,6 +1654,8 @@ static void StepOneCar( long slot, DWORD carInput )
 		opponent_y_angle = (float)((double)remote_y_angle * 2.0 * D3DX_PI / 65536.0);
 		opponent_z_angle = (float)((double)remote_z_angle * 2.0 * D3DX_PI / 65536.0);
 
+		OpponentStateMark();		// the other car has moved - see OPPONENT_STATE
+
 		/*	Lap counting reads this for the OPPONENT car (UpdateLapData), and it is
 			the remote player's piece now, not the AI's.						*/
 		opponents_current_piece = player_current_piece;
@@ -1612,6 +1741,9 @@ static void PlaceNetCarOnChains( long slot, long swingFromLeft )
 		opponent_y_angle = (float)((double)remote_y_angle * 2.0 * D3DX_PI / 65536.0);
 		opponent_z_angle = (float)((double)remote_z_angle * 2.0 * D3DX_PI / 65536.0);
 		opponents_current_piece = player_current_piece;
+
+		// Placed, not driven - nothing to blend from the old race's last position.
+		OpponentStateReset();
 		}
 }
 
@@ -1619,20 +1751,23 @@ static void SetOpponentsCarWorldTransform( void )
 {
 D3DXMATRIX matRot, matTemp, matTrans;
 
+	/*	Drawn at a blend of the last two physics states, not at the newest one - see
+		OPPONENT_STATE.  Only the transform is built from the blend; the globals the
+		simulation reads are left alone.										*/
+	OPPONENT_STATE opp;
+	OpponentStateForRender(&opp);
+
 	D3DXMatrixIdentity(&matRot);
-//	float xa = (((float)opponent_x_angle * 2 * D3DX_PI) / 65536.0f);
-//	float ya = (((float)opponent_y_angle * 2 * D3DX_PI) / 65536.0f);
-//	float za = (((float)opponent_z_angle * 2 * D3DX_PI) / 65536.0f);
 	// Produce and combine the rotation matrices
-	D3DXMatrixRotationZ(&matTemp, opponent_z_angle);
+	D3DXMatrixRotationZ(&matTemp, opp.z_angle);
 	D3DXMatrixMultiply(&matRot, &matRot, &matTemp);
-	D3DXMatrixRotationX(&matTemp, opponent_x_angle);
+	D3DXMatrixRotationX(&matTemp, opp.x_angle);
 	D3DXMatrixMultiply(&matRot, &matRot, &matTemp);
-	D3DXMatrixRotationY(&matTemp, opponent_y_angle);
+	D3DXMatrixRotationY(&matTemp, opp.y_angle);
 	D3DXMatrixMultiply(&matRot, &matRot, &matTemp);
 	// Produce the translation matrix
 	// Position car at wheel height (VCAR_HEIGHT/4)
-	D3DXMatrixTranslation( &matTrans, WorldF(opponent_x), WorldF(-opponent_y)+VCAR_HEIGHT/4, WorldF(opponent_z) );
+	D3DXMatrixTranslation( &matTrans, WorldF(opp.x), WorldF(-opp.y)+VCAR_HEIGHT/4, WorldF(opp.z) );
 	// Combine the rotation and translation matrices to complete the world matrix
 	D3DXMatrixMultiply(&matWorldOpponentsCar, &matRot, &matTrans);
 }
@@ -1993,6 +2128,7 @@ static float lastFrame = 0.0f;
 			else if (scr::gUseFloatV2Physics && scr::gUseFloatV2Opponent)
 			{
 				for (long step = 0; step < PlayerPhysicsSteps; ++step)
+				{
 					OpponentBehaviour(&opponent_x,
 								  &opponent_y,
 								  &opponent_z,
@@ -2000,8 +2136,11 @@ static float lastFrame = 0.0f;
 								  &opponent_y_angle,
 								  &opponent_z_angle,
 								  bOpponentPaused);
+					OpponentStateMark();		// see OPPONENT_STATE
+				}
 			}
 			else if (bOpponentStepDue)
+			{
 				OpponentBehaviour(&opponent_x,
 							  &opponent_y,
 							  &opponent_z,
@@ -2009,6 +2148,14 @@ static float lastFrame = 0.0f;
 							  &opponent_y_angle,
 							  &opponent_z_angle,
 							  bOpponentPaused);
+				/*	The legacy AI moves 8.3 times a second.  Without the blend the car
+					holds still for seven frames out of eight and then jumps.	*/
+				OpponentStateMark();
+			}
+
+			/*	All of this frame's opponent motion is in - take the render sample.
+				Does nothing on a frame where the car did not move.				*/
+			OpponentStateAdvance();
 		}
 
 		// LimitViewpointY(&player1_y);
@@ -2386,6 +2533,10 @@ static void HandleTrackPreviewInput( void )
 		boostUnit = 0;
 		bPlayerPaused = bOpponentPaused = FALSE;
 		keyPress = '\0';
+
+		// New race: the opponent is about to be placed, not driven, so throw away the
+		// pair of states the renderer blends between.
+		OpponentStateReset();
 
 		// Hang the car on the chains now, not on the first physics step: CarBehaviour
 		// only runs when a step is due, so the first render frame (or two) of the race
