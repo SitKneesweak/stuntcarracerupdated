@@ -3098,7 +3098,8 @@ static void DrawAmigaPreviewScreen( IDirect3DDevice9 *pd3dDevice )
 #define SCR_DEG_TO_RAD(d)	((d) * 3.14159265358979323846f / 180.0f)
 #endif
 
-static void SetPreviewWindowProjection( IDirect3DDevice9 *pd3dDevice )
+static void SetPreviewWindowProjection( IDirect3DDevice9 *pd3dDevice,
+									    float shift_x = 0.0f, float shift_y = 0.0f )
 	{
 	long screen_width, screen_height;
 	GetScreenDimensions(&screen_width, &screen_height);
@@ -3173,8 +3174,11 @@ static void SetPreviewWindowProjection( IDirect3DDevice9 *pd3dDevice )
 	const float focal_x = floor_w / (tan_x_max - tan_x_min);
 	const float focal_y = floor_h / (tan_y_max - tan_y_min);
 
-	const float centre_x = floor_x - (tan_x_min * focal_x);
-	const float centre_y = floor_y - (tan_y_min * focal_y);
+	/*	The principal point is what puts the fitted box in the right place, so nudging it	*/
+	/*	slides the whole projected track by that many screen-space units without touching	*/
+	/*	its shape or size.  PreviewFattenRoad uses that to dilate the road (see there).		*/
+	const float centre_x = floor_x - (tan_x_min * focal_x) + shift_x;
+	const float centre_y = floor_y - (tan_y_min * focal_y) + shift_y;
 
 	// b/t follow D3DXMatrixPerspectiveFovLH's flipped y, as in SetSceneProjection.
 	const float l = -(centre_x / focal_x) * zn;
@@ -3263,6 +3267,56 @@ static void SetPreviewWindowClip( bool enable )
 						   &win_x, &win_y, &win_w, &win_h);
 
 	SetScreenSpaceClip(win_x, win_y, win_w, win_h);
+	}
+
+
+/*	======================================================================================= */
+/*	Function:		PreviewFattenRoad														*/
+/*																							*/
+/*	Description:	Draw the preview track thick enough to read as the Amiga's did.			*/
+/*																							*/
+/*					The whole 16 x 16 map is squeezed into a 296 x 134 window, so a road		*/
+/*					piece on the far side is a good deal narrower than one Amiga pixel.  Drawn	*/
+/*					once it is a hairline that breaks into dashes wherever a piece happens to	*/
+/*					miss a pixel centre - the original was a solid, blocky ribbon all the way	*/
+/*					round, because its road had real width in the low-resolution bitmap it was	*/
+/*					plotted into.															*/
+/*																							*/
+/*					Widening the geometry is not an option: Track[].coords is the physics'		*/
+/*					track as well, and the preview must not have its own.  So the road is		*/
+/*					dilated instead - drawn once per offset in a ring one Amiga pixel out,		*/
+/*					which fattens every part of it by a pixel in every direction and closes	*/
+/*					the gaps, then once more centred so the true position is what lands on top.*/
+/*					The offset goes into the projection's principal point, which slides the	*/
+/*					image without changing its shape, so each copy is the same track seen from	*/
+/*					the same eye - not a scaled or re-aimed one.								*/
+/*																							*/
+/*					PREVIEW_ROAD_FATTEN is a radius in Amiga pixels: 0 is the bare hairline,	*/
+/*					1 gives the three-pixel-wide minimum the original reads as.				*/
+/*	======================================================================================= */
+
+#define PREVIEW_ROAD_FATTEN		1
+
+static void PreviewFattenRoad( IDirect3DDevice9 *pd3dDevice )
+	{
+	long screen_width, screen_height;
+	GetScreenDimensions(&screen_width, &screen_height);
+
+	/*	One Amiga pixel, in the screen space the projection above is built in.				*/
+	const float px = (float)screen_width  / (float)AMIGA_SCREEN_WIDTH;
+	const float py = (float)screen_height / (float)AMIGA_SCREEN_HEIGHT;
+
+	for (int dy = -PREVIEW_ROAD_FATTEN; dy <= PREVIEW_ROAD_FATTEN; dy++)
+		for (int dx = -PREVIEW_ROAD_FATTEN; dx <= PREVIEW_ROAD_FATTEN; dx++)
+			{
+			if ((dx == 0) && (dy == 0))
+				continue;					// centred pass goes last, below
+			SetPreviewWindowProjection(pd3dDevice, (float)dx * px, (float)dy * py);
+			DrawTrack(pd3dDevice);
+			}
+
+	SetPreviewWindowProjection(pd3dDevice);
+	DrawTrack(pd3dDevice);
 	}
 
 
@@ -3405,11 +3459,14 @@ static bool PreviewLowResBegin( void )
 		(gPreviewSavedViewport[3] < AMIGA_SCREEN_HEIGHT))
 		return false;
 
-	/*	Multisampling is deliberately left ON.  A road piece 30 squares out is a fraction	*/
-	/*	of an Amiga pixel wide, and with hard coverage it breaks into a dotted line as		*/
-	/*	pieces fall between pixel centres; the samples keep it a continuous ribbon while		*/
-	/*	the pixels stay 320x200-sized, which is what the Amiga's own thicker road read as.	*/
-	gPreviewSavedMultisample = false;
+	/*	Multisampling off.  The Amiga had none, and its preview road was hard-edged blocks	*/
+	/*	of flat colour; smoothed coverage at this size just greys the ribbon's edges into	*/
+	/*	the dirt.  What made multisampling look necessary before was the road breaking into	*/
+	/*	a dotted line where pieces are thinner than a pixel - PreviewFattenRoad fixes that	*/
+	/*	at the source instead, by dilating the road until it is always a solid ribbon.		*/
+	gPreviewSavedMultisample = glIsEnabled(GL_MULTISAMPLE) ? true : false;
+	if (gPreviewSavedMultisample)
+		glDisable(GL_MULTISAMPLE);
 
 	glViewport(0, 0, AMIGA_SCREEN_WIDTH, AMIGA_SCREEN_HEIGHT);
 
@@ -3592,7 +3649,8 @@ HRESULT hr;
 			pd3dDevice->SetRenderState( D3DRS_ZENABLE, FALSE );
 			pd3dDevice->SetRenderState( D3DRS_CULLMODE, D3DCULL_NONE );
 
-			SetPreviewWindowProjection( pd3dDevice );
+			// The projection is PreviewFattenRoad's to set - it needs a different one per
+			// pass - so only the clip is established here.
 			SetPreviewWindowClip( true );
 
 			// The whole map is 30-odd squares away here, deep into the haze, and the Amiga's
@@ -3608,7 +3666,7 @@ HRESULT hr;
 			pd3dDevice->SetTextureStageState( 0, D3DTSS_COLOROP, D3DTOP_DISABLE );
 
 			pd3dDevice->SetTransform( D3DTS_WORLD, &matWorldTrack );
-			DrawTrack(pd3dDevice);
+			PreviewFattenRoad(pd3dDevice);
 #ifdef SCR_FOG_SHADER
 			gFogEnabled = savedFog;
 #endif
