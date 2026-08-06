@@ -465,15 +465,26 @@ static void DrawDivisionHeading( void )
 /*	Whose career this is.  Not in the original - there was no profile to be uncertain		*/
 /*	about, since the name was typed afresh every time the machine was switched on.  Now		*/
 /*	that it persists, the menus have to say who you are.  It goes on the 'SELECT' row at		*/
-/*	the left edge of the panel: the heading sits at column 17 and the name is capped at		*/
-/*	twelve characters by the entry screen, so the two never meet.							*/
+/*	the strip of bare panel between the logo and the first menu row, tucked into the			*/
+/*	right-hand corner underneath the "CER" of RACER.  The logo art in menu.png bottoms out	*/
+/*	at y 64 across that span and the topmost thing any screen prints is row 9 (y 72), so		*/
+/*	y 66 is the one free line.  Right-aligned so a long name grows leftwards under the		*/
+/*	logo instead of running off the panel; twelve characters is the entry screen's cap.		*/
+#define DRIVER_NAME_RIGHT	252
+#define DRIVER_NAME_Y		66
+
 static void DrawDriverName( void )
 	{
+	char name[16];
+
 	if (!gPlayerName[0])
 		return;
 
-	AmigaMenuSetInk(AMIGA_INK_RED);
-	AmigaMenuPrintF(MENU_ENTRY_COLUMN, SELECT_ROW, "%.12s", gPlayerName);
+	snprintf(name, sizeof(name), "%.12s", gPlayerName);
+
+	AmigaMenuSetInk(AMIGA_BAR_SELECTED);		// the menus' own amber
+	AmigaMenuPrintPixel(DRIVER_NAME_RIGHT - (int)strlen(name) * AMIGA_CHAR_WIDTH,
+						DRIVER_NAME_Y, name);
 	AmigaMenuSetInk(AMIGA_INK_TEXT);
 	}
 
