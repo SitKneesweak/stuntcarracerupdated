@@ -1815,6 +1815,22 @@ static void PlaceNetCarOnChains( long slot, long swingFromLeft )
 		}
 }
 
+/*	How far the second car is lifted off its own y when it is drawn.  Both models put every
+	wheel's bottom edge on -VCAR_HEIGHT/4 (see Car.cpp), so this is the height the tyres
+	meet the road at - but the player's car is drawn a twelfth of a car-height higher than
+	that, so its wheels stay fully visible rather than half-buried in the surface.
+
+	Which of the two is right depends on what is driving the car.  The AI's y comes out of
+	OpponentBehaviour and has always been drawn at wheel height; leave it there.  A network
+	opponent is another player's car, stepped by the same CarBehaviour as this one, so its
+	y means exactly what player1_y means and it must get exactly the same lift - otherwise
+	the two peers each see their own car riding correctly and the other one sunk into the
+	road by VCAR_HEIGHT/12.															*/
+static float OpponentRenderLift( void )
+{
+	return scr::NetGameRacing() ? (float)(VCAR_HEIGHT/3) : (float)(VCAR_HEIGHT/4);
+}
+
 static void SetOpponentsCarWorldTransform( void )
 {
 D3DXMATRIX matRot, matTemp, matTrans;
@@ -1834,8 +1850,8 @@ D3DXMATRIX matRot, matTemp, matTrans;
 	D3DXMatrixRotationY(&matTemp, opp.y_angle);
 	D3DXMatrixMultiply(&matRot, &matRot, &matTemp);
 	// Produce the translation matrix
-	// Position car at wheel height (VCAR_HEIGHT/4)
-	D3DXMatrixTranslation( &matTrans, WorldF(opp.x), WorldF(-opp.y)+VCAR_HEIGHT/4, WorldF(opp.z) );
+	const float lift = OpponentRenderLift();
+	D3DXMatrixTranslation( &matTrans, WorldF(opp.x), WorldF(-opp.y)+lift, WorldF(opp.z) );
 	// Combine the rotation and translation matrices to complete the world matrix
 	D3DXMatrixMultiply(&matWorldOpponentsCar, &matRot, &matTrans);
 
@@ -1845,7 +1861,7 @@ D3DXMATRIX matRot, matTemp, matTrans;
 	opp_render_x_angle = opp.x_angle;
 	opp_render_y_angle = opp.y_angle;
 	opp_render_pos_x = WorldF(opp.x);
-	opp_render_pos_y = WorldF(-opp.y) + VCAR_HEIGHT/4;
+	opp_render_pos_y = WorldF(-opp.y) + lift;
 	opp_render_pos_z = WorldF(opp.z);
 }
 
