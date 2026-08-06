@@ -93,6 +93,15 @@ extern char GetPieceAngleAndTemplate( long piece );
 
 extern long ConvertAmigaTrack( long track );
 
+/* Race a track built by tools/trackc.py instead of the selected stock one */
+extern void SetCustomTrackFile( const char *path );
+
+/*	Opponent speed overrides carried by a custom track.  Returns the number of	*/
+/*	overrides, or -1 when no custom track is loaded and the caller should use	*/
+/*	the stock table for its track ID.											*/
+struct OPP_SPEED_OVERRIDE;
+extern long GetCustomTrackOverrides( const struct OPP_SPEED_OVERRIDE **overrides );
+
 extern void FreeTrackData( void );
 
 extern HRESULT CreateTrackVertexBuffer (IDirect3DDevice9 *pd3dDevice);

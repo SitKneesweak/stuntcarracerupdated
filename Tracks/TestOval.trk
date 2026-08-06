@@ -1,0 +1,83 @@
+# TestOval - a hand-written track, with banked corners and two jumps.
+#
+#   python3 tools/trackc.py compile Tracks/TestOval.trk
+#   ./stuntcarracer --track Tracks/TestOval.bin
+#
+# CORNERS
+# -------
+# There are two curve pieces of each hand.  "right" is 8 segments with a
+# steering amount of 0x3e; "right9" is 9 segments at 0x32.  Both turn 45
+# degrees, so right9 takes the same corner over a longer arc - a wider radius.
+# None of the eight stock tracks turns a plain 90 degree corner with anything
+# but a right9/left9 pair; "right"/"left" only ever appear coming out of a
+# diagonal run.  Use right9 for corners.
+#
+# BANKING
+# -------
+# A bank is the two rails at different heights, so you make one by giving them
+# different profiles.  Stock tracks bank symmetrically - the left rail up by
+# the same amount the right comes down - so the middle of the road stays where
+# it was and only the cross-slope changes.  "3/4" raises the left rail 512 and
+# drops the right 512 (a 1024 bank); "4/3" takes it out again.  A flat "0"
+# holds each rail where it is, so the corner itself can just be "right9 0"
+# and it keeps the bank built on the piece before.
+#
+# These are right-hand corners, so the LEFT rail is the outside - that is the
+# one that goes up.  For a left-hand corner you would bank "4/3" then "3/4".
+#
+# Every bank has to be undone before the lap ends, or the track will not close
+# in height.
+
+track   TestOval
+start   3          # a flat piece - piece 0 is the ramp off the last corner
+boost   34 47
+origin  2,2 +Z
+# The lap starts on the piece coming OUT of the last corner, so it starts
+# already banked: left rail 512 up, right rail 512 down.
+height  1792 768
+
+# Brake the opponent into the two jumps.
+speed   2  0x58 runup
+speed   18 0x58 runup
+
+# ---- north straight: level out, jump, then bank into the corner ----
+# This first piece takes the bank off the LAST corner - the lap wraps.
+straight    4/3
+straight    0
+straight    0
+straight    0
+straight    0
+straight    3/4
+# ---- banked corner (the flat 0s hold the bank) ----
+right9      0
+right9      0            light
+# ---- east straight ----
+straight    4/3
+straight    0
+straight    0
+straight    0
+straight    0
+straight    3/4
+# ---- banked corner ----
+right9      0
+right9      0            light
+# ---- south straight, with the second jump ----
+straight    4/3
+straight    0
+straight    0
+straight    0
+straight    0
+straight    3/4
+# ---- banked corner ----
+right9      0
+right9      0            light
+# ---- west straight ----
+straight    4/3
+straight    0
+straight    0
+straight    0
+straight    0
+straight    3/4
+# ---- banked corner ----
+right9      0
+right9      0            light

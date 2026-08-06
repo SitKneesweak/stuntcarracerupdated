@@ -106,6 +106,67 @@ static uint64_t RunPeer(bool host, uint32_t* stepsDone, int* maxStallFrames)
     CHECK(NetGetConfig().seed  == 0x12345678u);
     CHECK(NetGetConfig().dt    == 1.0 / 60.0);
 
+    // --- Control channel -----------------------------------------------
+    // The between-races channel: the driver's name and the host's choice of
+    // the next circuit ride on this. Exercised here, before the race, because
+    // that is when the game uses it - and because a message that arrived twice
+    // would score a race twice.
+    {
+        // Each end sends two, to prove the second only goes once the first has
+        // been acknowledged and that neither is delivered more than once.
+        const uint8_t first[3]  = { 1, host ? (uint8_t)'H' : (uint8_t)'J', 7 };
+        const uint8_t second[2] = { 2, host ? (uint8_t)5   : (uint8_t)6 };
+
+        CHECK(NetControlIdle());
+        CHECK(NetSendControl(first, sizeof(first), Now()));
+        CHECK(!NetControlIdle());
+        CHECK(!NetSendControl(second, sizeof(second), Now()));   // one at a time
+
+        int  got     = 0;
+        bool sentTwo = false;
+        double cstart = Now();
+        while ((got < 2) && (Now() - cstart < 10.0))
+        {
+            NetPoll(Now());
+
+            if (!sentTwo && NetControlIdle())
+                sentTwo = NetSendControl(second, sizeof(second), Now());
+
+            uint8_t in[kMaxControlBytes];
+            const int n = NetReceiveControl(in, sizeof(in));
+            if (n > 0)
+            {
+                const uint8_t peerTag = host ? (uint8_t)'J' : (uint8_t)'H';
+                if (got == 0)
+                {
+                    CHECK(n == 3);
+                    CHECK(in[0] == 1 && in[1] == peerTag && in[2] == 7);
+                }
+                else
+                {
+                    CHECK(n == 2);
+                    CHECK(in[0] == 2 && in[1] == (host ? 6 : 5));
+                }
+                ++got;
+            }
+            SleepMs(1);
+        }
+
+        CHECK(got == 2);            // both arrived
+        CHECK(sentTwo);             // and the second one got out
+
+        // Nothing left over: a resend that was already delivered must not
+        // surface again.
+        double drain = Now();
+        while (Now() - drain < 0.5)
+        {
+            NetPoll(Now());
+            uint8_t in[kMaxControlBytes];
+            CHECK(NetReceiveControl(in, sizeof(in)) == 0);
+            SleepMs(1);
+        }
+    }
+
     uint64_t h = 1469598103934665603ull;
     uint32_t step = 0;
     int stall = 0, worstStall = 0;

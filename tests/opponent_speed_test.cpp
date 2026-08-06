@@ -149,7 +149,8 @@ int main( void )
 
 		unsigned char speeds[MAX_PIECES];
 		memset(speeds, 0, sizeof(speeds));
-		BuildOpponentSpeedValues(track, num_pieces, piece_angle,
+		BuildOpponentSpeedValues(gOppSpeedOverrides[track], gOppSpeedOverrideCount[track],
+								 num_pieces, piece_angle,
 								 kCanBePutOn, kBaseSpeed[track], speeds);
 
 		int bad = 0, skipped = 0;

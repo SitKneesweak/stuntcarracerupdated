@@ -4,7 +4,8 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
-extern bool wideScreen;
+extern int wideScreen;
+extern int gBaseWidth;
 
 const char* BitMapRessourceName(const char* name)
 {
@@ -1451,7 +1452,7 @@ const D3DSURFACE_DESC * DXUTGetBackBufferSurfaceDesc()
 	glGetIntegerv(GL_VIEWPORT, vp);
 	d3dsurface_desc.Width = vp[2];
 	d3dsurface_desc.Height = vp[3];*/
-	d3dsurface_desc.Width = wideScreen?800:640;
+	d3dsurface_desc.Width = gBaseWidth;
 	d3dsurface_desc.Height = 480;
 	return &d3dsurface_desc;
 }

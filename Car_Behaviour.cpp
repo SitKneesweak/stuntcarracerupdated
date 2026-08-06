@@ -5379,13 +5379,12 @@ long screen_width, screen_height;
 
 	GetScreenDimensions(&screen_width, &screen_height);
 
-	const float base_width  = wideScreen ? static_cast<float>(BASE_WIDTH_WIDESCREEN)
-										 : static_cast<float>(BASE_WIDTH_STANDARD);
+	const float base_width  = static_cast<float>(gBaseWidth);
 	const float scaleX = static_cast<float>(screen_width) / base_width;
 	const float scaleY = static_cast<float>(screen_height) / static_cast<float>(BASE_HEIGHT);
 
 	// The whole cockpit panel shifts right in widescreen (Car.cpp DrawCockpit)
-	const float left = SCR_WINDOW_LEFT + (wideScreen ? COCKPIT_WIDESCREEN_OFFSET * 2.0f : 0.0f);
+	const float left = SCR_WINDOW_LEFT + (CockpitWideOffset() * 2.0f);
 
 	const float sx = SCR_WINDOW_WIDTH  / static_cast<float>(AMIGA_PLAYFIELD_WIDTH);
 	const float sy = SCR_WINDOW_HEIGHT / static_cast<float>(AMIGA_PLAYFIELD_HEIGHT);
@@ -5718,7 +5717,13 @@ static void CarIsWrecked (void)
 /*	Description:	dlt6 in display.lap.time (StuntCarRacer.s:10822).  The countdown only	*/
 /*					runs while the car is on the road (or on the chains), and in the air it	*/
 /*					stops short of zero - the race is not allowed to end mid-flight.  When	*/
-/*					it does reach zero the race is over and lost.							*/
+/*					it does reach zero the race is over, and lost by whoever wrecked.		*/
+/*																							*/
+/*					The countdown is per-car (it is in CAR_STATE_FIELDS) but raceFinished	*/
+/*					and raceWon are single globals, so the car whose countdown expired is	*/
+/*					the active one - and in a two-player race that is not necessarily this	*/
+/*					machine's.  The Amiga had no case to get wrong: its opponent is an AI	*/
+/*					that never takes damage, so a wreck was always the player's.			*/
 /*	======================================================================================= */
 
 extern bool raceFinished, raceWon;
@@ -5740,7 +5745,7 @@ static void UpdateWreckCountdown (void)
 		if (! raceFinished)
 		{
 			raceFinished = true;
-			raceWon = false;
+			raceWon = (ActiveCar() != PLAYER);
 		}
 	}
 }
@@ -5786,6 +5791,41 @@ static void DamageLine (void)
 			// they have to be dragged up with it or the next frame would undo this.
 			front_left_damage = front_right_damage = rear_damage = new_damage;
 		}
+	}
+}
+
+/*	======================================================================================= */
+/*	Function:		UpdateRemoteCarDamage													*/
+/*																							*/
+/*	Description:	The part of UpdateDamage that has to run for the car this machine is		*/
+/*					not driving: the crack walks along the bar (which is what wrecks the		*/
+/*					car when it runs off the end) and the wreck countdown ticks (which is	*/
+/*					what ends the race).  The Amiga never needed this - its opponent is an	*/
+/*					AI that takes no damage - but in a head-to-head race the other car can	*/
+/*					wreck, and both peers must agree that the race is over when it does.		*/
+/*																							*/
+/*					Everything else UpdateDamage does is presentation for the local car -	*/
+/*					the smash and creak sounds, the holes punched in the bar - and that		*/
+/*					belongs to whichever machine is driving the car, so none of it is here.	*/
+/*					The caller selects the car first (see SelectCar).						*/
+/*	======================================================================================= */
+
+void UpdateRemoteCarDamage (void)
+{
+	UpdateWreckCountdown();
+
+	if (damaged)
+	{
+		long d = (front_left_damage + front_right_damage) / 2;
+		new_damage = (d + rear_damage) / 2;
+		DamageLine();
+	}
+
+	if (smashed_countdown)
+	{
+		--smashed_countdown;
+		if (smashed_countdown == 69)
+			nholes++;
 	}
 }
 
@@ -6522,6 +6562,30 @@ void SelectCar (long car)
 long ActiveCar (void)
 	{
 	return gActiveCar;
+	}
+
+
+/*	======================================================================================= */
+/*	Function:		CarIsWreckedFor															*/
+/*																							*/
+/*	Description:	CarIsWreckedNow for a car that is not the selected one.  The two-player	*/
+/*					league table needs both drivers' wrecks, and the render path (which is	*/
+/*					where the result is read) always has PLAYER selected, so the other car's	*/
+/*					state is sitting in its saved context rather than in the globals.		*/
+/*					Reads the context directly instead of selecting the car and selecting	*/
+/*					back: a Select round trip would copy the whole of CAR_STATE_FIELDS twice	*/
+/*					to answer one question, and it would do it mid-render.					*/
+/*	======================================================================================= */
+
+bool CarIsWreckedFor (long car)
+	{
+	if ((car < 0) || (car >= NUM_CARS))
+		return false;
+
+	if (! gCarContextPrimed || (car == gActiveCar))
+		return WRECKED;
+
+	return (gCarContext[car].wreck_wheel_height_reduction != 0);
 	}
 
 

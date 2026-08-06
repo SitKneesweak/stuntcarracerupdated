@@ -31,7 +31,9 @@ enum PacketType
     Pkt_Bye     = 5,
     Pkt_Ping    = 6,
     Pkt_Pong    = 7,
-    Pkt_Desync  = 8     // "our digests disagree" -- see MarkDesync
+    Pkt_Desync  = 8,    // "our digests disagree" -- see MarkDesync
+    Pkt_Control = 9,    // both ways, between races -- see the control channel
+    Pkt_CtrlAck = 10    // "got control message N"
 };
 
 const int kHeaderBytes = 8;     // magic(4) + type(1) + flags(1) + version(2)
@@ -63,6 +65,12 @@ const double kPingInterval = 1.0;
 // waiting on it. Neither side ever sends again and the session deadlocks on a
 // single dropped datagram. Repeating while stalled is what breaks the tie.
 const double kStallResendInterval = 0.05;
+
+// How often an unacknowledged control message is repeated. Slower than the
+// stall resend because nobody is waiting on a frame for it — a menu choice can
+// afford a tenth of a second, and these are the only packets flowing while the
+// players sit on the table screen.
+const double kControlResendInterval = 0.1;
 
 class Writer
 {
@@ -222,6 +230,22 @@ struct Session
                                     // stale reply from a previous attempt is
                                     // not mistaken for this one's
 
+    // --- Control channel ---
+    // One message in flight each way. `outSeq` counts up so the peer can tell a
+    // resend of the message it already has from a genuinely new one, and the
+    // ack carries it back so a late ack for a previous message cannot retire
+    // the current one.
+    uint8_t        outCtrl[kMaxControlBytes];
+    int            outCtrlLen;      // 0 when nothing is in flight
+    uint32_t       outCtrlSeq;
+    double         outCtrlSendTime;
+
+    uint8_t        inCtrl[kMaxControlBytes];
+    int            inCtrlLen;       // 0 when nothing is waiting to be collected
+    uint32_t       inCtrlSeq;       // highest sequence delivered to the caller
+    bool           inCtrlSeen;      // false until the first message arrives, so
+                                    // sequence 0 is not mistaken for "had it"
+
     Session() { Reset(); }
 
     void Reset()
@@ -249,6 +273,12 @@ struct Session
         desynced   = false;
         desyncStep = 0;
         salt = 0;
+        outCtrlLen = 0;
+        outCtrlSeq = 0;
+        outCtrlSendTime = 0.0;
+        inCtrlLen  = 0;
+        inCtrlSeq  = 0;
+        inCtrlSeen = false;
     }
 };
 
@@ -364,21 +394,92 @@ void SendInputs()
         SendTo(gS.peer, buf, w.Size());
 }
 
+// --- Control channel -------------------------------------------------------
+
+void SendControl(double now)
+{
+    if (!gS.peerKnown || gS.outCtrlLen <= 0)
+        return;
+
+    uint8_t buf[kMaxPacket];
+    Writer w(buf, sizeof(buf));
+    WriteHeader(w, Pkt_Control);
+    w.U32(gS.outCtrlSeq);
+    w.U16((uint16_t)gS.outCtrlLen);
+    for (int i = 0; i < gS.outCtrlLen; ++i)
+        w.U8(gS.outCtrl[i]);
+
+    if (w.Ok())
+        SendTo(gS.peer, buf, w.Size());
+    gS.outCtrlSendTime = now;
+}
+
+void HandleControl(Reader& r, double now)
+{
+    uint32_t seq = r.U32();
+    uint16_t len = r.U16();
+
+    if (r.Bad() || len > (uint16_t)kMaxControlBytes)
+        return;
+
+    uint8_t body[kMaxControlBytes];
+    for (uint16_t i = 0; i < len; ++i)
+        body[i] = r.U8();
+    if (r.Bad())
+        return;
+
+    gS.lastRecvTime = now;
+
+    // A message already received but not yet collected by the caller still
+    // occupies the slot. Anything newer arriving now has nowhere to go, so it
+    // is dropped *without* an ack - the sender will repeat it, and by then the
+    // slot will be free. Acking it would tell the sender it had landed and lose
+    // it outright.
+    const bool slotBusy = (gS.inCtrlLen > 0);
+    if (slotBusy && (seq != gS.inCtrlSeq))
+        return;
+
+    // Acknowledge, including copies of a message already taken: the sender
+    // repeats precisely because it has not seen an ack, and staying silent
+    // would leave it repeating for ever.
+    {
+        uint8_t buf[kMaxPacket];
+        Writer w(buf, sizeof(buf));
+        WriteHeader(w, Pkt_CtrlAck);
+        w.U32(seq);
+        if (w.Ok())
+            SendTo(gS.peer, buf, w.Size());
+    }
+
+    // Store once. A resend of a message already collected is an ack that went
+    // missing, not new traffic, and storing it again would score a race twice.
+    if (slotBusy || (gS.inCtrlSeen && (int32_t)(seq - gS.inCtrlSeq) <= 0))
+        return;
+
+    gS.inCtrlSeq  = seq;
+    gS.inCtrlSeen = true;
+    gS.inCtrlLen  = (int)len;
+    for (uint16_t i = 0; i < len; ++i)
+        gS.inCtrl[i] = body[i];
+}
+
 // Both peers prefill steps 0 .. kInputDelay-1 with neutral input. Nothing ever
 // submits those steps — input sampled at step N is scheduled for N+kInputDelay,
 // so the first kInputDelay steps have no author. Both sides fill them
 // identically, so the simulation stays deterministic and the race can start
 // without waiting a round trip.
-void PrimeDelayWindow()
+void PrimeDelayWindowAt(uint32_t base)
 {
     for (uint32_t s = 0; s < (uint32_t)kInputDelay; ++s)
     {
-        gS.local.Set(s, 0);
-        gS.remote.Set(s, 0);
+        gS.local.Set(base + s, 0);
+        gS.remote.Set(base + s, 0);
     }
-    gS.localHighest  = (uint32_t)kInputDelay - 1;
-    gS.remoteHighest = (uint32_t)kInputDelay - 1;
+    gS.localHighest  = base + (uint32_t)kInputDelay - 1;
+    gS.remoteHighest = base + (uint32_t)kInputDelay - 1;
 }
+
+void PrimeDelayWindow() { PrimeDelayWindowAt(0); }
 
 void EnterConnected(double now)
 {
@@ -644,6 +745,23 @@ void HandlePacket(const uint8_t* buf, int n, const NetAddress& from, double now)
         HandleInput(r, now);
         break;
 
+    case Pkt_Control:
+        HandleControl(r, now);
+        break;
+
+    case Pkt_CtrlAck:
+    {
+        uint32_t seq = r.U32();
+        if (r.Bad())
+            break;
+        // Only the message actually in flight can be retired by this. A late
+        // ack for the previous one must not clear its successor.
+        if ((gS.outCtrlLen > 0) && (seq == gS.outCtrlSeq))
+            gS.outCtrlLen = 0;
+        gS.lastRecvTime = now;
+        break;
+    }
+
     case Pkt_Desync:
     {
         uint32_t step  = r.U32();
@@ -861,6 +979,13 @@ void NetPoll(double now)
             SendInputs();
         }
 
+        // Repeat an unacknowledged control message. This is the whole of the
+        // channel's reliability - there is no retry limit, because the session
+        // timeout above is already the answer to a peer that has stopped
+        // listening.
+        if ((gS.outCtrlLen > 0) && (now - gS.outCtrlSendTime > kControlResendInterval))
+            SendControl(now);
+
         if (!gS.pingOutstanding && now - gS.lastPingTime > kPingInterval)
         {
             gS.pingToken       = BitsOfDouble(now);
@@ -892,6 +1017,49 @@ double        NetGetRTT()        { return gS.rtt; }
 uint16_t      NetLocalPort()     { return gS.sock.LocalPort(); }
 bool          NetHasDesync()     { return gS.desynced; }
 uint32_t      NetDesyncStep()    { return gS.desyncStep; }
+
+void NetBeginRaceAt(uint32_t base)
+{
+    PrimeDelayWindowAt(base);
+}
+
+bool NetControlIdle()
+{
+    return (gS.outCtrlLen == 0);
+}
+
+bool NetSendControl(const uint8_t* data, int len, double now)
+{
+    if ((gS.state != NetState_Connected && gS.state != NetState_Stalled) || !gS.peerKnown)
+        return false;
+    if ((len <= 0) || (len > kMaxControlBytes))
+        return false;
+    if (gS.outCtrlLen > 0)
+        return false;               // one in flight at a time
+
+    for (int i = 0; i < len; ++i)
+        gS.outCtrl[i] = data[i];
+    gS.outCtrlLen = len;
+    ++gS.outCtrlSeq;
+
+    SendControl(now);               // sent now; NetPoll repeats it until acked
+    return true;
+}
+
+int NetReceiveControl(uint8_t* out, int max)
+{
+    if (gS.inCtrlLen <= 0)
+        return 0;
+
+    int n = gS.inCtrlLen;
+    if (n > max)
+        n = max;
+    for (int i = 0; i < n; ++i)
+        out[i] = gS.inCtrl[i];
+
+    gS.inCtrlLen = 0;               // slot free for the next one
+    return n;
+}
 
 const NetSessionConfig& NetGetConfig() { return gS.cfg; }
 

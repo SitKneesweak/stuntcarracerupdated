@@ -114,6 +114,81 @@ void NetGameRaceEnded();
 uint32_t NetGameStep();
 void     NetGameAdvanceStep();
 
+// --- The two-driver league -------------------------------------------------
+// A session is a season: the two players race a fixture, land on a table, and
+// the host picks the next circuit. Each track is used once, so the season is
+// kNetSeasonRaces long and ends when they run out.
+//
+// Nothing here is a simulation input, and nothing here may become one. The
+// table is scored *after* a race from results both peers computed identically,
+// and the next track is agreed *between* races over the control channel. If
+// any of it were ever read during a step, a lost or late control packet would
+// become a desync.
+//
+// Scoring is the Amiga's: two points for the win, one for the fastest lap
+// (StuntCarRacer.s, the RESULT screen). The wreck column is this port's own -
+// the Amiga had nowhere to record it, because its opponent could not wreck.
+
+const int kNetSeasonRaces = 8;      // one per circuit
+
+// Step numbers each race starts on: race N begins at N * this. Comfortably
+// longer than any race can run (a million steps is over four hours at 60Hz), so
+// two races can never overlap on the step line and the whole season stays well
+// inside a uint32. See NetBeginRaceAt for why the counter does not restart.
+const uint32_t kNetRaceStepBase = 1000000u;
+
+struct NetLeagueDriver
+{
+    char name[16];      // as typed on the NAME? screen; the Amiga's slot size
+    int  raced;
+    int  won;
+    int  lost;
+    int  wrecked;
+    int  bestLaps;      // races in which this driver set the fastest lap
+    int  points;
+};
+
+// Clear the table and start a fresh season. Called as a session is established.
+void NetGameLeagueReset();
+
+// The standings. Indexed by role, so both machines agree which row is which.
+const NetLeagueDriver& NetGameLeagueDriver(NetCarOwner who);
+
+// Score the race just finished. Both peers call this with values they each
+// derived from the same simulation, so neither has to tell the other.
+// `bestLap` is NetCar_Host / NetCar_Joiner / -1 for "nobody set one".
+void NetGameLeagueScoreRace(bool hostWon, bool hostWrecked, bool joinerWrecked, int bestLap);
+
+// Races completed, and whether that is the lot.
+int  NetGameRacesRun();
+bool NetGameSeasonOver();
+
+// True once `track` has been raced this season, so the host's chooser can skip
+// it and the table can grey it out.
+bool NetGameTrackUsed(int track);
+
+// The host's choice of the next circuit, and how it gets to the joiner. The
+// host calls Propose; both ends read NextTrack, which is -1 until agreed.
+void NetGameProposeNextTrack(int track, double now);
+int  NetGameNextTrack();
+
+// Abandon the race in progress, conceding it. Tells the peer, which scores the
+// win and returns to the table - the alternative is the quitter vanishing and
+// the other player stalling until the session times out.
+void NetGameForfeitRace(double now);
+
+// True on the single frame a peer's forfeit arrives, so the caller can unwind
+// its own race. The race is already scored by the time this returns true.
+bool NetGamePeerForfeited();
+
+// The other player's name, or "" until the exchange completes.
+const char* NetGameRemoteName();
+
+// This machine's driver name, to be sent to the peer once connected. Set from
+// the menus rather than read from League.h here: this file is included beside
+// dx_linux.h and must keep to <cstdint>.
+void NetGameSetLocalName(const char* name);
+
 } // namespace scr
 
 #endif // NET_GAME_H

@@ -396,6 +396,8 @@ typedef struct IDirect3DTexture9 *LPDIRECT3DTEXTURE9, *PDIRECT3DTEXTURE9;
 //
 bool sound_init( void );
 void sound_destroy( void );
+void sound_set_muted( bool muted );
+bool sound_muted( void );
 //
 // Listener
 //

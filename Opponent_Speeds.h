@@ -64,7 +64,13 @@ static const long gOppSpeedOverrideCount[OPP_SPEED_NUM_TRACKS] = { 2, 8, 6, 5, 6
 /*					16-byte sections_car_can_be_put_on flag table.							*/
 /*	=========================================================================================	*/
 
-static inline void BuildOpponentSpeedValues( long track_id,
+/*	overrides/n_ovr are passed in rather than looked up by track ID so that a track built	*/
+/*	by tools/trackc.py can supply its own braking points.  A custom track with none simply	*/
+/*	passes 0, and the generic path below still winds the opponent up along the straights		*/
+/*	and slows it for the curves - it just will not brake for that track's jumps.				*/
+
+static inline void BuildOpponentSpeedValues( const OPP_SPEED_OVERRIDE *overrides,
+											 long n_ovr,
 											 long num_pieces,
 											 const char *piece_angle,
 											 const unsigned char *can_be_put_on,
@@ -73,7 +79,6 @@ static inline void BuildOpponentSpeedValues( long track_id,
 	{
 	long countdown = 0;
 	long value = 0x7c;						// Amiga: move.b #$7c,d0 / move.b d0,value
-	const long n_ovr = gOppSpeedOverrideCount[track_id];
 
 	for (long i = num_pieces - 1; i >= 0; i--)
 		{
@@ -81,9 +86,9 @@ static inline void BuildOpponentSpeedValues( long track_id,
 
 		// srd1f: is this piece named in the override table?
 		for (long j = n_ovr - 1; j >= 0; j--)
-			if (gOppSpeedOverrides[track_id][j].piece == i)
+			if (overrides[j].piece == i)
 				{
-				d0 = gOppSpeedOverrides[track_id][j].speed;
+				d0 = overrides[j].speed;
 				if (d0 & 0x80)
 					countdown = 3;
 				value = d0 & 0x7f;

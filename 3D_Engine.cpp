@@ -112,6 +112,12 @@ static long LockAngle( long opposite,
 /*					(Getting all three - 45, 22.5 and the pixel aspect - needs the cockpit	*/
 /*					window itself to be the Amiga's 256 x 128 rather than 238 x 137. That is	*/
 /*					an art/layout change, not a projection one.)							*/
+/*																							*/
+/*					The frustum spans the WHOLE base space, not just the cockpit window,	*/
+/*					and the base space is as wide as the window shape asks for (gBaseWidth,	*/
+/*					StuntCarRacer.h).  Neither changes the focal length, so a wide window	*/
+/*					does not zoom out - it simply keeps the same degrees-per-pixel further	*/
+/*					out to the sides, and that extra world is seen past the roll cage.		*/
 /*	======================================================================================= */
 
 bool gAmigaFov = true;
@@ -138,8 +144,7 @@ void GetProjectionTangents( float *tan_half_x, float *tan_half_y )
 {
 	if (gAmigaFov)
 	{
-		const float base_width = wideScreen ? static_cast<float>(BASE_WIDTH_WIDESCREEN)
-											: static_cast<float>(BASE_WIDTH_STANDARD);
+		const float base_width = static_cast<float>(gBaseWidth);
 		const float base_height = static_cast<float>(BASE_HEIGHT);
 
 		// Focal lengths in base units, so the stretch is expressed exactly once. The vertical

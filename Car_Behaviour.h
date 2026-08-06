@@ -94,6 +94,11 @@ extern void SetCarSwingFromLeft (long fromLeft);
 /*	by wrecking rather than by being beaten.												*/
 extern bool CarIsWreckedNow (void);
 
+/*	The same question asked of a car that is not the selected one - see SelectCar.  The	*/
+/*	two-player league table scores both drivers' wrecks from the render path, where		*/
+/*	PLAYER is always the selected car.													*/
+extern bool CarIsWreckedFor (long car);
+
 extern long AmigaVolumeToDirectX (long amiga_volume);
 
 extern long CalculateDisplaySpeed (void);
@@ -108,6 +113,7 @@ extern void CalculatePlayersRoadPosition (void);
 
 extern void DrawSceneParticles (void);
 extern void UpdateDamage (void);
+extern void UpdateRemoteCarDamage (void);
 
 extern void ResetLapData (long car);
 extern void UpdateLapData (double elapsedSeconds);

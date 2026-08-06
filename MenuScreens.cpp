@@ -32,6 +32,8 @@
 #include "League.h"
 #include "Profile.h"
 #include "Track.h"
+/*	For the two-player table: which car wrecked, and whether the opponent set a lap.		*/
+#include "Car_Behaviour.h"
 #include "Opponent_Behaviour.h"
 #include "Det_Rand.h"
 /*	Net_Game.h includes only <cstdint> - no socket header ever reaches dx_linux.h.		*/
@@ -51,6 +53,18 @@ static const int kMenuRows[4] = { 13, 16, 19, 22 };
 
 /*	fill.bar prints the entry starting at column 5, as "N. Text".							*/
 #define MENU_ENTRY_COLUMN	5
+
+/*	One race per circuit, so the season is as long as the track list.  Kept as its own		*/
+/*	name here because it is doing two jobs - the number of tracks and the number of races.	*/
+#define MP_SEASON_TRACKS	8
+static_assert(MP_SEASON_TRACKS == NUM_TRACKS,        "one race per circuit");
+static_assert(MP_SEASON_TRACKS == scr::kNetSeasonRaces, "and one circuit per race");
+
+/*	The host's cursor over the circuits it has not used yet.  Purely local until RETURN		*/
+/*	sends it: the joiner is not shown a choice being scrolled through, only the one that		*/
+/*	was made.																				*/
+static int gMpTrackCursor = 0;
+
 
 /*	31,17,11,'SELECT'																		*/
 #define SELECT_COLUMN		17
@@ -207,6 +221,19 @@ void MenuScreensGoto( MenuScreenType screen )
 	if (screen == MS_HALL_OF_FAME)
 		gHallSuper = gLeagueSuperLeague;
 
+	/*	Park the host's circuit cursor on something it can actually pick.  The track	*/
+	/*	just raced has become unavailable, so wherever the cursor was left last time	*/
+	/*	is quite likely to be used by now.												*/
+	if (screen == MS_MP_TABLE)
+		{
+		for (int i = 0; i < MP_SEASON_TRACKS; i++)
+			if (!scr::NetGameTrackUsed(i))
+				{
+				gMpTrackCursor = i;
+				break;
+				}
+		}
+
 	gScreen    = screen;
 	gSelection = 0;
 	gActive    = true;
@@ -237,9 +264,16 @@ static void MenuScreensDumpAll( const char *prefix )
 		{
 		"name-entry", "opponents", "main", "select", "league-choice", "practise-track",
 		"single-race", "division", "fixture",
-		"race-win", "race-lost", "track-record", "result", "table", "championship", "changes", "super-league",
-		"hall-of-fame", "load-save", "mp-menu", "mp-track", "mp-join", "mp-wait", "tuning"
+		"race-win", "race-lost", "race-wrecked",
+		"track-record", "result", "table", "championship", "changes", "super-league",
+		"hall-of-fame", "load-save", "mp-menu", "mp-track", "mp-join", "mp-wait", "mp-table",
+		"tuning"
 		};
+
+	/*	Indexed by MenuScreenType, so a screen added to the enum without a name here		*/
+	/*	silently mislabels every dump after it.											*/
+	static_assert(sizeof(names) / sizeof(names[0]) == (size_t)MS_TUNING + 1,
+				  "MenuScreensDumpAll names[] is out of step with MenuScreenType");
 
 	/*	A season with two races run, so the tables have something in them.				*/
 	LeagueNewCareer("ANDREW");
@@ -481,7 +515,21 @@ static void DrawDivisionHeading( void )
 #define DRIVER_NAME_RIGHT	252
 #define DRIVER_NAME_Y		66
 
-static void DrawDriverName( void )
+/*	On the SELECT screen the name is not just a caption: it is the way in to the				*/
+/*	Load/Save/Replay screen, which used to be a menu entry of its own.  So it is drawn		*/
+/*	there on its own little bar - grey like an unselected menu entry, amber when the			*/
+/*	selection is on it - which is what says it can be picked.  Everywhere else it is still	*/
+/*	only a caption, and stays the plain amber text it always was.							*/
+/*	Three pixels of padding each side and two above and below the glyphs, which is the		*/
+/*	most the gap between the logo and row 9 will take.										*/
+/*	The SELECT menu's four entries are 0..3; the name in the corner is the fifth thing the	*/
+/*	selection can land on.																	*/
+#define SELECT_DRIVER_ENTRY	4
+
+#define DRIVER_NAME_PAD_X	3
+#define DRIVER_NAME_PAD_Y	2
+
+static void DrawDriverName( bool asButton = false, bool selected = false )
 	{
 	char name[16];
 
@@ -490,9 +538,29 @@ static void DrawDriverName( void )
 
 	snprintf(name, sizeof(name), "%.12s", gPlayerName);
 
-	AmigaMenuSetInk(AMIGA_BAR_SELECTED);		// the menus' own amber
-	AmigaMenuPrintPixel(DRIVER_NAME_RIGHT - (int)strlen(name) * AMIGA_CHAR_WIDTH,
-						DRIVER_NAME_Y, name);
+	const int textX = DRIVER_NAME_RIGHT - (int)strlen(name) * AMIGA_CHAR_WIDTH;
+
+	if (!asButton)
+		{
+		AmigaMenuSetInk(AMIGA_BAR_SELECTED);		// the menus' own amber
+		AmigaMenuPrintPixel(textX, DRIVER_NAME_Y, name);
+		AmigaMenuSetInk(AMIGA_INK_TEXT);
+		return;
+		}
+
+	/*	The menu bar's bevel, shrunk to fit the name: white rule along the top, black		*/
+	/*	along the bottom, bar colour in between.											*/
+	const int x = textX - DRIVER_NAME_PAD_X;
+	const int y = DRIVER_NAME_Y - DRIVER_NAME_PAD_Y;
+	const int w = (int)strlen(name) * AMIGA_CHAR_WIDTH + DRIVER_NAME_PAD_X * 2;
+	const int h = AMIGA_CHAR_HEIGHT + DRIVER_NAME_PAD_Y * 2;
+
+	AmigaMenuFillRect(x, y, w, h, selected ? AMIGA_BAR_SELECTED : AMIGA_BAR);
+	AmigaMenuFillRect(x, y,         w, 1, AMIGA_INK_WHITE);
+	AmigaMenuFillRect(x, y + h - 1, w, 1, AMIGA_INK_BLACK);
+
+	AmigaMenuSetInk(AMIGA_INK_BAR_TEXT);
+	AmigaMenuPrintPixel(textX, DRIVER_NAME_Y, name);
 	AmigaMenuSetInk(AMIGA_INK_TEXT);
 	}
 
@@ -557,22 +625,24 @@ static void DrawSelectMenu( void )
 	{
 	/*	R.5baea's menu, entries 0..2 of TAB.5bcd0 - offsets $ec/$0a/$14 into TEXT.5a69a.	*/
 	/*	Load/Save/Replay ($2c) is the next entry in the table; the disassembly's count		*/
-	/*	stops short of it, but the port has the screen so it stays on the menu.				*/
+	/*	stops short of it, and it is no longer a menu entry here either - the screen is		*/
+	/*	about the driver rather than about racing, so it hangs off the driver's name in		*/
+	/*	the corner instead (see DrawDriverName).  The name is the last thing the			*/
+	/*	selection reaches, one step below 'Hall of Fame'.									*/
 	/*	'Practise' has become two entries.  The original's practise was a solo run round	*/
 	/*	a track, which is a time trial in everything but name, so it keeps the behaviour	*/
 	/*	and gets the name; 'Single Race' is the one that was missing - a one-off race		*/
 	/*	against a driver you choose, in whichever league you choose, outside the season.	*/
-	static const char *entries[5] =
+	static const char *entries[4] =
 		{
 		"Time Trial",
 		"Single Race",
 		"Start the Racing Season",
-		"Hall of Fame",
-		"Load/Save/Replay"
+		"Hall of Fame"
 		};
 	DrawDivisionHeading();
-	DrawMenu(entries, 5, gSelection);
-	DrawDriverName();
+	DrawMenu(entries, 4, gSelection);
+	DrawDriverName(true, gSelection == SELECT_DRIVER_ENTRY);
 	}
 
 /*	Not in the original: there, the Super League is something you are given after winning		*/
@@ -1467,6 +1537,119 @@ static void DrawMultiplayerWait( void )
 	AmigaMenuPrintCentred(23, "ESC to cancel.");
 	}
 
+/*	The two-driver league table, between races.  This is where a session lives now: the		*/
+/*	race ends, both machines score it from their own copy of the same simulation, and the	*/
+/*	players land back here for the host to pick the next circuit.							*/
+/*																							*/
+/*	The Amiga's link-up put its two players into the ordinary league instead, sharing a		*/
+/*	division with the AI drivers (StuntCarRacer.s:10038 picks the opponent by comparing		*/
+/*	the fixture's two driver IDs against the player's).  Faithful, but it means most			*/
+/*	fixtures are against the computer while the other player waits - which is fine when		*/
+/*	you are sharing one Amiga and dreadful over a network.  Two drivers, every fixture		*/
+/*	real.  The scoring is still the Amiga's: two for the win, one for the fastest lap.		*/
+/*																							*/
+/*	Panel is 224px / AMIGA_CHAR_WIDTH = 32 characters, of which 30 clear the inner edge -	*/
+/*	a ten-character name and five four-character figures.  There is no RACED column		*/
+/*	because there is no room for one and nothing to learn from it: with two drivers and		*/
+/*	no draws it is always WON + LST.														*/
+#define MP_TABLE_ROW_FORMAT	"%-10.10s%4s%4s%4s%4s%4s"
+#define MP_TABLE_HEAD_ROW	11
+#define MP_TABLE_FIRST_ROW	13
+
+
+static void DrawMultiplayerTableRow( int row, const scr::NetLeagueDriver &d, bool highlight )
+	{
+	char won[8], lost[8], wrecked[8], laps[8], points[8];
+	snprintf(won,     sizeof(won),     "%d", d.won);
+	snprintf(lost,    sizeof(lost),    "%d", d.lost);
+	snprintf(wrecked, sizeof(wrecked), "%d", d.wrecked);
+	snprintf(laps,    sizeof(laps),    "%d", d.bestLaps);
+	snprintf(points,  sizeof(points),  "%d", d.points);
+
+	if (highlight)
+		{
+		AmigaMenuBar(row, false);
+		AmigaMenuSetInk(AMIGA_INK_BAR_TEXT);
+		}
+
+	AmigaMenuPrintF(AMIGA_PANEL_COL0, row, MP_TABLE_ROW_FORMAT,
+					(d.name[0] != '\0') ? d.name : "DRIVER",
+					won, lost, wrecked, laps, points);
+
+	if (highlight)
+		AmigaMenuSetInk(AMIGA_INK_TEXT);
+	}
+
+static void DrawMultiplayerTable( void )
+	{
+	AmigaMenuSetInk(AMIGA_INK_TEXT);
+
+	const int run    = scr::NetGameRacesRun();
+	const bool over  = scr::NetGameSeasonOver();
+
+	/*	The league that was agreed at the handshake, not the one this machine's menu is	*/
+	/*	sitting in - the joiner adopts the host's, and the two differ whenever the		*/
+	/*	joiner had picked the other one before connecting.								*/
+	AmigaMenuPrintCentred(8, scr::NetGameSuperLeague() ? "SUPER LEAGUE" : "LEAGUE");
+	if (over)
+		AmigaMenuPrintCentred(9, "SEASON COMPLETE");
+	else
+		{
+		char heading[40];
+		snprintf(heading, sizeof(heading), "RACE %d of %d", run + 1, scr::kNetSeasonRaces);
+		AmigaMenuPrintCentred(9, heading);
+		}
+
+	AmigaMenuPrintF(AMIGA_PANEL_COL0, MP_TABLE_HEAD_ROW, MP_TABLE_ROW_FORMAT,
+					"DRIVER", "WON", "LST", "WRK", "LAP", "PTS");
+
+	/*	This machine's driver on top, always.  The rows are the two network roles, so	*/
+	/*	both ends hold identical figures - but a player reads their own row first, and	*/
+	/*	ordering by points would move it about between races.							*/
+	const scr::NetCarOwner mine   = scr::NetGameLocalCar();
+	const scr::NetCarOwner theirs = scr::NetGameRemoteCar();
+
+	DrawMultiplayerTableRow(MP_TABLE_FIRST_ROW,     scr::NetGameLeagueDriver(mine),   true);
+	DrawMultiplayerTableRow(MP_TABLE_FIRST_ROW + 2, scr::NetGameLeagueDriver(theirs), false);
+
+	AmigaMenuSetInk(AMIGA_INK_TEXT);
+
+	if (over)
+		{
+		/*	Points, then wins, then fastest laps - the order DrawTable settles a		*/
+		/*	division by.															*/
+		const scr::NetLeagueDriver &a = scr::NetGameLeagueDriver(mine);
+		const scr::NetLeagueDriver &b = scr::NetGameLeagueDriver(theirs);
+
+		const char *result = "SEASON DRAWN";
+		if ((a.points > b.points) ||
+			((a.points == b.points) && (a.won > b.won)) ||
+			((a.points == b.points) && (a.won == b.won) && (a.bestLaps > b.bestLaps)))
+			result = "YOU ARE CHAMPION";
+		else if ((a.points != b.points) || (a.won != b.won) || (a.bestLaps != b.bestLaps))
+			result = "YOU ARE BEATEN";
+
+		AmigaMenuPrintCentred(19, result);
+		AmigaMenuPrintCentred(23, "ESC ends the session.");
+		return;
+		}
+
+	if (scr::NetGameLocalIsHost())
+		{
+		/*	The host cycles the circuits it has not used.  Every track is raced		*/
+		/*	once, so the choice shortens as the season goes on and the last			*/
+		/*	fixture has nothing left to pick.										*/
+		char line[64];
+		snprintf(line, sizeof(line), "Next race: The %s", kTrackNames[gMpTrackCursor]);
+		AmigaMenuPrintCentred(19, line);
+
+		AmigaMenuPrintCentred(21, "LEFT/RIGHT picks the circuit.");
+		AmigaMenuPrintCentred(23, "RETURN starts the race.");
+		}
+	else
+		AmigaMenuPrintCentred(21, "Waiting for the host to choose.");
+	}
+
 /*	======================================================================================= */
 /*	Function:		MenuScreensRender														*/
 /*	======================================================================================= */
@@ -1526,6 +1709,7 @@ static void MenuScreensDraw( void )
 		case MS_MP_TRACK:		DrawMultiplayerTrack();	break;
 		case MS_MP_JOIN:		DrawMultiplayerJoin();	break;
 		case MS_MP_WAIT:		DrawMultiplayerWait();	break;
+		case MS_MP_TABLE:		DrawMultiplayerTable();	break;
 		case MS_TUNING:									break;	// handled above
 		}
 	}
@@ -1712,6 +1896,7 @@ static void HandleAddressEntry( int key )
 	if (key == KEY_ENTER)
 		{
 		gAddressError[0] = '\0';
+		scr::NetGameSetLocalName(gPlayerName);
 		if (scr::NetGameJoin(gAddressBuffer, DXUTGetTime()))
 			MenuScreensGoto(MS_MP_WAIT);
 		else
@@ -1768,6 +1953,7 @@ void MenuScreensTick( double now )
 		if (gNetAutoHostTrack >= 0)
 			{
 			autoDone = true;
+			scr::NetGameSetLocalName(gPlayerName);
 			if (scr::NetGameHost(gNetAutoHostTrack, gNetSuper, now))
 				MenuScreensGoto(MS_MP_WAIT);
 			}
@@ -1776,6 +1962,7 @@ void MenuScreensTick( double now )
 			autoDone = true;
 			snprintf(gAddressBuffer, sizeof(gAddressBuffer), "%s", gNetAutoJoinAddress);
 			gAddressLength = (int)strlen(gAddressBuffer);
+			scr::NetGameSetLocalName(gPlayerName);
 			if (scr::NetGameJoin(gAddressBuffer, now))
 				MenuScreensGoto(MS_MP_WAIT);
 			}
@@ -1787,6 +1974,14 @@ void MenuScreensTick( double now )
 	/*	Pump whether or not the waiting screen is up: the session also has to be kept	*/
 	/*	alive across the frames between the handshake and the race starting.				*/
 	if (scr::NetGamePoll(now) && (gScreen == MS_MP_WAIT))
+		EnterMultiplayerRace();
+
+	/*	The host's choice of circuit is also its start signal, so the joiner follows it	*/
+	/*	in as soon as the message lands.  The two ends do not have to arrive together:	*/
+	/*	whoever gets there first waits at step 0 for the other's input, which is the		*/
+	/*	same mechanism that covers the first race of the session.						*/
+	if ((gScreen == MS_MP_TABLE) && !scr::NetGameLocalIsHost() &&
+		(scr::NetGameNextTrack() >= 0))
 		EnterMultiplayerRace();
 	}
 
@@ -1825,7 +2020,11 @@ static void ActivateSelect( void )
 			gHallFromMenu = true;
 			MenuScreensGoto(MS_HALL_OF_FAME);
 			break;
-		case 4:	MenuScreensGoto(MS_LOADSAVE);		break;	// Load/Save/Replay
+		/*	The driver's name in the corner rather than a menu row - it is the driver's	*/
+		/*	own screen, so it is reached by picking the driver.							*/
+		case SELECT_DRIVER_ENTRY:
+			MenuScreensGoto(MS_LOADSAVE);
+			break;
 		}
 	}
 
@@ -2029,6 +2228,14 @@ bool MenuScreensBack( void )
 			MenuScreensGoto(MS_MP_MENU);
 			return true;
 
+		/*	Leaving the table is leaving the season - there is nowhere else for a	*/
+		/*	session to be sitting, so this is what ends one.  The peer is told by	*/
+		/*	NetGameCancel, which says goodbye rather than just going quiet.			*/
+		case MS_MP_TABLE:
+			scr::NetGameCancel();
+			MenuScreensGoto(MS_MP_MENU);
+			return true;
+
 		default:
 			/*	The result and end-of-season screens are a sequence, not a choice:	*/
 			/*	swallow escape rather than letting it drop out of the game.			*/
@@ -2057,6 +2264,42 @@ void MenuScreensKey( int key )
 	if (gScreen == MS_MP_JOIN)
 		{
 		HandleAddressEntry(key);
+		return;
+		}
+
+	/*	The league table between races.  Only the host has anything to press: it picks	*/
+	/*	the circuit and starts the fixture, and the joiner is told over the control		*/
+	/*	channel.  ESC falls through to MenuScreensBack, which ends the session.			*/
+	if (gScreen == MS_MP_TABLE)
+		{
+		if (!scr::NetGameLocalIsHost() || scr::NetGameSeasonOver())
+			return;
+
+		if ((key == KEY_LEFT) || (key == KEY_RIGHT))
+			{
+			/*	Step to the next circuit this season has not used.  Always		*/
+			/*	terminates: the season ends when the tracks run out, so there is	*/
+			/*	at least one free whenever this screen is up.					*/
+			const int step = (key == KEY_RIGHT) ? 1 : (MP_SEASON_TRACKS - 1);
+
+			for (int i = 0; i < MP_SEASON_TRACKS; i++)
+				{
+				gMpTrackCursor = (gMpTrackCursor + step) % MP_SEASON_TRACKS;
+				if (!scr::NetGameTrackUsed(gMpTrackCursor))
+					break;
+				}
+			return;
+			}
+
+		/*	Telling the joiner which circuit is also what starts the race - one		*/
+		/*	message rather than a choice followed by a go, which would leave a		*/
+		/*	window where the two ends disagree about whether the race had begun.		*/
+		if (((key == KEY_ENTER) || (key == ' ')) && !scr::NetGameTrackUsed(gMpTrackCursor))
+			{
+			scr::NetGameProposeNextTrack(gMpTrackCursor, DXUTGetTime());
+			EnterMultiplayerRace();
+			}
+
 		return;
 		}
 
@@ -2261,6 +2504,7 @@ void MenuScreensKey( int key )
 			/*	and dt all go out in the handshake and the joiner adopts them		*/
 			/*	wholesale.  The league is the host's choice - the joiner's own is	*/
 			/*	ignored, because the two must match to be one race at all.			*/
+			scr::NetGameSetLocalName(gPlayerName);
 			if (scr::NetGameHost(gSelection, gNetSuper, DXUTGetTime()))
 				MenuScreensGoto(MS_MP_WAIT);
 			break;
@@ -2290,18 +2534,35 @@ void MenuScreensNetRaceAborted( const char *reason )
 	MenuScreensGoto(MS_MP_MENU);
 	}
 
+/*	======================================================================================= */
+/*	Function:		MenuScreensNetRaceConceded												*/
+/*																							*/
+/*	Description:	The other player quit the race.  Both machines have already scored it,	*/
+/*					so there is nothing to do here but put the table back up - in			*/
+/*					particular this must NOT concede the race a second time from this end.	*/
+/*	======================================================================================= */
+
+void MenuScreensNetRaceConceded( void )
+	{
+	gActive = true;
+	MenuScreensGoto(MS_MP_TABLE);
+	}
+
 void MenuScreensAbandonRace( void )
 	{
 	gActive = true;
 
-	/*	Quitting a race quits the session with it - the other machine is told rather		*/
-	/*	than left stalled.  Done here rather than at the two 'M' key handlers in			*/
-	/*	StuntCarRacer.cpp, which are separate switch statements hundreds of lines apart	*/
-	/*	and easy to update only one of.													*/
+	/*	Quitting a network race concedes it rather than ending the session: the season	*/
+	/*	carries on, one race lighter, and the other player is told rather than left		*/
+	/*	stalled waiting for inputs that will never come.  Walking away from a race you	*/
+	/*	are losing therefore costs you the two points, which is the intended price.		*/
+	/*	Done here rather than at the two 'M' key handlers in StuntCarRacer.cpp, which	*/
+	/*	are separate switch statements hundreds of lines apart and easy to update only	*/
+	/*	one of.																			*/
 	if (scr::NetGameSessionActive())
 		{
-		scr::NetGameCancel();
-		MenuScreensGoto(MS_MAIN);
+		scr::NetGameForfeitRace(DXUTGetTime());
+		MenuScreensGoto(MS_MP_TABLE);
 		return;
 		}
 
@@ -2330,10 +2591,38 @@ void MenuScreensRaceFinished( bool playerWon, bool playerBestLap,
 	gLastMarginWon = playerWon;
 
 	/*	A multiplayer race is over as far as the network is concerned: stop stepping and	*/
-	/*	unlock the sim settings.  The session itself is dropped when the player leaves	*/
-	/*	the result screens.																*/
-	if (scr::NetGameSessionActive())
+	/*	unlock the sim settings.  The session itself now outlives the race - it is a		*/
+	/*	season, and it ends when the players leave the table or the link drops.			*/
+	const bool netRace = scr::NetGameSessionActive();
+	if (netRace)
+		{
 		scr::NetGameRaceEnded();
+
+		/*	Score the fixture.  Neither machine tells the other any of this: both	*/
+		/*	ran the same simulation of both cars, so both arrive at the same figures	*/
+		/*	independently.  Sending them would introduce a way to disagree.			*/
+		const bool localIsHost = scr::NetGameLocalIsHost();
+
+		/*	The remote player's car is the OPPONENT slot on this machine, whichever	*/
+		/*	end we are - see the slot mapping in StuntCarRacer.cpp.					*/
+		const bool remoteWrecked = CarIsWreckedFor(OPPONENT);
+
+		/*	playerBestLap is already "the local car set the fastest lap", measured	*/
+		/*	against the opponent's.  If it did not, the point goes to the other		*/
+		/*	driver only if that driver actually completed a lap - a race decided by	*/
+		/*	an early wreck can end with neither of them having set one, and then		*/
+		/*	nobody scores it.														*/
+		int bestLap = -1;
+		if (playerBestLap)
+			bestLap = localIsHost ? scr::NetCar_Host : scr::NetCar_Joiner;
+		else if (bOppBestLapTimeSet)
+			bestLap = localIsHost ? scr::NetCar_Joiner : scr::NetCar_Host;
+
+		scr::NetGameLeagueScoreRace(localIsHost ? playerWon : !playerWon,
+									localIsHost ? playerWrecked : remoteWrecked,
+									localIsHost ? remoteWrecked : playerWrecked,
+									bestLap);
+		}
 
 	/*	Note what this run took before handing the times to the record table, so the		*/
 	/*	'New track records' screen knows whether it has anything to say.					*/
@@ -2373,6 +2662,12 @@ void MenuScreensRaceFinished( bool playerWon, bool playerBestLap,
 		gRaceIsSingle        = false;
 		gRecordScreenReturn  = single ? MS_SINGLE_RACE : MS_SELECT;
 
+		/*	A network race is not a single race and not a season fixture: its			*/
+		/*	result belongs to the session's own table, so that is where the			*/
+		/*	winner's picture and any track record lead back to.						*/
+		if (netRace)
+			gRecordScreenReturn = MS_MP_TABLE;
+
 		/*	A wrecked car gets its picture whatever the race was: a time trial has	*/
 		/*	no crowd to trail past, but it can still end with the car on its belly.	*/
 		if (playerWrecked)
@@ -2381,7 +2676,9 @@ void MenuScreensRaceFinished( bool playerWon, bool playerBestLap,
 			return;
 			}
 
-		if (single && (gSingleOpponent != NO_OPPONENT))
+		/*	A network race always had an opponent - a real one - so it gets the		*/
+		/*	winner's or loser's picture the way a single race against a driver does.	*/
+		if (netRace || (single && (gSingleOpponent != NO_OPPONENT)))
 			{
 			MenuScreensGoto(playerWon ? MS_RACE_WIN : MS_RACE_LOST);
 			return;

@@ -68,7 +68,7 @@
 //   y: COCKPIT_TOP_HEIGHT*2.4 .. COCKPIT_SIDE_HEIGHT*2.4       = 38.4 .. 367.2 (328.8 tall)
 #define	SCR_WINDOW_WIDTH	476.0f
 #define	SCR_WINDOW_HEIGHT	328.8f
-#define	SCR_WINDOW_LEFT		82.0f		// COCKPIT_TOP_X_OFFSET * 2 (add COCKPIT_WIDESCREEN_OFFSET*2
+#define	SCR_WINDOW_LEFT		82.0f		// COCKPIT_TOP_X_OFFSET * 2 (add CockpitWideOffset()*2
 										// in widescreen, where the whole panel shifts right)
 
 // ...and where it sits. The opening runs y 38.4 .. 367.2, so its centre is 202.8, NOT the

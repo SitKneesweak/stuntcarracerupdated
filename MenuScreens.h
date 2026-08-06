@@ -38,6 +38,7 @@ enum MenuScreenType
 	MS_MP_TRACK,		// the host picks the track before hosting
 	MS_MP_JOIN,			// type the host's address
 	MS_MP_WAIT,			// hosting / connecting, and what went wrong if it did
+	MS_MP_TABLE,		// the two-driver league table between races, and the next fixture
 	MS_TUNING			// opponent speed tuning - not on any menu, see DrawTuning
 	};
 
@@ -98,6 +99,10 @@ void MenuScreensAbandonRace( void );
 /*	own explanation, taken before the session was cancelled, and is shown on the				*/
 /*	multiplayer menu.  Call after unwinding the race; this only puts the menus back.			*/
 void MenuScreensNetRaceAborted( const char *reason );
+
+/*	The other player conceded the race.  Already scored on both machines by the time this	*/
+/*	is called - it only puts the session's league table back up.							*/
+void MenuScreensNetRaceConceded( void );
 
 /*	Record a lap and/or race time against a track for the Hall of Fame.  The league the		*/
 /*	race ran under is part of the record: the Super League is a different car over the		*/

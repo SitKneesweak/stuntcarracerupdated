@@ -52,7 +52,10 @@ namespace scr {
 
 // Bumped whenever the wire format changes. Peers with different values refuse
 // to connect rather than misparse each other.
-const uint16_t kNetProtocolVersion = 1;
+// 2: the control channel. A version 1 peer has no Pkt_Control handler, so it
+//    would never acknowledge a track choice and never be told which circuit the
+//    season had moved on to - it would sit on the table for ever.
+const uint16_t kNetProtocolVersion = 2;
 
 // Bumped whenever anything reachable from PhysicsStepF_Tick changes in a way
 // that could alter results. Two peers on different sim versions would desync
@@ -180,6 +183,15 @@ double NetGetRTT();
 // simulated step of the race and increment in lockstep; it is not wall time and
 // must never be derived from it.
 
+// Start a new race at `base` instead of at 0, prefilling the input-delay window
+// there. A session now runs several races, and the step counter does NOT go
+// back to 0 between them: the input ring is keyed by step, so restarting it
+// would let the previous race's inputs answer this one's NetStepReady. The
+// caller gives each race a base far beyond the last one's final step (see
+// kNetRaceStepBase in Net_Game.h) and both peers derive the same base from the
+// number of races run, which they agree on without having to exchange it.
+void NetBeginRaceAt(uint32_t base);
+
 // Submit the local player's freshly sampled input while simulating `step`. It
 // is scheduled for step + kInputDelay and sent immediately, along with the
 // preceding kRedundancy-1 inputs. Call once per step, before NetStepReady.
@@ -206,6 +218,36 @@ void NetReportDigest(uint32_t step, uint64_t digest);
 // NetState_Desynced; this is the detail for the message.
 bool     NetHasDesync();
 uint32_t NetDesyncStep();
+
+// --- The control channel ---------------------------------------------------
+// Everything above is the race. This is for the things either side needs to
+// say *between* races — the driver's name, the host's choice of the next
+// track — which the lockstep input path cannot carry: it is unreliable by
+// design, and a dropped track choice would leave the two ends on different
+// circuits rather than merely a frame apart.
+//
+// So this is a deliberately small reliable channel: one message in flight per
+// direction, resent until acknowledged, delivered to the caller exactly once.
+// That is enough for menu traffic and nothing like enough to be tempted into
+// putting simulation state through it. Nothing here is allowed to influence a
+// running race — see the note on NetGameLeague* in Net_Game.h.
+
+const int kMaxControlBytes = 128;
+
+// Queue `len` bytes for the peer, sent immediately and repeated until acked.
+// Fails if a previous message is still unacknowledged (check NetControlIdle) or
+// the session is not connected — the caller is expected to retry, not to
+// assume it went.
+bool NetSendControl(const uint8_t* data, int len, double now);
+
+// True when nothing is waiting to be acknowledged, so NetSendControl will take
+// a message.
+bool NetControlIdle();
+
+// Collect an inbound message. Returns its length, or 0 if none has arrived
+// since the last call. A message is delivered once however many copies of it
+// the resend logic put on the wire.
+int NetReceiveControl(uint8_t* out, int max);
 
 } // namespace scr
 

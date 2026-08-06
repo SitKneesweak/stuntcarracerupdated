@@ -14,6 +14,7 @@
 
 #include "Track.h"
 #include "Track_FloatV2.h"
+#include "Opponent_Speeds.h"
 #include "StuntCarRacer.h"
 #include "3D_Engine.h"
 #include "Atlas.h"
@@ -1239,6 +1240,9 @@ static void *GetTRACKResource( HMODULE hModule, LPCWSTR lpResName );
 /*	Description:	Provide name of required Track ID										*/
 /*	======================================================================================= */
 
+/* Defined with the custom track loader below; NULL unless --track is in use */
+static WCHAR *CustomTrackDisplayName( void );
+
 WCHAR *GetTrackName( long track )
 {
 static WCHAR trackNames[][32] =
@@ -1250,6 +1254,12 @@ static WCHAR trackNames[][32] =
        						L"Draw Bridge",
     						L"High Jump",
     						L"Roller Coaster"};
+
+	{
+	WCHAR *custom = CustomTrackDisplayName();
+	if (custom != NULL)
+		return(custom);
+	}
 
     return(trackNames[track]);
 }
@@ -2969,6 +2979,121 @@ void ResetDrawBridge( void )
 #define	TRACK_DATA_SIZE	(804)
 
 
+/*
+ * Custom track file (--track <file>), built by tools/trackc.py.  When set it
+ * replaces the track data for whichever track is selected, so a hand-written
+ * track can be raced without touching the track menu.  The name on the menu
+ * still says whatever slot was picked.
+ */
+static char CustomTrackFile[512] = "";
+static char CustomTrackData[TRACK_DATA_SIZE];
+static long CustomTrackLoaded = FALSE;
+
+/*
+ * A custom track may carry the opponent's per-piece speed overrides appended
+ * after the 804 fixed bytes, as (piece, speed) pairs - the data the stock
+ * tracks keep in Opponent_Speeds.h.  Without them the opponent never brakes
+ * for a jump.  A plain 804-byte file simply has none.
+ */
+static OPP_SPEED_OVERRIDE CustomTrackOverrides[OPP_SPEED_MAX_OVERRIDES];
+static long CustomTrackOverrideCount = 0;
+
+/*	The menus name the track being raced, so a custom one borrows the file's	*/
+/*	stem rather than claiming to be whichever slot was selected.				*/
+
+static WCHAR CustomTrackName[32];
+
+static WCHAR *CustomTrackDisplayName( void )
+	{
+	const char *stem, *dot;
+	size_t i, n;
+
+	if (CustomTrackFile[0] == '\0')
+		return(NULL);
+
+	stem = strrchr(CustomTrackFile, '/');
+	stem = (stem != NULL ? stem + 1 : CustomTrackFile);
+
+	dot = strrchr(stem, '.');
+	n = (dot != NULL ? (size_t)(dot - stem) : strlen(stem));
+	if (n > (sizeof(CustomTrackName) / sizeof(WCHAR)) - 1)
+		n = (sizeof(CustomTrackName) / sizeof(WCHAR)) - 1;
+
+	for (i = 0; i < n; i++)
+		CustomTrackName[i] = (WCHAR)(unsigned char)stem[i];
+	CustomTrackName[n] = 0;
+
+	return(CustomTrackName);
+	}
+
+
+long GetCustomTrackOverrides( const OPP_SPEED_OVERRIDE **overrides )
+	{
+	if (CustomTrackFile[0] == '\0' || !CustomTrackLoaded)
+		return(-1);				// not a custom track: use the stock table
+
+	*overrides = CustomTrackOverrides;
+	return(CustomTrackOverrideCount);
+	}
+
+void SetCustomTrackFile( const char *path )
+	{
+	snprintf(CustomTrackFile, sizeof(CustomTrackFile), "%s", path);
+	CustomTrackLoaded = FALSE;
+	}
+
+static char *LoadCustomTrack( void )
+	{
+	FILE *f;
+	size_t got;
+
+	if (CustomTrackFile[0] == '\0')
+		return(NULL);
+
+	if (CustomTrackLoaded)
+		return(CustomTrackData);
+
+	if ((f = fopen(CustomTrackFile, "rb")) == NULL)
+		{
+		printf("Can't open custom track '%s'\n", CustomTrackFile);
+		CustomTrackFile[0] = '\0';
+		return(NULL);
+		}
+
+	got = fread(CustomTrackData, 1, TRACK_DATA_SIZE, f);
+
+	if (got != TRACK_DATA_SIZE)
+		{
+		fclose(f);
+		printf("Custom track '%s' is %d bytes, expected at least %d\n",
+			   CustomTrackFile, (int)got, TRACK_DATA_SIZE);
+		CustomTrackFile[0] = '\0';
+		return(NULL);
+		}
+
+	// optional (piece, speed) pairs for the opponent, appended after the header
+	CustomTrackOverrideCount = 0;
+	while (CustomTrackOverrideCount < OPP_SPEED_MAX_OVERRIDES)
+		{
+		unsigned char pair[2];
+
+		if (fread(pair, 1, 2, f) != 2)
+			break;
+
+		CustomTrackOverrides[CustomTrackOverrideCount].piece = pair[0];
+		CustomTrackOverrides[CustomTrackOverrideCount].speed = pair[1];
+		CustomTrackOverrideCount++;
+		}
+
+	fclose(f);
+
+	printf("Using custom track '%s' (%ld opponent speed overrides)\n",
+		   CustomTrackFile, CustomTrackOverrideCount);
+	CustomTrackLoaded = TRUE;
+	return(CustomTrackData);
+	}
+
+
 static long ReadAmigaTrackData( long track )
 	{
 	static WCHAR track_resource_names[NUM_TRACKS][32] =
@@ -3017,7 +3142,9 @@ static long ReadAmigaTrackData( long track )
 			}
 		}
 
-	buffer = track_buffer_ptrs[track];
+	buffer = LoadCustomTrack();
+	if (buffer == NULL)
+		buffer = track_buffer_ptrs[track];
 
 /*
 // code that was previously used, to load from file

@@ -1792,7 +1792,7 @@ void DrawCockpit (IDirect3DDevice9 *pd3dDevice)
 	// Get current screen dimensions and calculate scale factors
 	long current_width, current_height;
 	GetScreenDimensions(&current_width, &current_height);
-	float base_width = wideScreen ? static_cast<float>(BASE_WIDTH_WIDESCREEN) : static_cast<float>(BASE_WIDTH_STANDARD);
+	float base_width = static_cast<float>(gBaseWidth);
 	float base_height = static_cast<float>(BASE_HEIGHT);
 	float scaleX = static_cast<float>(current_width) / base_width;
 	float scaleY = static_cast<float>(current_height) / base_height;
@@ -1806,7 +1806,7 @@ void DrawCockpit (IDirect3DDevice9 *pd3dDevice)
 		return;
 	}
 	float leftwheel_y = CockpitWheelOffset(front_left_height_difference);
-	float Wide = wideScreen ? COCKPIT_WIDESCREEN_OFFSET : 0.0f;
+	float Wide = CockpitWideOffset();
 	float X1 = (Wide+COCKPIT_WHEEL_LEFT_OFFSET)*2*scaleX, X2 = ((Wide+COCKPIT_WHEEL_LEFT_OFFSET)*2+2*COCKPIT_WHEEL_WIDTH)*scaleX;
 	float Y1 = (480.0f-COCKPIT_WHEEL_HEIGHT*2.4f-COCKPIT_WHEEL_BOTTOM_GAP*2.4f)*scaleY, Y2 = (480.0f-COCKPIT_WHEEL_BOTTOM_GAP*2.4f)*scaleY;
 	Y1-=leftwheel_y*scaleY;
@@ -1827,8 +1827,12 @@ void DrawCockpit (IDirect3DDevice9 *pd3dDevice)
 		engineFrame = eEngineFlames0 + engineframes[frame>>1];
 	}
 	if(wideScreen) {
-		AddQuad(pVertices, 0.0f, COCKPIT_WLEFT_Y_OFFSET*2.4f*scaleY, COCKPIT_WLEFT_X_OFFSET*2.f*scaleX, 480.0f*scaleY, 0.9f, (bSuperLeague)?eCockpitWL2:eCockpitWL, 0,1);
-		AddQuad(pVertices, (800.f-COCKPIT_WRIGHT_X_OFFSET)*scaleX, COCKPIT_WRIGHT_Y_OFFSET*2.4f*scaleY, 800.f*scaleX, 480.0f*scaleY, 0.9f, (bSuperLeague)?eCockpitWR2:eCockpitWR, 0,1);
+		/*	The strip either side of the 640-wide cockpit, from the wing down.  It closes the
+			bottom corners; above it the base space is left open, and that is where the extra
+			world shows through.  Authored at Wide==40 (the old fixed 800-wide mode), so it
+			stretches with the gap - it abuts the cockpit panel exactly at Wide*2.	*/
+		AddQuad(pVertices, 0.0f, COCKPIT_WLEFT_Y_OFFSET*2.4f*scaleY, Wide*2.f*scaleX, 480.0f*scaleY, 0.9f, (bSuperLeague)?eCockpitWL2:eCockpitWL, 0,1);
+		AddQuad(pVertices, (base_width-Wide*2.f)*scaleX, COCKPIT_WRIGHT_Y_OFFSET*2.4f*scaleY, base_width*scaleX, 480.0f*scaleY, 0.9f, (bSuperLeague)?eCockpitWR2:eCockpitWR, 0,1);
 	}
 	AddQuad(pVertices, (Wide+COCKPIT_ENGINE_X_OFFSET)*2.0f*scaleX, COCKPIT_ENGINE_Y_OFFSET*2.4f*scaleY, (Wide+COCKPIT_ENGINE_X_OFFSET+COCKPIT_ENGINE_WIDTH)*2.0f*scaleX, (COCKPIT_ENGINE_Y_OFFSET+COCKPIT_ENGINE_HEIGHT)*2.4f*scaleY, 0.89f, engineFrame, 0,1);
 	AddQuad(pVertices, (Wide+COCKPIT_TOP_X_OFFSET)*2.f*scaleX, 0.0f, (Wide+COCKPIT_TOP_X_OFFSET+COCKPIT_TOP_WIDTH)*2.f*scaleX, COCKPIT_TOP_HEIGHT*2.4f*scaleY, 0.9f, (bSuperLeague)?eCockpitTop2:eCockpitTop, 0,1);

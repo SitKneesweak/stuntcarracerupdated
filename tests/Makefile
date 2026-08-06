@@ -47,6 +47,7 @@ net_lockstep_test: net_lockstep_test.cpp ../Net_Lockstep.cpp ../Net_Socket.cpp .
 
 check: $(TESTS)
 	@for t in $(TESTS); do echo "=== $$t"; ./$$t || exit 1; done
+	@echo "=== trackc round-trip"; python3 ../tools/trackc.py selftest || exit 1
 ifneq ($(OS),Windows_NT)
 	@echo "=== net_lockstep_test desync"; ./net_lockstep_test desync || exit 1
 endif

@@ -1567,7 +1567,18 @@ void InitialiseOpponentSpeedValues( long track_id )
 	long base = static_cast<long>(SCR_Rand()) & static_cast<long>(opp_track_speed_values[track_id+16+(bSuperLeague?32:0)]);
 	base += OpponentTuningBase(track_id, OPP_SPEED_GROUP_PER_PIECE, bSuperLeague);
 
-	BuildOpponentSpeedValues(track_id,
+	/*	A custom track carries its own braking points (or none); the stock		*/
+	/*	tracks keep theirs in the table indexed by track ID.						*/
+	const OPP_SPEED_OVERRIDE *overrides = gOppSpeedOverrides[track_id];
+	long n_overrides = GetCustomTrackOverrides(&overrides);
+	if (n_overrides < 0)
+		{
+		overrides = gOppSpeedOverrides[track_id];
+		n_overrides = gOppSpeedOverrideCount[track_id];
+		}
+
+	BuildOpponentSpeedValues(overrides,
+							 n_overrides,
 							 NumTrackPieces,
 							 Piece_Angle_And_Template,
 							 sections_car_can_be_put_on,

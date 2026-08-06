@@ -86,6 +86,7 @@ IDirect3DTexture9 *g_pAtlas = NULL;
 IDirect3DTexture9 *g_pChain = NULL;
 
 int wideScreen = 0;
+int gBaseWidth = BASE_WIDTH_STANDARD;	// see StuntCarRacer.h; chosen in ApplyViewport()
 float gCustomScale = 0.0f;	// -s option, in points; 0 = auto-fit the window
 
 static long frameGap = DEFAULT_FRAME_GAP;
@@ -435,7 +436,7 @@ void GetScreenDimensions( long *screen_width,
 	/*const SDL_VideoInfo* info = SDL_GetVideoInfo();
 	*screen_width = info->current_w;
 	*screen_height = info->current_h; */
-	*screen_width = (wideScreen)?800:640;
+	*screen_width = gBaseWidth;
 	*screen_height = 480;
 #else
 	const D3DSURFACE_DESC *desc;
@@ -470,8 +471,7 @@ static void ReportFieldOfView( void )
 	float tan_half_x, tan_half_y;
 	GetProjectionTangents(&tan_half_x, &tan_half_y);
 
-	const float base_width = wideScreen ? static_cast<float>(BASE_WIDTH_WIDESCREEN)
-										: static_cast<float>(BASE_WIDTH_STANDARD);
+	const float base_width = static_cast<float>(gBaseWidth);
 
 	// Back out the full-screen frustum to the window's own subtended angles.
 	const float focal_x = (base_width  * 0.5f) / tan_half_x;
@@ -480,11 +480,13 @@ static void ReportFieldOfView( void )
 	const float rad_to_deg = 180.0f / 3.14159265358979323846f;
 
 	printf("Amiga FOV %s - cockpit window %.1f x %.1f degrees, stretch %.3f"
-		   "  (Amiga: 45.0 x 22.5, stretch 1.200)\n",
+		   "  (Amiga: 45.0 x 22.5, stretch 1.200); full %d-wide view %.1f degrees across\n",
 		   gAmigaFov ? "ON" : "OFF",
 		   2.0f * atanf((SCR_WINDOW_WIDTH  * 0.5f) / focal_x) * rad_to_deg,
 		   2.0f * atanf((SCR_WINDOW_HEIGHT * 0.5f) / focal_y) * rad_to_deg,
-		   focal_y / focal_x);
+		   focal_y / focal_x,
+		   gBaseWidth,
+		   2.0f * atanf(tan_half_x) * rad_to_deg);
 	fflush(stdout);
 }
 
@@ -699,8 +701,7 @@ float GetTextScale() {
 	// their boxes at any window size.
 	long current_width, current_height;
 	GetScreenDimensions(&current_width, &current_height);
-	float base_width = wideScreen ? static_cast<float>(BASE_WIDTH_WIDESCREEN)
-								  : static_cast<float>(BASE_WIDTH_STANDARD);
+	float base_width = static_cast<float>(gBaseWidth);
 	return static_cast<float>(current_width) / base_width;
 }
 GLuint   g_pSprite = 0;	// Texture for batching text calls
@@ -722,7 +723,7 @@ float GetTextScale()
 {
 	long current_width, current_height;
 	GetScreenDimensions(&current_width, &current_height);
-	float base_width = wideScreen ? static_cast<float>(BASE_WIDTH_WIDESCREEN) : static_cast<float>(BASE_WIDTH_STANDARD);
+	float base_width = static_cast<float>(gBaseWidth);
 	return static_cast<float>(current_width) / base_width;
 }
 ID3DXSprite *g_pSprite = NULL;       // Sprite for batching draw text calls
@@ -1825,10 +1826,24 @@ static void PlaceNetCarOnChains( long slot, long swingFromLeft )
 	opponent is another player's car, stepped by the same CarBehaviour as this one, so its
 	y means exactly what player1_y means and it must get exactly the same lift - otherwise
 	the two peers each see their own car riding correctly and the other one sunk into the
-	road by VCAR_HEIGHT/12.															*/
+	road by VCAR_HEIGHT/12.
+
+	There is a second difference, and it is the reason a network car still read as sitting
+	low next to the AI.  OpponentBehaviour does two things to its centre height that
+	CarBehaviour does not: it takes each wheel's height as max(road, actual), so the AI's
+	body can never drop below the road however hard it lands, and it then adds
+	CAR_LIFT_ABOVE_ROAD on top so the car stands on its own shadow's plane rather than
+	hovering above it (Opponent_Behaviour.cpp, both the legacy and FloatV2 centre-y).  A
+	player-driven car gets neither.  The clamp we do not want - a real car should be able
+	to bottom out - but the shadow-plane lift is presentation, and without it the network
+	car rides CAR_LIFT_ABOVE_ROAD Amiga units, half that in world units, below where the
+	AI would sit on the same piece of road.											*/
 static float OpponentRenderLift( void )
 {
-	return scr::NetGameRacing() ? (float)(VCAR_HEIGHT/3) : (float)(VCAR_HEIGHT/4);
+	if (!scr::NetGameRacing())
+		return (float)(VCAR_HEIGHT/4);
+
+	return (float)(VCAR_HEIGHT/3) + ((float)CAR_LIFT_ABOVE_ROAD / 2.0f);
 }
 
 static void SetOpponentsCarWorldTransform( void )
@@ -1914,7 +1929,7 @@ static void HideOpponentsCar( void )
 
 /*	Defined further down with the rest of the race-exit handling, but needed by the frame
 	loop above it: a network session that fails mid-race has to unwind the race there.	*/
-static void ReturnToMenus( void );
+static void ReturnToMenus( bool peerConceded = false );
 
 
 static void StopEngineSound( void )
@@ -2000,6 +2015,21 @@ static float lastFrame = 0.0f;
 
 		ReturnToMenus();					// cancels the session and unwinds the race
 		MenuScreensNetRaceAborted(why);
+		return;
+		}
+
+	/*	The other player quit the race.  Their machine has already scored it - to them a
+		loss, to this one a win - so all that is left here is to stop driving and go and
+		look at the table.  Checked in the same place and for the same reason as the
+		failure above: the remote car stops being driven the moment its player leaves,
+		and anything simulated past this point is a race against a stationary car.
+		NetGamePeerForfeited consumes the edge, so it is asked only while a race is
+		actually running.													*/
+	if (scr::NetGameSessionActive() &&
+		((GameMode == GAME_IN_PROGRESS) || (GameMode == GAME_OVER)) &&
+		scr::NetGamePeerForfeited())
+		{
+		ReturnToMenus(true);
 		return;
 		}
 
@@ -2519,7 +2549,7 @@ bool MenuStartTrack( int trackID )
 /*					two cannot drift apart.													*/
 /*	======================================================================================= */
 
-static void ReturnToMenus( void )
+static void ReturnToMenus( bool peerConceded )
 	{
 	if (GameMode == TRACK_MENU)
 		return;
@@ -2534,7 +2564,12 @@ static void ReturnToMenus( void )
 	bPaused       = FALSE;
 	bPlayerPaused = bOpponentPaused = FALSE;
 
-	MenuScreensAbandonRace();
+	/*	The peer conceding has already scored the race on both machines, so this	*/
+	/*	side must not concede it a second time on the way out.					*/
+	if (peerConceded)
+		MenuScreensNetRaceConceded();
+	else
+		MenuScreensAbandonRace();
 	}
 
 static void HandleTrackMenu( CDXUTTextHelper &txtHelper )
@@ -2878,7 +2913,7 @@ void RenderText( double fTime )
 			// offset, so no single padded string lines them all up.
 			{
 			float scaleY = static_cast<float>(pd3dsdBackBuffer->Height) / static_cast<float>(BASE_HEIGHT);
-			float wide = wideScreen ? COCKPIT_WIDESCREEN_OFFSET : 0.0f;
+			float wide = CockpitWideOffset();
 			#define HUD_X(ax)	static_cast<int>((wide + (ax)) * 2.0f * textScale)
 			#define HUD_Y(ay)	static_cast<int>((ay) * 2.4f * scaleY)
 
@@ -2935,7 +2970,7 @@ void RenderText( double fTime )
 				else
 					txtHelperWreck.SetForegroundColor( D3DXCOLOR( 0.0f, 0.0f, 0.0f, 1.0f ) );
 
-				txtHelperWreck.SetInsertionPos( static_cast<int>((250+(wideScreen?80:0)) * textScale),
+				txtHelperWreck.SetInsertionPos( static_cast<int>((250+(int)(CockpitWideOffset()*2.0f)) * textScale),
 												static_cast<int>(pd3dsdBackBuffer->Height-25*12*textScale) );
 				txtHelperWreck.DrawTextLine( L"WRECKED" );
 				txtHelperWreck.End();
@@ -2964,12 +2999,12 @@ void RenderText( double fTime )
 				if (GameMode == GAME_OVER)
 				{
 #ifdef SCR_PORTABLE
-					txtHelperLarge.SetInsertionPos( static_cast<int>((250+(wideScreen?80:0)) * textScale), static_cast<int>(pd3dsdBackBuffer->Height-25*13*textScale) );
+					txtHelperLarge.SetInsertionPos( static_cast<int>((250+(int)(CockpitWideOffset()*2.0f)) * textScale), static_cast<int>(pd3dsdBackBuffer->Height-25*13*textScale) );
 					txtHelperLarge.DrawTextLine( L"GAME OVER" );
-					txtHelperLarge.SetInsertionPos( static_cast<int>((132+(wideScreen?80:0)) * textScale), static_cast<int>(pd3dsdBackBuffer->Height-25*11*textScale) );
+					txtHelperLarge.SetInsertionPos( static_cast<int>((132+(int)(CockpitWideOffset()*2.0f)) * textScale), static_cast<int>(pd3dsdBackBuffer->Height-25*11*textScale) );
 					txtHelperLarge.DrawTextLine( L"Press 'M' for track menu" );
 #else
-					txtHelperLarge.SetInsertionPos( static_cast<int>((124+(wideScreen?80:0)) * textScale), static_cast<int>(pd3dsdBackBuffer->Height-25*12*textScale) );
+					txtHelperLarge.SetInsertionPos( static_cast<int>((124+(int)(CockpitWideOffset()*2.0f)) * textScale), static_cast<int>(pd3dsdBackBuffer->Height-25*12*textScale) );
 					txtHelperLarge.DrawTextLine( L"GAME OVER: Press 'M' for track menu" );
 #endif
 				}
@@ -2982,7 +3017,7 @@ void RenderText( double fTime )
 					else
 						txtHelperLarge.SetForegroundColor( D3DXCOLOR( 0.0f, 0.0f, 0.0f, 1.0f ) );
 
-					txtHelperLarge.SetInsertionPos( static_cast<int>((250+(wideScreen?80:0)) * textScale), static_cast<int>(pd3dsdBackBuffer->Height-25*12*textScale) );
+					txtHelperLarge.SetInsertionPos( static_cast<int>((250+(int)(CockpitWideOffset()*2.0f)) * textScale), static_cast<int>(pd3dsdBackBuffer->Height-25*12*textScale) );
 
 					if (raceWon)
 						txtHelperLarge.DrawTextLine( L"RACE WON" );
@@ -3449,7 +3484,7 @@ static void PreviewFattenRoad( IDirect3DDevice9 *pd3dDevice )
 /*					the Amiga playfield SCR_WINDOW_* describes - the frame's inner bevel		*/
 /*					is transparent for another ten pixels each side, and clipping to the		*/
 /*					playfield instead leaves black bands inside the frame.  In widescreen	*/
-/*					the whole 640-wide panel shifts right by COCKPIT_WIDESCREEN_OFFSET * 2.	*/
+/*					the whole 640-wide panel shifts right by CockpitWideOffset() * 2.   	*/
 /*	======================================================================================= */
 
 static void SetCockpitWindowClip( bool enable )
@@ -3463,13 +3498,12 @@ static void SetCockpitWindowClip( bool enable )
 	long screen_width, screen_height;
 	GetScreenDimensions(&screen_width, &screen_height);
 
-	const float base_width = wideScreen ? (float)BASE_WIDTH_WIDESCREEN
-									    : (float)BASE_WIDTH_STANDARD;
+	const float base_width = (float)gBaseWidth;
 	const float scaleX = (float)screen_width  / base_width;
 	const float scaleY = (float)screen_height / (float)BASE_HEIGHT;
 
 	// The art is authored in 320x200; base space is that doubled across and x2.4 down.
-	const float wide = wideScreen ? COCKPIT_WIDESCREEN_OFFSET : 0.0f;
+	const float wide = CockpitWideOffset();
 
 	SetScreenSpaceClip((wide + COCKPIT_WINDOW_X) * 2.0f   * scaleX,
 					   COCKPIT_WINDOW_Y         * 2.4f   * scaleY,
@@ -3876,7 +3910,24 @@ HRESULT hr;
 		if (GameMode == GAME_IN_PROGRESS)
 		{
 			//jsr	display.speed.bar
-			if (bFrameMoved) UpdateDamage();
+			if (bFrameMoved)
+			{
+				UpdateDamage();
+
+				/*	The damage bar and the wreck countdown are per-car state, and this
+					call only ever runs them for the selected car - which is always the
+					local one.  In a head-to-head race the other car is a player who can
+					wreck too, and if only the wrecking machine ticked the countdown then
+					only that machine would end the race: the other would be left driving
+					a race its opponent had already lost.  So run the countdown for the
+					remote car as well, silently (see UpdateRemoteCarDamage).			*/
+				if (scr::NetGameRacing())
+				{
+					SelectCar(OPPONENT);
+					UpdateRemoteCarDamage();
+					SelectCar(PLAYER);
+				}
+			}
 
 			// The lap stopwatch runs on the wall clock rather than a step count, so feed
 			// UpdateLapData the real time since the last render frame.  A large gap means
@@ -4400,11 +4451,20 @@ bool process_events()
 					printf("Display aspect: %s (pixel aspect %.4f, picture %.3f:1)\n",
 						   (gPresentPixelAspect == AMIGA_PAL_PIXEL_ASPECT) ? "PAL" : "4:3",
 						   gPresentPixelAspect,
-						   (wideScreen ? 800.f : 640.f) / (480.f * ScrPresentSquash()));
+						   (float)gBaseWidth / (480.f * ScrPresentSquash()));
 					fflush(stdout);
 #ifdef USE_SDL2
 					ApplyViewport();
 #endif
+					break;
+
+				case SDLK_s:
+					// Mute / unmute everything.  Safe to take S here: while the Amiga
+					// menus are up they own the keyboard (see above) and S starts the
+					// game there, so this only ever fires in the race.
+					sound_set_muted( !sound_muted() );
+					printf("Sound %s\n", sound_muted() ? "OFF" : "ON");
+					fflush(stdout);
 					break;
 
 				case SDLK_f:
@@ -4677,34 +4737,38 @@ void ApplyViewport()
 	if(dpiFactor <= 0.0f)
 		dpiFactor = 1.0f;
 
+	// Only 480*ScrPresentSquash() of the base space is ever presented (see below), so
+	// everything below fits against that, not against 480 - else the squash would be paid
+	// for twice and the picture would sit in a letterbox inside a letterbox.
+	const double presentH = 480. * ScrPresentSquash();
+
+	// How wide the base space is.  The window is filled rather than pillarboxed: whatever
+	// the window is wider than the 640-unit cockpit becomes extra base width, and since the
+	// frustum spans the whole base space (GetProjectionTangents) that width is world - you
+	// see further left and right past the roll cage.  Decided once, at startup: the whole
+	// 2D layout is built around it, so it must not flip when the window is dragged to
+	// another display, nor when A changes the display aspect.
+	static bool aspectChosen = false;
+	if(!aspectChosen) {
+		int bw = static_cast<int>(drawW * presentH / drawH + 0.5);
+		bw = (bw + 2) & ~3;						// multiple of 4, so CockpitWideOffset() is whole
+		if(bw < BASE_WIDTH_STANDARD) bw = BASE_WIDTH_STANDARD;
+		if(bw > BASE_WIDTH_MAX)      bw = BASE_WIDTH_MAX;
+		gBaseWidth = bw;
+		wideScreen = (gBaseWidth > BASE_WIDTH_STANDARD);
+		aspectChosen = true;
+	}
+
 	// automatic guess the scale or use custom scale
 	float screenScale;
 	if(gCustomScale > 0.0f) {
 		// Use custom scale factor, in points, so it matches the requested size
 		screenScale = gCustomScale * dpiFactor;
 	} else {
-		// Automatic scaling based on window size.  Only 480*ScrPresentSquash() of the base
-		// space is ever presented (see below), so fit against that, not against 480 - else
-		// the squash would be paid for twice and the picture would sit in a letterbox
-		// inside a letterbox.
-		const double presentH = 480. * ScrPresentSquash();
-		screenScale = (drawW/640. < drawH/presentH) ? drawW/640. : drawH/presentH;
+		screenScale = (drawW/(double)gBaseWidth < drawH/presentH)
+			? drawW/(double)gBaseWidth : drawH/presentH;
 	}
-	// is it a Wide screen ratio?
-	// Detect widescreen if width is significantly wider than 4:3 aspect ratio.
-	// Decided once, at startup: the whole 2D layout is built around it, so it
-	// must not flip when the window is dragged to another display.
-	// Measured against the PAL presentation (the constant, not ScrPresentSquash) so that
-	// the A toggle changes only how the raster is presented, never the 2D layout.
-	static bool aspectChosen = false;
-	if(!aspectChosen) {
-		const double palScale = (drawW/640. < drawH/(480.*SCR_PRESENT_SQUASH))
-			? drawW/640. : drawH/(480.*SCR_PRESENT_SQUASH);
-		if((drawW/palScale - 640)>=80)
-			wideScreen=1;
-		aspectChosen = true;
-	}
-	int viewW = static_cast<int>((wideScreen?800:640)*screenScale);
+	int viewW = static_cast<int>(gBaseWidth*screenScale);
 	int fullH = static_cast<int>(480*screenScale);
 	int viewX = (drawW - viewW)/2;
 	int baseY = (drawH - fullH)/2;
@@ -4725,7 +4789,7 @@ void ApplyViewport()
 	glViewport(viewX, viewY, viewW, viewH);
 	glMatrixMode(GL_PROJECTION);
 	glLoadIdentity();
-	glOrtho(0, wideScreen?800:640, 480, 0, 0, FURTHEST_Z);
+	glOrtho(0, gBaseWidth, 480, 0, 0, FURTHEST_Z);
 	glMatrixMode(GL_MODELVIEW);
 	glLoadIdentity();
 }
@@ -4863,6 +4927,9 @@ int main(int argc, char** argv)
 		else if(!strcmp(argv[i], "--net-join") && i+1 < argc) {
 			snprintf(gNetAutoJoinAddress, sizeof(gNetAutoJoinAddress), "%s", argv[++i]);
 		}
+		else if(!strcmp(argv[i], "--track") && i+1 < argc) {
+			SetCustomTrackFile(argv[++i]);
+		}
 		else if(int used = scr::SimTrace_ParseArg(argc, argv, i)) {
 			i += used - 1;		// the loop's own ++i accounts for the first
 		}
@@ -4876,6 +4943,7 @@ int main(int argc, char** argv)
 		printf("\t-w|--width <pixels>\tSet window width (e.g., 640, 800, 1280)\n");
 		printf("\t-h|--height <pixels>\tSet window height (e.g., 480, 600, 720)\n");
 		printf("\t-s|--scale <factor>\tSet scale factor (e.g., 1.0, 1.5, 2.0)\n");
+		printf("\t--track <file>\t\tRace a track built by tools/trackc.py\n");
 		printf("\t--simtrace [steps]\tRecord a per-step physics checksum to simtrace.log and quit\n");
 		printf("\t--simtrace-verbose\tAs --simtrace, but dump every state field too\n");
 		printf("\t--simtrace-track <n>\tTrack to trace on (0-7, default 0)\n");
@@ -5130,36 +5198,37 @@ int main(int argc, char** argv)
 	gCustomScale = customScale;
 	ApplyViewport();
 	screenH = 480;
-	screenW = wideScreen?800:640;
+	screenW = gBaseWidth;
 #else
+	// Only 480*ScrPresentSquash() of the base space is ever presented (see below), so
+	// everything below fits against that, not against 480.
+	const double presentH = 480. * ScrPresentSquash();
+
+	// How wide the base space is - the SDL1 counterpart of the same decision in
+	// ApplyViewport(); see gBaseWidth in StuntCarRacer.h.
+	{
+		int bw = static_cast<int>(screenW * presentH / screenH + 0.5);
+		bw = (bw + 2) & ~3;
+		if(bw < BASE_WIDTH_STANDARD) bw = BASE_WIDTH_STANDARD;
+		if(bw > BASE_WIDTH_MAX)      bw = BASE_WIDTH_MAX;
+		gBaseWidth = bw;
+		wideScreen = (gBaseWidth > BASE_WIDTH_STANDARD);
+	}
+
 	// automatic guess the scale or use custom scale
 	float screenScale = 1.;
 	if(customScale > 0.0f) {
 		// Use custom scale factor, in points, so it matches the requested size
 		screenScale = customScale * dpiFactor;
 	} else {
-		// Automatic scaling based on window size.  Only 480*ScrPresentSquash() of the base
-		// space is ever presented (see below), so fit against that, not against 480.
-		const double presentH = 480. * ScrPresentSquash();
-		if(screenW/640. < screenH/presentH)
-			screenScale = screenW/640.;
+		if(screenW/(double)gBaseWidth < screenH/presentH)
+			screenScale = screenW/(double)gBaseWidth;
 		else
 			screenScale = screenH/presentH;
 	}
-	// is it a Wide screen ratio?
-	// Detect widescreen if width is significantly wider than 4:3 aspect ratio.
-	// Measured against the PAL presentation (the constant, not ScrPresentSquash) so that
-	// the display-aspect choice changes only presentation, never the 2D layout.
-	{
-		const double palPresentH = 480. * SCR_PRESENT_SQUASH;
-		const double palScale = (screenW/640. < screenH/palPresentH)
-			? screenW/640. : screenH/palPresentH;
-		if((screenW/palScale - 640)>=80)
-			wideScreen=1;
-	}
-	screenX = (screenW-(wideScreen?800.:640.)*screenScale)/2.;
+	screenX = (screenW-gBaseWidth*screenScale)/2.;
 	screenY = (screenH-480.*screenScale)/2.;
-	screenW = (wideScreen?800:640)*screenScale;
+	screenW = gBaseWidth*screenScale;
 	screenH = 480*screenScale;
 	printf("Display mode: %s, Scale: %.2f, Resolution: %dx%d (DPI factor %.2f)\n",
 		   wideScreen ? "Widescreen" : "Standard", screenScale, screenW, screenH, dpiFactor);
@@ -5175,7 +5244,7 @@ int main(int argc, char** argv)
 	glMatrixMode(GL_PROJECTION);
 	glLoadIdentity();
 	screenH = 480;
-	screenW = wideScreen?800:640;
+	screenW = gBaseWidth;
 	glOrtho(0, screenW, screenH, 0, 0, FURTHEST_Z);
 	glMatrixMode(GL_MODELVIEW);
 	glLoadIdentity();

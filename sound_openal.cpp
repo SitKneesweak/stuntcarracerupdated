@@ -166,6 +166,27 @@ void sound_destroy( void )
 	alcCloseDevice(Device);
 }
 
+/*	Global mute.  Done on the listener rather than by stopping sources, because the engine
+	note is a looping source whose pitch and volume are driven every frame from the car's
+	speed: stopping it would need the whole of that to learn about muting, and restarting
+	it would restart the loop mid-note.  AL_GAIN on the listener scales everything that
+	reaches the ear and nothing else, so the mix carries on running silently and comes back
+	exactly where it would have been.												*/
+static int sound_muted_flag = 0;
+
+void sound_set_muted( bool muted )
+{
+	sound_muted_flag = muted ? 1 : 0;
+	if(!sound_initialized)
+		return;
+	alListenerf(AL_GAIN, sound_muted_flag ? 0.0f : 1.0f);
+}
+
+bool sound_muted( void )
+{
+	return (sound_muted_flag != 0);
+}
+
 //
 // 3d routines
 //

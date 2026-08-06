@@ -9,8 +9,24 @@
 
 // Screen resolution constants
 #define BASE_WIDTH_STANDARD		640		// Standard 4:3 base width
-#define BASE_WIDTH_WIDESCREEN	800		// Widescreen 16:10 base width
+#define BASE_WIDTH_MAX			960		// As wide as the base space is ever allowed to get
 #define BASE_HEIGHT				480		// Base height for both modes
+
+/*	The base space is 480 tall and gBaseWidth across.  The cockpit is always the original
+	640-wide panel, centred; anything beyond it is extra world, seen past the roll cage to
+	the left and right.  Chosen once at startup from the window's shape (ApplyViewport) so
+	that dragging the window to another display never re-lays-out the 2D art, clamped to
+	BASE_WIDTH_MAX and kept a multiple of 4 so the half-offset below stays whole.	*/
+extern int gBaseWidth;
+extern int wideScreen;					// gBaseWidth > 640; kept for the 2D layout tests
+
+/*	How far right the 640-wide cockpit panel shifts, in the 320x200 space the art is
+	authored in - so twice this in base units.  40 when gBaseWidth is 800, the value the
+	old COCKPIT_WIDESCREEN_OFFSET constant hard-coded.	*/
+static inline float CockpitWideOffset( void )
+	{
+	return (float)(gBaseWidth - BASE_WIDTH_STANDARD) * 0.25f;
+	}
 
 typedef enum
 	{

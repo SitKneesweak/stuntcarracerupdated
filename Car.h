@@ -28,7 +28,6 @@
 #define	CAR_LIFT_ABOVE_ROAD		(2 * SHADOW_ABOVE_ROAD)
 
 // Cockpit rendering constants (320x200 base space)
-#define COCKPIT_WIDESCREEN_OFFSET   40.0f   // Additional X offset for widescreen mode
 #define COCKPIT_WHEEL_WIDTH         24.0f   // Width of wheel graphic (half)
 #define COCKPIT_WHEEL_HEIGHT        56.0f   // Height of wheel graphic
 #define COCKPIT_WHEEL_BOTTOM_GAP    20.0f   // Gap from bottom of screen
