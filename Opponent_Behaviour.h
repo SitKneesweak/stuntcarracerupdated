@@ -61,6 +61,8 @@ extern long CalculateOpponentsDistance (void);
 
 extern void GetOpponentWheelCompression( long *rear_left, long *rear_right, long *front );
 
+extern bool OpponentTouchingRoad( void );
+
 extern long GetOpponentZSpeed( void );
 
 /*	=============================================================================== */

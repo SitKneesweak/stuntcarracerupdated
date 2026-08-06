@@ -1435,6 +1435,16 @@ void GetOpponentWheelCompression( long *rear_left, long *rear_right, long *front
 }
 
 
+/*	Whether any of the opponent's wheels is on the road at all, for the renderer.  A wheel
+	in mid-air reads as fully compressed on the way past the peak of a jump - the road
+	height under it is meaningless up there - so an effect keyed off compression has to
+	check this before it believes what the wheels are telling it.					*/
+bool OpponentTouchingRoad( void )
+{
+	return (opp_touching_road != FALSE);
+}
+
+
 static void CalculateWheelDifference( long road_height,
 									  long actual_height,
 									  long height_adjust,

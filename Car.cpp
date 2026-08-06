@@ -15,6 +15,7 @@
 #include "Atlas.h"
 #include "Opponent_Behaviour.h"
 #include "Car_Behaviour.h"
+#include "Particles.h"
 /*	===== */
 /*	Debug */
 /*	===== */
@@ -1250,11 +1251,16 @@ HRESULT CreateCarVertexBuffer (IDirect3DDevice9 *pd3dDevice)
 	weight, 'droop' the span from there down to a free-hanging wheel, 'load' the span from
 	there up to properly loaded. Anything past either end pegs at the travel limit, which
 	is what a wheel at the end of its stroke does anyway.							*/
-static long SuspensionTravel( long below, long rest, long droop, long load )
+static long SuspensionTravelRaw( long below, long rest, long droop, long load )
 {
 	long d = below - rest;
-	long travel = (d < 0) ? (d * SUSP_MAX_TRAVEL / droop)
-						  : (d * SUSP_MAX_TRAVEL / load);
+	return (d < 0) ? (d * SUSP_MAX_TRAVEL / droop)
+				   : (d * SUSP_MAX_TRAVEL / load);
+}
+
+static long SuspensionTravel( long below, long rest, long droop, long load )
+{
+	long travel = SuspensionTravelRaw(below, rest, droop, load);
 
 	if (travel >  SUSP_MAX_TRAVEL) travel =  SUSP_MAX_TRAVEL;
 	if (travel < -SUSP_MAX_TRAVEL) travel = -SUSP_MAX_TRAVEL;
@@ -1327,6 +1333,125 @@ static double AdvanceWheelRoll( double angle, long z_speed, float fElapsedTime )
 }
 
 
+/*	--- Opponent landing sparks -----------------------------------------------------------
+
+	The player's sparks are the Amiga's, drawn flat in screen space from the bottom of the
+	view; there is no way to show something happening to a car out in the world with them.
+	So a landing hard enough to bottom the opponent's suspension throws a burst of
+	world-space sparks off the wheel that took it - see Particles.cpp.
+
+	Read from the raw, unclamped travel rather than from the CAR_SUSPENSION the renderer
+	uses: BuildSuspension() clamps to the travel limit, so a wheel that is merely loaded
+	and one that has been slammed through its stroke look identical by the time the model
+	is built.  How far past the limit the raw figure goes is exactly the ferocity wanted.
+
+	Edge triggered, and on the simulation's clock rather than the renderer's: nothing here
+	changes until the physics steps, so an unchanged compression means no new information
+	and the frame is skipped entirely.  Without that a 120Hz machine would throw three
+	bursts for a landing that a 50Hz one throws once.								*/
+
+// Where the raw travel has to reach to count as bottomed out, and how far past that it has
+// to go to count as a maximum-ferocity landing.
+#define	IMPACT_TRIGGER		((SUSP_MAX_TRAVEL * 9) / 10)
+#define	IMPACT_FULL_SCALE	((SUSP_MAX_TRAVEL * 3) / 2)
+
+extern GameModeType GameMode;
+
+static void EmitWheelSparks( float local_x, float local_z, float ferocity )
+{
+	D3DXVECTOR3 local, world;
+
+	// The contact patch, where the wheel quads meet the road - see car_rest[]
+	local.x = local_x;
+	local.y = static_cast<float>(-VCAR_HEIGHT/4);
+	local.z = local_z;
+
+	OpponentPointToWorld(&local, &world);
+	EmitImpactSparks(&world, ferocity);
+}
+
+
+static void CheckOpponentImpacts( long rear_left, long rear_right, long front )
+{
+	// The raw compressions the sparks are judged on, and what they were last time the
+	// simulation moved.  SUSP_OPPONENT_REST is 0, so rest is a raw travel of 0 too.
+	static long prev_raw[3] = {0, 0, 0};
+	static bool prev_valid = false;
+
+	const long raw[3] = { SuspensionTravelRaw(rear_left,  SUSP_OPPONENT_REST,
+											  SUSP_OPPONENT_DROOP, SUSP_OPPONENT_LOAD),
+						  SuspensionTravelRaw(rear_right, SUSP_OPPONENT_REST,
+											  SUSP_OPPONENT_DROOP, SUSP_OPPONENT_LOAD),
+						  SuspensionTravelRaw(front,      SUSP_OPPONENT_REST,
+											  SUSP_OPPONENT_DROOP, SUSP_OPPONENT_LOAD) };
+
+	/*	Only during a race, and only when there is a car out there to land: practise parks
+		the opponent out of sight, and the track preview does not run the physics at all,
+		so its compressions are whatever the last race left behind.				*/
+	if ((GameMode != GAME_IN_PROGRESS) || (opponentsID == NO_OPPONENT))
+	{
+		prev_valid = false;
+		return;
+	}
+
+	// Nothing has changed since the last frame, so the physics has not stepped
+	if (prev_valid && (raw[0] == prev_raw[0]) && (raw[1] == prev_raw[1]) && (raw[2] == prev_raw[2]))
+		return;
+
+	const bool was_valid = prev_valid;
+	const long was[3] = { prev_raw[0], prev_raw[1], prev_raw[2] };
+
+	prev_raw[0] = raw[0]; prev_raw[1] = raw[1]; prev_raw[2] = raw[2];
+	prev_valid = true;
+
+	if (!was_valid)
+		return;			// first step after a reset: no edge to measure yet
+
+	/*	A wheel in the air reads as fully compressed over the peak of a jump, because the
+		road height under it stopped meaning anything the moment it left.		*/
+	if (!OpponentTouchingRoad())
+		return;
+
+	for (long wheel = 0; wheel < 3; wheel++)
+	{
+		if ((raw[wheel] < IMPACT_TRIGGER) || (was[wheel] >= IMPACT_TRIGGER))
+			continue;	// not bottomed, or was already bottomed and has stayed there
+
+		float ferocity = static_cast<float>(raw[wheel] - IMPACT_TRIGGER)
+						 / static_cast<float>(IMPACT_FULL_SCALE);
+		if (ferocity > 1.0f) ferocity = 1.0f;
+
+		// The gentlest qualifying landing still gets a token spark or two
+		ferocity = 0.15f + (0.85f * ferocity);
+
+		const float rear_x  = static_cast<float>(WHEEL_REAR_OUTER + WHEEL_REAR_INNER) / 2.0f;
+		const float front_x = static_cast<float>(WHEEL_FRONT_OUTER + WHEEL_FRONT_INNER) / 2.0f;
+		const float rear_z  = static_cast<float>(-VCAR_LENGTH/2);
+		const float front_z = static_cast<float>(VCAR_LENGTH/2);
+
+		switch (wheel)
+		{
+			case 0:		// rear left
+				EmitWheelSparks(-rear_x, rear_z, ferocity);
+				break;
+
+			case 1:		// rear right
+				EmitWheelSparks(rear_x, rear_z, ferocity);
+				break;
+
+			default:
+				/*	The physics is a tripod: the opponent's two front wheels run off one
+					shared compression, so there is no telling them apart.  Both of them
+					spark, a little more lightly each, which is what a nose-first landing
+					looks like anyway.										*/
+				EmitWheelSparks(-front_x, front_z, ferocity * 0.7f);
+				EmitWheelSparks( front_x, front_z, ferocity * 0.7f);
+				break;
+		}
+	}
+}
+
+
 void UpdateCarSuspension (IDirect3DDevice9 *pd3dDevice, float fElapsedTime)
 {
 CAR_SUSPENSION susp;
@@ -1349,6 +1474,7 @@ static double player_roll = 0.0;
 
 	// Opponent: the other way round - the rear pair are free, the front wheels share
 	GetOpponentWheelCompression(&rear_left, &rear_right, &front);
+	CheckOpponentImpacts(rear_left, rear_right, front);
 	BuildSuspension(&susp,
 					OPPONENT_TRAVEL(rear_left),
 					OPPONENT_TRAVEL(rear_right),

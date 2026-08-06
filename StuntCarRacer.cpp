@@ -16,6 +16,7 @@
 #include "Backdrop.h"
 #include "Track.h"
 #include "Car.h"
+#include "Particles.h"
 #include "Car_Behaviour.h"
 #include "Physics_FloatV2.h"
 #include "Sim_Trace.h"
@@ -1559,6 +1560,12 @@ long x_offset, y_offset, z_offset;
 //--------------------------------------------------------------------------------------
 static D3DXMATRIX matWorldTrack, matWorldCar, matWorldOpponentsCar;
 
+/*	The interpolated state matWorldOpponentsCar was last built from, kept so points on the
+	opponent's car can be placed in world space without reading the matrix back - see
+	OpponentPointToWorld().															*/
+static float opp_render_x_angle = 0.0f, opp_render_y_angle = 0.0f, opp_render_z_angle = 0.0f;
+static float opp_render_pos_x = 0.0f, opp_render_pos_y = 0.0f, opp_render_pos_z = 0.0f;
+
 
 /*	======================================================================================= */
 /*	Function:		WorldF																	*/
@@ -1583,6 +1590,22 @@ static inline float WorldF( long fixed_point_position )
 {
 	return static_cast<float>(static_cast<double>(fixed_point_position)
 							  / static_cast<double>(1L << LOG_PRECISION));
+}
+
+
+/*	The eye, in the same world space the cars and the track are drawn in - the position the
+	view matrix is built to sit at, with viewpoint1_y's sign flip already applied (see the
+	translation at the head of the GAME_IN_PROGRESS branch of OnFrameMove).  The world-space
+	particles size themselves against the distance to it.
+
+	Only meaningful during the race: the menu and preview cameras shift viewpoint1_x and _z
+	down by LOG_PRECISION in place before their view matrix is built, so this would read
+	them far too small there.														*/
+void GetEyeWorldPosition( D3DXVECTOR3 *out )
+{
+	out->x = WorldF(viewpoint1_x);
+	out->y = WorldF(-viewpoint1_y);
+	out->z = WorldF(viewpoint1_z);
 }
 
 
@@ -1815,6 +1838,49 @@ D3DXMATRIX matRot, matTemp, matTrans;
 	D3DXMatrixTranslation( &matTrans, WorldF(opp.x), WorldF(-opp.y)+VCAR_HEIGHT/4, WorldF(opp.z) );
 	// Combine the rotation and translation matrices to complete the world matrix
 	D3DXMatrixMultiply(&matWorldOpponentsCar, &matRot, &matTrans);
+
+	/*	Kept for OpponentPointToWorld() below, which has to place points on the car without
+		being able to read the matrix back out.									*/
+	opp_render_z_angle = opp.z_angle;
+	opp_render_x_angle = opp.x_angle;
+	opp_render_y_angle = opp.y_angle;
+	opp_render_pos_x = WorldF(opp.x);
+	opp_render_pos_y = WorldF(-opp.y) + VCAR_HEIGHT/4;
+	opp_render_pos_z = WorldF(opp.z);
+}
+
+
+/*	Put a point in the opponent car's model space into world space - the renderer needs this
+	to find where a wheel actually is, so a landing can throw its sparks from the right
+	corner of the car.
+
+	This repeats what SetOpponentsCarWorldTransform() has just built rather than reusing it,
+	because there is no way to read a component back out of a D3DXMATRIX portably: it is a
+	real DirectX matrix on Windows and a glm::mat4 on the portable path (dx_linux.h), and
+	nothing in the shim exposes an element or a transform-a-point call.  The inputs are the
+	same stashed values, so the two can only ever disagree about convention, not about where
+	the car is - and that shows up immediately as sparks flying off a wheel that isn't
+	there.
+
+	D3DX rotation matrices are the row-vector form and are applied as p * Rz * Rx * Ry, so
+	as column vectors that is Rz first, then X, then Y, each the conventional way round.	*/
+void OpponentPointToWorld( const D3DXVECTOR3 *local, D3DXVECTOR3 *out )
+{
+	float x = local->x, y = local->y, z = local->z;
+	float s, c, t;
+
+	s = sinf(opp_render_z_angle); c = cosf(opp_render_z_angle);
+	t = (x * c) - (y * s);  y = (x * s) + (y * c);  x = t;
+
+	s = sinf(opp_render_x_angle); c = cosf(opp_render_x_angle);
+	t = (y * c) - (z * s);  z = (y * s) + (z * c);  y = t;
+
+	s = sinf(opp_render_y_angle); c = cosf(opp_render_y_angle);
+	t = (z * c) - (x * s);  x = (z * s) + (x * c);  z = t;
+
+	out->x = x + opp_render_pos_x;
+	out->y = y + opp_render_pos_y;
+	out->z = z + opp_render_pos_z;
 }
 
 
@@ -2614,6 +2680,9 @@ static void HandleTrackPreviewInput( void )
 		// New race: the opponent is about to be placed, not driven, so throw away the
 		// pair of states the renderer blends between.
 		OpponentStateReset();
+
+		// Likewise, sparks thrown on the last lap must not still be hanging in the air
+		ResetWorldParticles();
 
 		// Hang the car on the chains now, not on the first physics step: CarBehaviour
 		// only runs when a step is due, so the first render frame (or two) of the race
@@ -3757,6 +3826,13 @@ HRESULT hr;
 				pd3dDevice->SetTransform( D3DTS_WORLD, &matWorldOpponentsCar );
 				DrawOpponentsCar(pd3dDevice);
 
+				/*	The opponent's landing sparks are world-space geometry, so they go
+					in with the track's identity transform and before DrawSceneParticles(),
+					which turns the depth test off and plots flat into screen space.	*/
+				pd3dDevice->SetTransform( D3DTS_WORLD, &matWorldTrack );
+				UpdateWorldParticles(fElapsedTime);
+				DrawWorldParticles(pd3dDevice);
+
 				// Sparks and dust go into the scene, so they must be drawn before the
 				// cockpit is laid over the top of it
 				if (GameMode == GAME_IN_PROGRESS) DrawSceneParticles();
@@ -4076,6 +4152,7 @@ void CALLBACK OnLostDevice( void *pUserContext )
 	FreeTrackVertexBuffer();
 	FreeShadowVertexBuffer();
 	FreeCarVertexBuffer();
+	FreeWorldParticleVertexBuffer();
 	FreeCockpitVertexBuffer();
 
 	if (g_pAtlas) g_pAtlas->Release(), g_pAtlas = NULL;
@@ -4100,6 +4177,7 @@ void CALLBACK OnDestroyDevice( void *pUserContext )
 	FreeTrackVertexBuffer();
 	FreeShadowVertexBuffer();
 	FreeCarVertexBuffer();
+	FreeWorldParticleVertexBuffer();
 	FreeCockpitVertexBuffer();
 }
 

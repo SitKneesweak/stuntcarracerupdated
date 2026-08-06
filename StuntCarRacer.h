@@ -70,6 +70,14 @@ extern bool bWorldStepDue;
 // Duration of one such step, in seconds.
 extern double gWorldStepSeconds;
 
+// The race camera's eye point, in world units.  Only valid while a race is running - see
+// the note on the definition.
+extern void GetEyeWorldPosition( D3DXVECTOR3 *out );
+
+// Place a point given in the opponent car's model space into world space, using the same
+// interpolated render state its world matrix was built from this frame.
+extern void OpponentPointToWorld( const D3DXVECTOR3 *local, D3DXVECTOR3 *out );
+
 // Debug
 extern long VALUE1, VALUE2, VALUE3;
 
