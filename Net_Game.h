@@ -36,9 +36,9 @@ enum NetCarOwner
 // --- Session lifetime ------------------------------------------------------
 // `now` is DXUTGetTime(), the same monotonic clock Net_Lockstep is given.
 
-// Bind and wait for a joiner on `trackID`. The host chooses track, seed and dt;
-// the joiner adopts all three.
-bool NetGameHost(int trackID, double now);
+// Bind and wait for a joiner on `trackID`, to be raced in `superLeague`. The
+// host chooses track, league, seed and dt; the joiner adopts all four.
+bool NetGameHost(int trackID, bool superLeague, double now);
 
 // Connect out to `address` (a name or a v4/v6 literal). Blocking DNS, so this
 // is a menu call, never a frame-loop one.
@@ -69,6 +69,13 @@ inline NetCarOwner NetGameRemoteCar() { return NetGameLocalIsHost() ? NetCar_Joi
 // The agreed track. Valid once connected; before that it is the host's choice
 // (host side) or -1 (joiner side, which has not been told yet).
 int NetGameTrack();
+
+// The agreed league, on the same terms as NetGameTrack(): the host's own choice
+// before a joiner arrives, and the host's choice on both machines afterwards.
+// This is a simulation input - see NetSessionConfig::superLeague - so the race
+// must be started from this and not from whatever league the local career or
+// menu is sitting in.
+bool NetGameSuperLeague();
 
 // One line for the waiting screen and the in-race overlay. Never NULL, and
 // always safe to print — it says what the session is doing and, on failure,

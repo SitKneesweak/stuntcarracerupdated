@@ -67,7 +67,13 @@ const uint16_t kNetProtocolVersion = 1;
 //    (UpdateSwingRollBetweenFrames) instead of being held. The crane sequence is
 //    frame-exact either way, but the roll feeds the lift direction, so the two
 //    versions drift apart while a car is on the chains.
-const uint16_t kNetSimVersion = 3;
+// 4: the league is part of the handshake. Super League is not a cosmetic
+//    choice - it moves engine_power, boost_unit_value, road_cushion_value and
+//    the opponent speed tables - so two peers set to different leagues were
+//    running two different simulations and desynced within half a second of the
+//    first throttle. A version 3 peer does not send the flag and would still be
+//    racing whatever its own menu happened to say.
+const uint16_t kNetSimVersion = 4;
 
 // Steps of input delay. See the header comment.
 const int kInputDelay = 3;
@@ -112,7 +118,14 @@ struct NetSessionConfig
     uint16_t track;     // which circuit
     uint16_t opponent;  // which opponent car/driver slot the remote player uses
 
-    NetSessionConfig() : dt(1.0 / 60.0), seed(0), track(0), opponent(0) {}
+    // bSuperLeague. A sim input, not a presentation one: it sets engine_power,
+    // boost_unit_value, road_cushion_value and which half of the opponent speed
+    // tables is read. Both peers must be in the same league or they are not
+    // running the same race.
+    uint8_t  superLeague;
+
+    NetSessionConfig()
+        : dt(1.0 / 60.0), seed(0), track(0), opponent(0), superLeague(0) {}
 };
 
 // Why a session ended or was refused, for the UI. Kept as an enum rather than a

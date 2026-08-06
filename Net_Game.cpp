@@ -21,6 +21,7 @@ struct GameSession
     bool     announced;     // the "just connected" edge has been reported once
     bool     racing;
     int      track;         // -1 until the joiner is told
+    bool     superLeague;   // likewise adopted from the host
     uint32_t step;
 
     char     status[160];
@@ -32,9 +33,10 @@ struct GameSession
         active    = false;
         isHost    = false;
         announced = false;
-        racing    = false;
-        track     = -1;
-        step      = 0;
+        racing      = false;
+        track       = -1;
+        superLeague = false;
+        step        = 0;
         status[0] = '\0';
     }
 };
@@ -50,13 +52,14 @@ void UnlockSettings()
 
 } // namespace
 
-bool NetGameHost(int trackID, double now)
+bool NetGameHost(int trackID, bool superLeague, double now)
 {
     NetGameCancel();
 
     NetSessionConfig cfg;
-    cfg.dt    = gFloatV2Dt;
-    cfg.track = (uint16_t)trackID;
+    cfg.dt          = gFloatV2Dt;
+    cfg.track       = (uint16_t)trackID;
+    cfg.superLeague = superLeague ? 1 : 0;
     // The seed has to be agreed, not negotiated, and the host is the one who
     // decides. Derived from the clock so two sessions on the same track are not
     // identical races; the joiner is told the value and never rolls its own.
@@ -72,9 +75,10 @@ bool NetGameHost(int trackID, double now)
     }
 
     gG.Reset();
-    gG.active = true;
-    gG.isHost = true;
-    gG.track  = trackID;
+    gG.active      = true;
+    gG.isHost      = true;
+    gG.track       = trackID;
+    gG.superLeague = superLeague;
     // The joining player has to type this machine's address, and nothing else
     // in the game ever tells them what it is, so the host screen has to. Over
     // the internet it is the router's public address that matters and UDP
@@ -141,13 +145,15 @@ bool NetGamePoll(double now)
 
             // The joiner adopts the host's settings wholesale. Agreeing is the
             // whole requirement; a negotiation would only add ways to disagree.
-            gG.track     = (int)cfg.track;
-            gFloatV2Dt   = cfg.dt;
+            gG.track       = (int)cfg.track;
+            gG.superLeague = (cfg.superLeague != 0);
+            gFloatV2Dt     = cfg.dt;
             gUseFloatV2Physics = true;
 
             snprintf(gG.status, sizeof(gG.status),
-                     "Connected as %s - track %d.",
-                     gG.isHost ? "host" : "joiner", gG.track);
+                     "Connected as %s - track %d, %s league.",
+                     gG.isHost ? "host" : "joiner", gG.track,
+                     gG.superLeague ? "super" : "standard");
             return true;
         }
         if (gG.racing && st == NetState_Stalled)
@@ -198,6 +204,8 @@ bool NetGameLocalIsHost() { return gG.isHost; }
 
 int NetGameTrack() { return gG.track; }
 
+bool NetGameSuperLeague() { return gG.superLeague; }
+
 const char* NetGameStatusLine() { return gG.status; }
 
 bool NetGameFailed()
@@ -227,6 +235,16 @@ void NetGameRaceBegun()
 
     gG.step   = 0;
     gG.racing = true;
+
+    /*  Everything both peers had to agree on, on one line, at the moment it starts
+        mattering. A mismatch in any of it is a desync a second or two later, and
+        from inside the race they all look alike -- so print the inputs rather than
+        leaving the reader to infer them from the divergence. */
+    const NetSessionConfig& cfg = NetGetConfig();
+    printf("net: race begins as %s -- track %u, %s league, dt %.9f, seed %08x\n",
+           gG.isHost ? "host" : "joiner", (unsigned)cfg.track,
+           cfg.superLeague ? "super" : "standard", cfg.dt, (unsigned)cfg.seed);
+    fflush(stdout);
 
     // Both peers seed from the same value, so every SCR_Rand() draw in the sim
     // agrees. This is the whole reason Det_Rand exists.

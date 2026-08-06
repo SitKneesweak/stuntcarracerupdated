@@ -121,6 +121,13 @@ static int	gSingleField    = 0;		// which of the three rows left/right is changi
 /*	the other one - the Super League car is a different car to learn a track in, and		*/
 /*	there was no way to drive it without starting a season in it.							*/
 static bool	gPractiseSuper  = false;
+/*	The league a hosted race is run in.  The host decides for both machines, so this	*/
+/*	goes out in the handshake and the joiner's own league is never consulted.		*/
+static bool	gNetSuper       = false;
+/*	Why the last two-player race stopped, when it was the network that stopped it rather	*/
+/*	than the player.  Shown on the multiplayer menu and cleared as soon as it has been		*/
+/*	acted on, so it explains the race you just lost and never an older one.					*/
+static char	gNetAbortMessage[160] = "";
 
 /*	True when the race that just started came off the Single Race screen, so its result		*/
 /*	comes back here rather than to the SELECT menu.											*/
@@ -303,6 +310,7 @@ void MenuScreensInit( void )
 	gRaceSuperLeague = gLeagueSuperLeague;
 	gSingleSuper     = gLeagueSuperLeague;
 	gPractiseSuper   = gLeagueSuperLeague;
+	gNetSuper        = gLeagueSuperLeague;
 
 	/*	The Amiga puts the game-type menu up first and only then asks for a name.		*/
 	MenuScreensGoto(MS_MAIN);
@@ -1335,6 +1343,39 @@ static void DrawLoadSave( void )
 /*	in its address.																			*/
 /*	======================================================================================= */
 
+/*	Print `text` centred across rows `firstRow`..`lastRow`, wrapping it by hand: the		*/
+/*	network screens print sentences rather than menu entries, and a status line or a		*/
+/*	failure reason routinely runs longer than the panel is wide.  Anything that will not	*/
+/*	fit in the rows given is dropped rather than spilling over the bottom of the panel,	*/
+/*	so these messages are written with the important half first.							*/
+static void DrawWrappedLines( const char *text, int firstRow, int lastRow )
+	{
+	const int   width = 34;
+	const char *s     = text;
+	int         row   = firstRow;
+
+	while ((*s != '\0') && (row <= lastRow))
+		{
+		char line[64];
+		int take = (int)strlen(s);
+		if (take > width)
+			{
+			/*	Break on the last space that fits, so words stay whole.			*/
+			take = width;
+			while ((take > 0) && (s[take] != ' '))
+				--take;
+			if (take == 0)
+				take = width;
+			}
+		snprintf(line, sizeof(line), "%.*s", take, s);
+		AmigaMenuPrintCentred(row++, line);
+
+		s += take;
+		while (*s == ' ')
+			++s;
+		}
+	}
+
 static void DrawMultiplayerMenu( void )
 	{
 	static const char *entries[2] =
@@ -1350,6 +1391,15 @@ static void DrawMultiplayerMenu( void )
 	/*	these screens sticks to letters, digits, dots and dashes for that reason.		*/
 	AmigaMenuSetInk(AMIGA_INK_TEXT);
 	AmigaMenuPrintCentred(23, "One hosts - the other joins.");
+
+	/*	Why the last race ended, if the network ended it.  Wrapped the same way the		*/
+	/*	waiting screen wraps its status line, and in the same red.						*/
+	if (gNetAbortMessage[0] != '\0')
+		{
+		AmigaMenuSetInk(AMIGA_INK_RED);
+		DrawWrappedLines(gNetAbortMessage, 17, 22);
+		AmigaMenuSetInk(AMIGA_INK_TEXT);
+		}
 	}
 
 static void DrawMultiplayerTrack( void )
@@ -1362,9 +1412,21 @@ static void DrawMultiplayerTrack( void )
 		AmigaMenuBar(row, i == gSelection);
 		AmigaMenuSetInk(AMIGA_INK_BAR_TEXT);
 		AmigaMenuPrintF(MENU_ENTRY_COLUMN, row, "%d. The %s", i + 1, kTrackNames[i]);
+
+		/*	The league the race runs in, laid out exactly as the time trial screen	*/
+		/*	does it and for the same reason - eight entries fill every row the panel	*/
+		/*	has, so there is nowhere to put a line of its own.  It has to be on this	*/
+		/*	screen somewhere: the host picks the league for BOTH machines, and it is	*/
+		/*	not decoration - engine power, boost, the road cushion and the opponent	*/
+		/*	speed table all key off it.												*/
+		if (i == gSelection)
+			{
+			const char *league = gNetSuper ? "SUPER" : "LEAGUE";
+			AmigaMenuPrintF(36 - 2 - (int)strlen(league), row, "> %s", league);
+			}
 		}
 	AmigaMenuSetInk(AMIGA_INK_TEXT);
-	AmigaMenuPrintCentred(24, "You are hosting - pick the track.");
+	AmigaMenuPrintCentred(24, "Pick track - left/right for league.");
 	}
 
 static void DrawMultiplayerJoin( void )
@@ -1396,34 +1458,10 @@ static void DrawMultiplayerWait( void )
 	AmigaMenuSetInk(AMIGA_INK_TEXT);
 	AmigaMenuPrintAt(14, 11, "Multiplayer");
 
-	/*	The status line can run longer than the panel is wide, so wrap it by hand onto	*/
-	/*	up to three rows rather than letting it disappear off the edge.					*/
-	const char *s = scr::NetGameStatusLine();
-	const int   width = 34;
-	int row = 15;
 	if (scr::NetGameFailed())
 		AmigaMenuSetInk(AMIGA_INK_RED);
 
-	while ((*s != '\0') && (row < 21))
-		{
-		char line[64];
-		int take = (int)strlen(s);
-		if (take > width)
-			{
-			/*	Break on the last space that fits, so words stay whole.			*/
-			take = width;
-			while ((take > 0) && (s[take] != ' '))
-				--take;
-			if (take == 0)
-				take = width;
-			}
-		snprintf(line, sizeof(line), "%.*s", take, s);
-		AmigaMenuPrintCentred(row++, line);
-
-		s += take;
-		while (*s == ' ')
-			++s;
-		}
+	DrawWrappedLines(scr::NetGameStatusLine(), 15, 20);
 
 	AmigaMenuSetInk(AMIGA_INK_TEXT);
 	AmigaMenuPrintCentred(23, "ESC to cancel.");
@@ -1645,9 +1683,13 @@ static void EnterMultiplayerRace( void )
 	gRaceIsSingle = false;
 	gRaceTrack    = scr::NetGameTrack();
 
-	/*	Both peers have to agree on the league, and nothing in the handshake carries it,	*/
-	/*	so a network race is run under the career's own - as it always has been.			*/
-	gRaceSuperLeague = gLeagueSuperLeague;
+	/*	The league comes out of the handshake, not out of this machine's career.  It is	*/
+	/*	a simulation input - engine power, boost, road cushion and which half of the		*/
+	/*	opponent speed table is read - so two peers sitting in different leagues were	*/
+	/*	running two different physics and desynced within half a second of the first		*/
+	/*	throttle, which surfaced as the other player freezing and the AI taking their		*/
+	/*	car over.  The host decides; this machine does as it is told.					*/
+	gRaceSuperLeague = scr::NetGameSuperLeague();
 
 	SetRaceOpponent(MP_OPPONENT_DRIVER);
 
@@ -1696,6 +1738,11 @@ static void HandleAddressEntry( int key )
 
 static void ActivateMultiplayerMenu( void )
 	{
+	/*	Whatever ended the last race has been read by now - the player is starting		*/
+	/*	another one.  Clearing it here rather than on a timer keeps it up for as long		*/
+	/*	as it takes to read, which after a desync mid-race is the point of it.			*/
+	gNetAbortMessage[0] = '\0';
+
 	switch (gSelection)
 		{
 		case 0:												// Host a Race
@@ -1721,7 +1768,7 @@ void MenuScreensTick( double now )
 		if (gNetAutoHostTrack >= 0)
 			{
 			autoDone = true;
-			if (scr::NetGameHost(gNetAutoHostTrack, now))
+			if (scr::NetGameHost(gNetAutoHostTrack, gNetSuper, now))
 				MenuScreensGoto(MS_MP_WAIT);
 			}
 		else if (gNetAutoJoinAddress[0] != '\0')
@@ -2045,6 +2092,13 @@ void MenuScreensKey( int key )
 		return;
 		}
 
+	/*	Same arrangement on the host's track screen, and for the same reason.			*/
+	if ((gScreen == MS_MP_TRACK) && ((key == KEY_LEFT) || (key == KEY_RIGHT)))
+		{
+		gNetSuper = !gNetSuper;
+		return;
+		}
+
 	/*	The Hall of Fame is two tables, one per league, and left/right turns the page.	*/
 	if ((gScreen == MS_HALL_OF_FAME) && ((key == KEY_LEFT) || (key == KEY_RIGHT)))
 		{
@@ -2203,9 +2257,11 @@ void MenuScreensKey( int key )
 		case MS_MP_MENU:		ActivateMultiplayerMenu();			break;
 
 		case MS_MP_TRACK:
-			/*	The host's last choice before it opens a port: track, seed and dt	*/
-			/*	all go out in the handshake and the joiner adopts them wholesale.	*/
-			if (scr::NetGameHost(gSelection, DXUTGetTime()))
+			/*	The host's last choice before it opens a port: track, league, seed	*/
+			/*	and dt all go out in the handshake and the joiner adopts them		*/
+			/*	wholesale.  The league is the host's choice - the joiner's own is	*/
+			/*	ignored, because the two must match to be one race at all.			*/
+			if (scr::NetGameHost(gSelection, gNetSuper, DXUTGetTime()))
 				MenuScreensGoto(MS_MP_WAIT);
 			break;
 
@@ -2219,6 +2275,20 @@ void MenuScreensKey( int key )
 /*																							*/
 /*	Description:	Score the race that just ended and pick the screen to come back to.		*/
 /*	======================================================================================= */
+
+void MenuScreensNetRaceAborted( const char *reason )
+	{
+	gActive = true;
+
+	/*	The session is already gone by the time this is called - the caller cancelled it	*/
+	/*	as it unwound the race - so the reason has to be carried in rather than read		*/
+	/*	back out of it.																	*/
+	snprintf(gNetAbortMessage, sizeof(gNetAbortMessage), "%s",
+			 (reason != NULL) && (reason[0] != '\0')
+				? reason : "The two-player race ended.");
+
+	MenuScreensGoto(MS_MP_MENU);
+	}
 
 void MenuScreensAbandonRace( void )
 	{

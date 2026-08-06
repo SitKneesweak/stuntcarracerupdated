@@ -93,6 +93,12 @@ bool MenuScreensRaceIsLeague( void );
 /*	league race returns to its fixture screen so it can be run again.						*/
 void MenuScreensAbandonRace( void );
 
+/*	A two-player race that has been ended by the network rather than by the player - the		*/
+/*	sims desynced, the link dropped, or the other player quit.  `reason` is the session's	*/
+/*	own explanation, taken before the session was cancelled, and is shown on the				*/
+/*	multiplayer menu.  Call after unwinding the race; this only puts the menus back.			*/
+void MenuScreensNetRaceAborted( const char *reason );
+
 /*	Record a lap and/or race time against a track for the Hall of Fame.  The league the		*/
 /*	race ran under is part of the record: the Super League is a different car over the		*/
 /*	same track, so its times are kept apart from the league's rather than beating them.		*/

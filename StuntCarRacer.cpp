@@ -1830,6 +1830,11 @@ static void HideOpponentsCar( void )
 }
 
 
+/*	Defined further down with the rest of the race-exit handling, but needed by the frame
+	loop above it: a network session that fails mid-race has to unwind the race there.	*/
+static void ReturnToMenus( void );
+
+
 static void StopEngineSound( void )
 {
 	if (engineSoundPlaying)
@@ -1893,6 +1898,28 @@ static float lastFrame = 0.0f;
 		starts the race when the handshake lands - so it runs whether the menus are up
 		or a race is in progress.												*/
 	MenuScreensTick( DXUTGetTime() );
+
+	/*	A session that dies under a running race - desynced, dropped, or the other player
+		quitting - must end the race, and must say so.  Left alone it does neither: the
+		lockstep step loop and the AI opponent step are both gated on NetGameRacing()
+		(see "Car behaviour" below), so a failure silently stops the remote car dead and
+		hands its slot back to the AI, which then drives off.  What the player sees is
+		the other driver freezing and turning into a computer opponent, with the reason
+		sitting unread in NetGameStatusLine() - that line is only ever drawn on the
+		waiting screen.  Checked here, before anything is simulated, so not one more
+		step is taken by either car.											*/
+	if (scr::NetGameSessionActive() && scr::NetGameFailed() &&
+		((GameMode == GAME_IN_PROGRESS) || (GameMode == GAME_OVER)))
+		{
+		/*	Copied out first: ReturnToMenus cancels the session, and cancelling clears
+			the status line that explains what went wrong.						*/
+		char why[160];
+		snprintf(why, sizeof(why), "%s", scr::NetGameStatusLine());
+
+		ReturnToMenus();					// cancels the session and unwinds the race
+		MenuScreensNetRaceAborted(why);
+		return;
+		}
 
 	/*	Determinism trace (--simtrace).  Drive the menus straight into a race, then take
 		the controls off the keyboard: two hand-driven runs can never be diffed against

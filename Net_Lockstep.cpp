@@ -314,6 +314,7 @@ void SendWelcome(const NetAddress& to, uint32_t salt)
     w.U32(gS.cfg.seed);
     w.U16(gS.cfg.track);
     w.U16(gS.cfg.opponent);
+    w.U8(gS.cfg.superLeague);
     if (w.Ok())
         SendTo(to, buf, w.Size());
 }
@@ -459,6 +460,7 @@ void HandleWelcome(Reader& r, const NetAddress& from, double now)
     uint32_t seed    = r.U32();
     uint16_t track   = r.U16();
     uint16_t opp     = r.U16();
+    uint8_t  league  = r.U8();
     if (r.Bad())
         return;
 
@@ -483,8 +485,9 @@ void HandleWelcome(Reader& r, const NetAddress& from, double now)
     // negotiating would only create ways to disagree.
     gS.cfg.dt       = dt;
     gS.cfg.seed     = seed;
-    gS.cfg.track    = track;
-    gS.cfg.opponent = opp;
+    gS.cfg.track       = track;
+    gS.cfg.opponent    = opp;
+    gS.cfg.superLeague = (league != 0) ? 1 : 0;
 
     gS.peer      = from;
     gS.peerKnown = true;
