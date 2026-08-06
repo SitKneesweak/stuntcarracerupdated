@@ -1905,9 +1905,15 @@ static long difference_between_players = 0;
 static long smallest_distance_between_players = 0;
 
 
+/*	Where each piece starts, measured around the road from piece 0, and the length of the	*/
+/*	whole lap - both in the units difference_between_players is in, which are 32 to a road	*/
+/*	segment.  File-static rather than local to CalculateDistancesBetweenPlayers because		*/
+/*	RoadLapDistance/CarDistanceFromLine hand the same numbers to the margin-of-victory		*/
+/*	calculation at the end of a race.														*/
+static long distances_around_road[MAX_PIECES_PER_TRACK], total_road_distance;
+
 static void CalculateDistancesBetweenPlayers( void )
 {
-static long distances_around_road[MAX_PIECES_PER_TRACK], total_road_distance;
 static long previousTrackID = NO_TRACK;
 
 //	VALUE1 = player_current_piece;
@@ -1999,6 +2005,46 @@ long result, p, o;
 
 	result = difference_between_players;
 	return(result);
+}
+
+
+/*	======================================================================================= */
+/*	Function:		RoadLapDistance,														*/
+/*					CarDistanceFromLine														*/
+/*																							*/
+/*	Description:	The length of a lap, and how far a car is round the current one,			*/
+/*					both in the road units CalculateDistancesBetweenPlayers works in			*/
+/*					(32 per segment).  Used to turn the gap at the flag into a time.			*/
+/*	======================================================================================= */
+
+long RoadLapDistance( void )
+{
+	return(total_road_distance);
+}
+
+
+long CarDistanceFromLine( long car, long start_finish_piece )
+{
+long piece, into, d;
+
+	if (car == PLAYER)
+		{
+		piece = player_current_piece;
+		into  = players_distance_into_section;
+		}
+	else
+		{
+		piece = opponents_current_piece;
+		into  = opponents_distance_into_section;
+		}
+
+	d = (distances_around_road[piece] + (into >> 3))
+	  - distances_around_road[start_finish_piece];
+
+	if (d < 0)
+		d += total_road_distance;
+
+	return(d);
 }
 
 

@@ -32,6 +32,7 @@
 #include "Net_Game.h"
 #include "Net_Lockstep.h"
 #include "version.h"
+#include "Det_Rand.h"
 
 #ifdef SCR_PORTABLE
 #include <unistd.h>
@@ -373,6 +374,14 @@ static long InitialiseData( void )
 	// Seed the random-number generator with current time so that
 	// the numbers will be different every time we run
 	srand( (unsigned)time( NULL ) );
+
+	// The simulation's own stream needs the same treatment: it starts from a
+	// fixed constant, so without this the first draw of a session is always the
+	// same number and 'Random' track in a single race always lands on the same
+	// track. A netplay session re-seeds both peers from the shared seed
+	// (Net_Game.cpp) and --simtrace re-seeds from the trace, so this only
+	// decides the single-player stream.
+	scr::det::SeedRand( (uint32_t)time( NULL ) );
 
 	success = TRUE;
 
@@ -3327,7 +3336,8 @@ HRESULT hr;
 
         GameMode = TRACK_MENU;
         MenuScreensRaceFinished( raceWon != FALSE, playerBestLap,
-                                 bBestLapTimeSet ? bestLapTime : 0.0, raceTime );
+                                 bBestLapTimeSet ? bestLapTime : 0.0, raceTime,
+                                 bRaceMarginSet ? raceMarginTime : 0.0 );
     }
 
     // The Amiga menus replace the display entirely, exactly as they did on the Amiga, so

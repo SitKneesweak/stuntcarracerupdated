@@ -43,9 +43,12 @@
 #define COCKPIT_SIDE_HEIGHT         153.0f  // Side panel height
 #define COCKPIT_RIGHT_X_OFFSET      279.0f  // Right panel X offset
 #define COCKPIT_DAMAGE_HEIGHT       8.0f    // Damage indicator height
-#define COCKPIT_HOLE_X_OFFSET       47.0f   // First hole X offset
+// Hole slots: copy.damage.graphic places slot n at word ((3n+6)>>1), i.e. x = 24n+48,
+// and there are ten of them.  Holes are filled from slot 9 leftwards - see Car.cpp.
+#define COCKPIT_HOLE_X_OFFSET       48.0f   // X offset of hole slot 0
 #define COCKPIT_HOLE_SPACING        24.0f   // Spacing between holes
 #define COCKPIT_HOLE_WIDTH          12.0f   // Width of hole graphic (half)
+#define COCKPIT_HOLE_SLOTS          10      // Number of hole positions along the bar
 #define COCKPIT_SPEEDBAR_X_OFFSET   196.0f  // Speed bar X offset
 #define COCKPIT_SPEEDBAR_Y_OFFSET   61.0f   // Speed bar Y offset from bottom
 #define COCKPIT_SPEEDBAR_WIDTH      242.0f  // Speed bar maximum width

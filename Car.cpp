@@ -1624,8 +1624,11 @@ void DrawCockpit (IDirect3DDevice9 *pd3dDevice)
 		float damY1 = 0.0f, damY2 = 0.0f+COCKPIT_DAMAGE_HEIGHT*2.4f*scaleY;
 		AddQuad(pVertices, damX1, damY1, damX2, damY2, 0.91f, (bSuperLeague)?eCracking2:eCracking, 0, dam/COCKPIT_TOP_WIDTH);
 	}
+	// The Amiga punches holes from the right-hand end of the bar leftwards - its
+	// damage.hole.position starts at 10 and counts down - so slot (10-1-i), not i.
 	for (int i=0; i<nholes; i++) {
-		float holeX1 = (Wide+COCKPIT_HOLE_X_OFFSET+COCKPIT_HOLE_SPACING*i)*2*scaleX, holeX2 = holeX1 + COCKPIT_HOLE_WIDTH*2.0f*scaleX;
+		const int slot = COCKPIT_HOLE_SLOTS-1-i;
+		float holeX1 = (Wide+COCKPIT_HOLE_X_OFFSET+COCKPIT_HOLE_SPACING*slot)*2*scaleX, holeX2 = holeX1 + COCKPIT_HOLE_WIDTH*2.0f*scaleX;
 		float holeY1 = 0.0f, holeY2 = 0.0f+COCKPIT_DAMAGE_HEIGHT*2.4f*scaleY;
 		AddQuad(pVertices, holeX1, holeY1, holeX2, holeY2, 0.95f, (bSuperLeague)?eHole2:eHole, 0,1);
 	}

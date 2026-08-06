@@ -78,21 +78,6 @@ static const int kHeadCellY[DRIVERS_PER_DIVISION] = { 12, 67, 122 };
 #define HEAD_CELL_W		74
 #define HEAD_CELL_H		54
 
-/*	The Hall of Fame heading - 'TRACK  DRIVER   LAP-TIME    DRIVER  RACE-TIME' at column	*/
-/*	0 - allows the track only six characters before the first DRIVER column, so that		*/
-/*	screen needs short forms rather than the full names below.								*/
-static const char *kTrackShortNames[8] =
-	{
-	"LITTLE",
-	"STEPS",
-	"HUMP",
-	"BIG",
-	"SKI",
-	"BRIDGE",
-	"HIGH",
-	"ROLLER"
-	};
-
 /*	Track names as the original prints them, after "The ".									*/
 static const char *kTrackNames[8] =
 	{
@@ -184,6 +169,13 @@ static bool			 gNewRecordRace   = false;
 static bool			 gNewRecordLap    = false;
 static int			 gNewRecordTrack  = 0;
 static bool			 gNewRecordSuper  = false;
+
+/*	The margin of victory from the race just finished, and which way round it went.  Zero	*/
+/*	means there is none to show - a practise run, or a race the loser never completed a		*/
+/*	lap of, which leaves nothing to estimate their pace from.								*/
+static double		 gLastMargin      = 0.0;
+static bool			 gLastMarginWon   = false;
+
 static MenuScreenType gRecordScreenReturn = MS_SELECT;
 
 /*	Track records, kept for the Hall of Fame.  Zero means "not set yet", which the original	*/
@@ -249,8 +241,10 @@ static void MenuScreensDumpAll( const char *prefix )
 
 	snprintf(gPromoted,  sizeof(gPromoted),  "%s", LeagueDriverName(PLAYER_DRIVER));
 	snprintf(gRelegated, sizeof(gRelegated), "%s", LeagueDriverName(10));
-	gLastLapTime  = 27.31;
-	gLastRaceTime = 112.64;
+	gLastLapTime   = 27.31;
+	gLastRaceTime  = 112.64;
+	gLastMargin    = 4.62;
+	gLastMarginWon = true;
 	MenuScreensRecordTimes(0, false, PLAYER_DRIVER, 27.31, 112.64);
 	MenuScreensRecordTimes(5, false, 3, 31.09, 128.44);
 	MenuScreensRecordTimes(0, true,  PLAYER_DRIVER, 24.87, 101.22);
@@ -341,7 +335,11 @@ static void DrawMenu( const char *const *entries, int count, int selected )
 	AmigaMenuSetInk(AMIGA_INK_TEXT);
 	}
 
-/*	The original prints times as m:ss.hh (print.dec.digit2 / R.5edee around line 19470).		*/
+/*	The original prints times as m:ss.hh (print.dec.digit2 / R.5edee around line 19470),		*/
+/*	because its clock only counts hundredths.  Ours keeps wall-clock seconds as a double,	*/
+/*	so records are printed to the thousandth - the extra digit is real, and hundredths tie	*/
+/*	often enough on a track driven repeatedly to be worth splitting.  The cockpit readout	*/
+/*	stays at hundredths: there is no room for a fourth digit in the panel's window.			*/
 static void FormatTime( char *buffer, int size, double seconds )
 	{
 	if (seconds <= 0.0)
@@ -349,8 +347,8 @@ static void FormatTime( char *buffer, int size, double seconds )
 		snprintf(buffer, size, "------------");
 		return;
 		}
-	const int total = (int)(seconds * 100.0 + 0.5);
-	snprintf(buffer, size, "%d:%02d.%02d", (total / 6000), (total / 100) % 60, total % 100);
+	const int total = (int)(seconds * 1000.0 + 0.5);
+	snprintf(buffer, size, "%d:%02d.%03d", (total / 60000), (total / 1000) % 60, total % 1000);
 	}
 
 /*	The 'Race Time:' / 'Best Lap :' strip along the bottom of the fixture screen, on its		*/
@@ -577,34 +575,22 @@ static void DrawLeagueChoice( void )
 	}
 
 /*	R.58888, "display opponents": the twelve drivers as one full-screen picture, four		*/
-/*	divisions across with each division's two tracks under it.  The 68k unpacked the		*/
-/*	people bitmap over the whole screen and then printed the twelve names from the current	*/
-/*	ladder into it, so a driver who has been promoted past you shows up in his new			*/
-/*	division.  Bitmap/heads.png already carries the artwork's own names, so only the cells	*/
-/*	whose driver has moved need repainting - plus the player's, which is blank in the		*/
-/*	original and scribbled over in this artwork.											*/
+/*	divisions across with each division's two tracks under it.  R.58888 unpacked the		*/
+/*	people bitmap, then walked the ladder (DAT.1c9c2) calling R.5893c with the driver		*/
+/*	at each position and a destination slot of position+19 - so it is the whole cell,		*/
+/*	head as well as name plate, that moves when a driver is promoted past you, not just		*/
+/*	the name.  Blit each position's cell from its driver's cell in the artwork; the			*/
+/*	baked-in name travels with the face, and only the player's plate needs repainting		*/
+/*	(blank in the original, scribbled over in this artwork) - which DrawPortrait does.		*/
 static void DrawOpponents( void )
 	{
 	AmigaMenuClear(AMIGA_INK_BLACK);
 	AmigaMenuBlit("heads.png", 0, 0);
 
 	for (int position = 0; position < NUM_LEAGUE_DRIVERS; position++)
-		{
-		const int driver = gLeagueLadder[position];
-		if ((driver == position) && (driver != PLAYER_DRIVER))
-			continue;						// the baked-in name is still the right one
-
-		const int x = kHeadCellX[position / DRIVERS_PER_DIVISION];
-		const int y = kHeadCellY[position % DRIVERS_PER_DIVISION];
-
-		AmigaMenuFillRect(x, y + HEAD_NAME_Y, HEAD_CELL_W, HEAD_NAME_H, kNamePlatePaper);
-
-		const char *name  = LeagueDriverName(driver);
-		const int   textX = x + (HEAD_CELL_W - (int)strlen(name) * AMIGA_CHAR_WIDTH) / 2;
-
-		AmigaMenuSetInk(kNamePlateInk);
-		AmigaMenuPrintPixel(textX, y + HEAD_NAME_Y + 1, name);
-		}
+		DrawPortrait(gLeagueLadder[position],
+					 kHeadCellX[position / DRIVERS_PER_DIVISION],
+					 kHeadCellY[position % DRIVERS_PER_DIVISION]);
 
 	/*	No prompt: the bottom of the picture is the divisions' track lists, and the		*/
 	/*	original just sat on wait.for.fire here.										*/
@@ -767,6 +753,7 @@ static void DrawRacePicture( bool won )
 /*	amber slab the original shows.															*/
 #define RECORD_ROW_1	18
 #define RECORD_ROW_2	19
+#define RECORD_MARGIN_ROW	22
 
 static void DrawTrackRecord( void )
 	{
@@ -811,6 +798,17 @@ static void DrawTrackRecord( void )
 					time);
 
 	AmigaMenuSetInk(AMIGA_INK_TEXT);
+
+	/*	How the race itself was settled, under the records.  The margin is worked out		*/
+	/*	from the gap at the flag rather than driven (the race stops the moment the		*/
+	/*	leader crosses the line), so it is shown to the tenth and no finer.				*/
+	if (gLastMargin > 0.0)
+		{
+		char margin[64];
+		snprintf(margin, sizeof(margin), "%s by %.1f seconds",
+				 gLastMarginWon ? "Won" : "Beaten", gLastMargin);
+		AmigaMenuPrintCentred(RECORD_MARGIN_ROW, margin);
+		}
 	}
 
 /*	The RESULT screen: the fixture that was just run on its bar, then the two portraits		*/
@@ -987,34 +985,56 @@ static void DrawSuperLeague( void )
 	PressAnyKeyPrompt();
 	}
 
-/*	The Hall of Fame is the one screen the original draws outside the menu frame: its		*/
-/*	column headings sit at 31,0,7 and 31,16,1, i.e. column 0 and row 1, well outside the		*/
-/*	panel.  At 45 characters the heading only fits because it spans the full 320 pixels.		*/
+/*	The Hall of Fame is the one screen the original draws outside the menu frame, and the	*/
+/*	only one whose artwork survives as a picture: Bitmap/HallOfFame.png is the whole			*/
+/*	320x200 screen - title, column headings, the eight track plates down the left and the	*/
+/*	eight table rows - with the four record fields left empty for the game to fill in.		*/
+/*	Everything below is measured off that picture rather than off the character grid: the	*/
+/*	rows start at pixel 73 and step 16, which is not a multiple of the 8-pixel row pitch,	*/
+/*	so the fields go down with AmigaMenuPrintPixel.											*/
+/*																							*/
+/*	The two field kinds and their colours: a driver name sits on the dark red bar and is		*/
+/*	printed white, a time sits in the grey slot and is printed black.						*/
+#define HOF_ROW_Y			73		// top of the first row's bar
+#define HOF_ROW_STEP		16		// row pitch, bar (8) plus gutter (8)
+
+#define HOF_LAPNAME_X		24		// the red bar the lap record holder's name sits on
+#define HOF_LAPNAME_W		88
+#define HOF_LAPTIME_X		106		// the grey slot cut out for the lap time
+#define HOF_LAPTIME_W		62		// the slot's full width in the picture (106..167)
+#define HOF_RACENAME_X		176
+#define HOF_RACENAME_W		88
+#define HOF_RACETIME_X		258
+#define HOF_RACETIME_W		60		// (258..317)
+
+/*	The picture's own row order, which is not the track order: it lists the divisions from	*/
+/*	the top of the ladder down (I, II, III, IV - see kDivisionTracks in League.cpp), each		*/
+/*	division's pair the way its plates read.  The plates are lettered DB, SJ, RC, HJ, BR,	*/
+/*	SS, HB, LR, so row n shows this track and kTrackShortNames is not needed here.			*/
+static const int kHallRowTrack[8] = { 5, 4, 7, 6, 3, 1, 2, 0 };
+
+/*	Centre a string in a field of the picture, and centre one across the screen.				*/
+static void HallPrintField( int x, int w, int y, const char *text )
+	{
+	const int len = (int)strlen(text);
+	AmigaMenuPrintPixel(x + (w - len * AMIGA_CHAR_WIDTH) / 2, y, text);
+	}
+
+static void HallPrintCentred( int y, const char *text )
+	{
+	const int len = (int)strlen(text);
+	AmigaMenuPrintPixel((AMIGA_SCREEN_WIDTH - len * AMIGA_CHAR_WIDTH) / 2, y, text);
+	}
+
 static void DrawHallOfFame( void )
 	{
-	/*	The panel grey the menus sit on, so the two full-screen tables belong to the		*/
-	/*	same game as the screens either side of them rather than being white text on		*/
-	/*	black.  There is no frame art out here - the frame's hole is panel-sized - so		*/
-	/*	the paper covers the screen and the rows are the menus' own bars.				*/
-	AmigaMenuClear(AMIGA_PAPER);
+	AmigaMenuBlit("HallOfFame.png", 0, 0);
 
-	/*	Amber for the heading: the menus' one bright colour, and the only thing on		*/
-	/*	this screen that is not either a bar or a record.								*/
-	AmigaMenuSetInk(AMIGA_BAR_SELECTED);
-	AmigaMenuPrintAt(16, 1, "HALL of FAME");					// 31,16,1,'HALL of FAME'
-
-	/*	Which of the two tables is up.  The original prints 'SUPER LEAGUE' here when		*/
-	/*	the career is in it; this page can be either, so it always says which.			*/
-	/*																					*/
-	/*	One row up from the original's, along with everything else above the table:		*/
-	/*	the headings now sit on a bar, and a bar starting on row 6 reaches up into row	*/
-	/*	5's glyphs.  What that buys is a clear row 24 at the bottom for the prompt,		*/
-	/*	which the old spacing ran into.													*/
-	/*	Which league, and whose records these are, on one line - they are one fact		*/
-	/*	between them, and putting them on separate rows crowded the title.  Centred by	*/
-	/*	hand: AmigaMenuPrintCentred centres within the menu panel, and this screen is	*/
-	/*	outside it.  No apostrophe in 'driver's' - the Amiga font has no glyph for one	*/
-	/*	and draws a block.																*/
+	/*	Which of the two tables is up, and whose records these are, on one line under	*/
+	/*	the title - the only clear band the picture leaves, and dark red, so white		*/
+	/*	reads on it.  The original prints 'SUPER LEAGUE' up here when the career is in	*/
+	/*	it; this page can be either, so it always says which.  No apostrophe in			*/
+	/*	'driver's' - the Amiga font has no glyph for one and draws a block.				*/
 	char subtitle[64];
 	if (gPlayerName[0])
 		snprintf(subtitle, sizeof(subtitle), "%s records for %.12s",
@@ -1023,60 +1043,59 @@ static void DrawHallOfFame( void )
 		snprintf(subtitle, sizeof(subtitle), "%s records",
 				 gHallSuper ? "SUPER LEAGUE" : "LEAGUE");
 
-	AmigaMenuSetInk(AMIGA_INK_TEXT);
-	AmigaMenuPrintAt((45 - (int)strlen(subtitle)) / 2, 3, subtitle);
+	AmigaMenuSetInk(AMIGA_INK_WHITE);
+	HallPrintCentred(36, subtitle);
 
-	/*	Say so rather than let a player wonder why a good lap never landed.  Amber is	*/
-	/*	the palette's one bright ink, which is what a line like this wants.				*/
+	/*	The second line under the title.  That the other league is one keypress away is	*/
+	/*	worth saying - nothing else on this screen suggests a second page - but a run		*/
+	/*	with tuning on wants saying more, or a player wonders why a good lap never		*/
+	/*	landed, so the warning takes the line when it is active.							*/
 	if (OpponentTuningActive())
 		{
 		AmigaMenuSetInk(AMIGA_BAR_SELECTED);
-		AmigaMenuPrintAt(0, 4, "Opponent tuning active - times not recorded");
+		HallPrintCentred(46, "Tuning active - times not recorded");
 		}
-
-	/*	A bar under the headings, which tiles onto the top of the table below - and		*/
-	/*	gives the red something light to sit on, which the panel grey does not.			*/
-	AmigaMenuTableRow(6, AMIGA_BAR);
-
-	AmigaMenuSetInk(AMIGA_INK_RED);
-	/*	31,0,7,'TRACK  DRIVER   LAP-TIME    DRIVER  RACE-TIME'						*/
-	AmigaMenuPrintAt(0, 6, "TRACK  DRIVER   LAP-TIME    DRIVER  RACE-TIME");
+	else
+		{
+		AmigaMenuSetInk(AMIGA_INK_WHITE);
+		HallPrintCentred(46, "RETURN continues  Left/Right swaps league");
+		}
 
 	const int league = gHallSuper ? 1 : 0;
 
-	for (int track = 0; track < 8; track++)
+	for (int row = 0; row < 8; row++)
 		{
+		const int track = kHallRowTrack[row];
+		const int y     = HOF_ROW_Y + row * HOF_ROW_STEP;
+
+		/*	A record that has not been set yet: eight dashes rather than the twelve	*/
+		/*	FormatTime writes for the fixture screen's wider band, which would spill	*/
+		/*	out of the slot.  A time is always 0:00.000, the same eight characters -	*/
+		/*	56 pixels of the slot's 60, so it sits in it with a pixel either side.	*/
 		char lap[24], race[24];
 		FormatTime(lap,  sizeof(lap),  gRecordLap[league][track]);
 		FormatTime(race, sizeof(race), gRecordRace[league][track]);
+		if (gRecordLap[league][track]  <= 0.0)	snprintf(lap,  sizeof(lap),  "--------");
+		if (gRecordRace[league][track] <= 0.0)	snprintf(race, sizeof(race), "--------");
 
 		const int lapDriver  = gRecordLapDriver[league][track];
 		const int raceDriver = gRecordRaceDriver[league][track];
 
-		/*	Amber where the player holds one of the two records, light grey where	*/
-		/*	neither is theirs.  The menus use amber for the entry that matters, and	*/
-		/*	on this screen what matters is which of these times you set yourself -	*/
-		/*	which is otherwise buried in a column of driver names.					*/
-		const bool mine = (lapDriver  == PLAYER_DRIVER) ||
-						  (raceDriver == PLAYER_DRIVER);
+		/*	Amber for a record the player holds, white for anyone else's.  The bars	*/
+		/*	belong to the picture and cannot be recoloured, so the name carries it -	*/
+		/*	which is the thing being said anyway: this one is yours.					*/
+		AmigaMenuSetInk((lapDriver == PLAYER_DRIVER) ? AMIGA_BAR_SELECTED : AMIGA_INK_WHITE);
+		HallPrintField(HOF_LAPNAME_X, HOF_LAPNAME_W, y,
+					   (lapDriver >= 0) ? LeagueDriverName(lapDriver) : "");
 
-		const int row = 8 + track * 2;
-		AmigaMenuTableRow(row, mine ? AMIGA_BAR_SELECTED : AMIGA_BAR);
+		AmigaMenuSetInk((raceDriver == PLAYER_DRIVER) ? AMIGA_BAR_SELECTED : AMIGA_INK_WHITE);
+		HallPrintField(HOF_RACENAME_X, HOF_RACENAME_W, y,
+					   (raceDriver >= 0) ? LeagueDriverName(raceDriver) : "");
 
 		AmigaMenuSetInk(AMIGA_INK_BAR_TEXT);
-		AmigaMenuPrintF(0, row, "%-6.6s %-8.8s %-11.11s %-7.7s %-9.9s",
-						kTrackShortNames[track],
-						(lapDriver  >= 0) ? LeagueDriverName(lapDriver)  : "",
-						lap,
-						(raceDriver >= 0) ? LeagueDriverName(raceDriver) : "",
-						race);
+		HallPrintField(HOF_LAPTIME_X,  HOF_LAPTIME_W,  y, lap);
+		HallPrintField(HOF_RACETIME_X, HOF_RACETIME_W, y, race);
 		}
-
-	/*	Both keys on one line under the table.  That the other league is one keypress	*/
-	/*	away is worth saying - nothing else on this screen suggests a second page - and	*/
-	/*	saying it down here leaves the top of the screen to the records.				*/
-	AmigaMenuSetInk(AMIGA_INK_TEXT);
-	AmigaMenuPrintAt(0, 24, "RETURN continues   Left/Right swaps league");
 	}
 
 /*	======================================================================================= */
@@ -2213,11 +2232,14 @@ void MenuScreensAbandonRace( void )
 	}
 
 void MenuScreensRaceFinished( bool playerWon, bool playerBestLap,
-							  double playerLapTime, double playerRaceTime )
+							  double playerLapTime, double playerRaceTime,
+							  double marginTime )
 	{
-	gActive       = true;
-	gLastLapTime  = playerLapTime;
-	gLastRaceTime = playerRaceTime;
+	gActive        = true;
+	gLastLapTime   = playerLapTime;
+	gLastRaceTime  = playerRaceTime;
+	gLastMargin    = marginTime;
+	gLastMarginWon = playerWon;
 
 	/*	A multiplayer race is over as far as the network is concerned: stop stepping and	*/
 	/*	unlock the sim settings.  The session itself is dropped when the player leaves	*/

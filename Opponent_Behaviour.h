@@ -51,6 +51,12 @@ extern void CarToCarCollision( void );
 
 extern long CalculateIfWinning( long start_finish_piece );
 
+/*	The length of a lap, and how far PLAYER or OPPONENT is round the one they are on, in		*/
+/*	the same road units (32 to a segment).  UpdateLapData turns the gap at the flag into		*/
+/*	the margin of victory with them.														*/
+extern long RoadLapDistance( void );
+extern long CarDistanceFromLine( long car, long start_finish_piece );
+
 extern long CalculateOpponentsDistance (void);
 
 extern void GetOpponentWheelCompression( long *rear_left, long *rear_right, long *front );

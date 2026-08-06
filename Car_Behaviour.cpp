@@ -118,6 +118,25 @@ long damaged = 0;
 long new_damage = 0;
 long nholes = 0;
 
+/*	The Amiga keeps damage.hole.position, which starts at 10 and counts DOWN as each		*/
+/*	smash punches a hole out of the damage bar - so the first hole appears in the			*/
+/*	rightmost slot and later ones march leftwards, towards the crack.  nholes is the			*/
+/*	same thing counted the other way (nholes == 10 - damage.hole.position); slots			*/
+/*	DAMAGE_HOLE_SLOTS-nholes .. DAMAGE_HOLE_SLOTS-1 are the ones that are holed.			*/
+/*																							*/
+/*	Slot geometry comes from copy.damage.graphic in "Reference only/StuntCarRacer.s":		*/
+/*	the graphic's x position (in words, plus a half-word shift when the low bit falls		*/
+/*	out) is ((3*slot + 6) >> 1), i.e. 24*slot + 48 pixels in 320-wide screen space.			*/
+#define DAMAGE_HOLE_SLOTS		10
+#define DAMAGE_HOLE_X_ORIGIN	48		// screen x of hole slot 0, in 320-space
+#define DAMAGE_HOLE_SPACING		24		// screen x step between slots
+#define DAMAGE_HOLE_WIDTH		12		// visible width of the hole graphic
+#define DAMAGE_BAR_X_ORIGIN		41		// screen x of the crack's first pixel
+
+// B.1bb55 in the disassembly: how far along the bar the crack has actually been drawn.
+// new_damage is where it is heading; damage.line walks the tip out to meet it.
+static long damage_line_x = 0;
+
 long car_collision_x_acceleration,
 	 car_collision_y_acceleration,
 	 car_collision_z_acceleration;
@@ -540,6 +559,7 @@ void ResetPlayer (void)
 	rear_damage = 0;
 
 	new_damage = 0;
+	damage_line_x = 0;
 	smashed_countdown = 0;
 	nholes = 0;
 
@@ -714,6 +734,7 @@ void CarBehaviour (DWORD input,
 		long saved_front_right_damage = front_right_damage;
 		long saved_rear_damage        = rear_damage;
 		long saved_new_damage         = new_damage;
+		long saved_damage_line_x      = damage_line_x;
 		long saved_nholes             = nholes;
 
 		ResetPlayer();
@@ -724,6 +745,7 @@ void CarBehaviour (DWORD input,
 			front_right_damage = saved_front_right_damage;
 			rear_damage        = saved_rear_damage;
 			new_damage         = saved_new_damage;
+			damage_line_x      = saved_damage_line_x;
 			nholes             = saved_nholes;
 			}
 
@@ -5627,6 +5649,64 @@ on_an_edge:
 /*	Description:				*/
 /*	======================================================================================= */
 
+// True if the crack tip, at position x along the bar, is sitting in a hole that has
+// already been smashed out.  See DAMAGE_HOLE_* above for where the slots sit.
+static bool DamageLineInHole (long x)
+{
+	long screen_x = DAMAGE_BAR_X_ORIGIN + x;
+
+	for (long slot = DAMAGE_HOLE_SLOTS - nholes; slot < DAMAGE_HOLE_SLOTS; slot++)
+	{
+		long hole_x = DAMAGE_HOLE_X_ORIGIN + DAMAGE_HOLE_SPACING * slot;
+		if ((screen_x >= hole_x) && (screen_x < hole_x + DAMAGE_HOLE_WIDTH))
+			return true;
+	}
+
+	return false;
+}
+
+/*	======================================================================================= */
+/*	Function:		DamageLine																*/
+/*																							*/
+/*	Description:	Walks the crack out to new_damage, one pixel at a time, as damage.line	*/
+/*					does.  The Amiga plots each pixel and this port draws the bar as a		*/
+/*					single quad, so the drawing is not repeated here - but the side effect	*/
+/*					is: where the crack runs into a hole there is nothing to plot, so the	*/
+/*					original bumps new.damage instead and carries on.  The bar therefore		*/
+/*					races across every hole it meets, and each hole costs the car its own	*/
+/*					width in damage.  That is why a holed car dies so much faster.			*/
+/*	======================================================================================= */
+
+static void DamageLine (void)
+{
+	while (damage_line_x < new_damage)
+	{
+		++damage_line_x;
+
+		if (damage_line_x >= 0xf0)
+		{
+			// Amiga: car.is.wrecked.  Wrecking from damage is not modelled yet, so
+			// park the crack at the end of the bar instead of running off it.
+			damage_line_x = 0xef;
+			if (new_damage > 0xef)
+			{
+				new_damage = 0xef;
+				front_left_damage = front_right_damage = rear_damage = new_damage;
+			}
+			return;
+		}
+
+		if (DamageLineInHole(damage_line_x))
+		{
+			++new_damage;
+			if (new_damage > 0xff) new_damage = 0xff;
+			// dlb: the three wheel damages are what new_damage is averaged from, so
+			// they have to be dragged up with it or the next frame would undo this.
+			front_left_damage = front_right_damage = rear_damage = new_damage;
+		}
+	}
+}
+
 void UpdateDamage (void)
 {
 	if (damaged)
@@ -5634,6 +5714,7 @@ void UpdateDamage (void)
 		long d = (front_left_damage + front_right_damage) / 2;	// average front damage
 		new_damage = (d + rear_damage) / 2;					// total average damage
 		// value new_damage must be used to draw damage line
+		DamageLine();
 	}
 
 	if (smashed_countdown)
@@ -5655,8 +5736,9 @@ void UpdateDamage (void)
 
 	if (damage_value < 0x1400) goto PlayCreakSound;
 
-	// if (damage.hole.position == 0) goto PlayCreakSound;
-	//--damage.hole.position
+	// The Amiga's damage.hole.position counts down from 10 and stops at 0 - once the
+	// bar is full of holes there is nowhere left to punch one, and no more smashes.
+	if (nholes >= DAMAGE_HOLE_SLOTS) goto PlayCreakSound;
 	// copy 'damage hole smashed' graphic to damage.hole.position
 	nholes++;
 
@@ -5721,11 +5803,25 @@ double oppCurrentLapTime = 0.0;
 double oppBestLapTime = 0.0;
 bool   bOppBestLapTimeSet = false;
 
+// The margin of victory.  The race stops the moment the leader takes the flag, so the
+// loser's time is never actually driven - what there is instead is the distance they are
+// still short of the line.  Turn that into a time at the pace they have kept up to that
+// point (their whole race so far, rather than a momentary speed, which would read as
+// minutes if they happened to be upside down at the flag).  An estimate, so it is only
+// ever shown to the tenth.
+double raceMarginTime = 0.0;
+bool   bRaceMarginSet = false;
+
+// How long each car has been racing, from its first crossing of the line - the clock the
+// pace above is measured against.
+static double raceClock[NUM_CARS] = { 0.0, 0.0 };
+
 void ResetLapData (long car)
 {
 	raceFinished = raceWon = FALSE;
 	lapNumber[car] = 0;
 	carOnFirstHalfOfLap[car] = false;
+	raceClock[car] = 0.0;
 
 	currentLapTime = lastLapTime = bestLapTime = 0.0;
 	bBestLapTimeSet = false;
@@ -5733,6 +5829,9 @@ void ResetLapData (long car)
 
 	oppCurrentLapTime = oppBestLapTime = 0.0;
 	bOppBestLapTimeSet = false;
+
+	raceMarginTime = 0.0;
+	bRaceMarginSet = false;
 }
 
 void UpdateLapData (double elapsedSeconds)
@@ -5811,6 +5910,14 @@ void UpdateLapData (double elapsedSeconds)
 //	VALUE2 = lapNumber[OPPONENT];
 //	VALUE3 = carOnFirstHalfOfLap[PLAYER] ? 1 : 0;
 
+	// Each car's race clock, running from its own first crossing of the line.
+	if (!raceFinished)
+	{
+		for (car = OPPONENT; car < NUM_CARS; car++)
+			if (lapNumber[car] >= 1)
+				raceClock[car] += elapsedSeconds;
+	}
+
 	for (car = OPPONENT; car < NUM_CARS; car++)
 	{
 		if (!raceFinished)
@@ -5825,6 +5932,23 @@ void UpdateLapData (double elapsedSeconds)
 					raceWon = true;
 				else
 					raceWon = false;
+
+				// The gap at the flag, as a time.  The loser still has 'remaining' road
+				// units to cover; at the pace they have averaged over the 'covered' units
+				// behind them, that is how much longer they would have needed.
+				const long loser    = raceWon ? OPPONENT : PLAYER;
+				const long lapDist  = RoadLapDistance();
+				const long fromLine = CarDistanceFromLine(loser, start_finish_piece);
+
+				const double remaining = (double)((LAP_THAT_FINISHES_RACE - lapNumber[loser]) * lapDist)
+									   - (double)fromLine;
+				const double covered   = (double)((lapNumber[loser] - 1) * lapDist) + (double)fromLine;
+
+				if ((remaining > 0.0) && (covered > 0.0) && (raceClock[loser] > 0.0))
+				{
+					raceMarginTime = remaining * (raceClock[loser] / covered);
+					bRaceMarginSet = (raceMarginTime < LAP_TIME_MAX_SECONDS);
+				}
 			}
 		}
 	}
@@ -6169,6 +6293,7 @@ void CloseAmigaRecording( void )
 	X(long, rear_damage)												\
 	X(long, damaged)													\
 	X(long, new_damage)													\
+	X(long, damage_line_x)												\
 	X(long, nholes)														\
 	X(long, damage_value)												\
 	X(long, damaged_count)												\

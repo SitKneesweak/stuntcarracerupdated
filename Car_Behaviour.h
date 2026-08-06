@@ -104,6 +104,12 @@ extern bool   bOppBestLapTimeSet;	// (used to award the league's Best Lap point)
 extern bool   bBestLapTimeSet;
 extern double lapTimeHoldRemaining;	// >0 while the readout is frozen on lastLapTime
 
+// The margin of victory (see UpdateLapData), valid only if bRaceMarginSet - a practise run
+// has nobody to be ahead of, and a race the loser never got a lap into has no pace to
+// estimate one from.
+extern double raceMarginTime;
+extern bool   bRaceMarginSet;
+
 #ifdef USE_AMIGA_RECORDING
 extern void RequestGameReplay (void);
 extern void RequestStoredReplay (void);

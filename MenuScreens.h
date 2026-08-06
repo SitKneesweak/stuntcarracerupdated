@@ -76,9 +76,12 @@ void MenuScreensRender( IDirect3DDevice9 *pd3dDevice );
 
 /*	Called when a race ends, so a league race can be scored and the result shown.  For a		*/
 /*	practise run this just returns to the SELECT menu.  The two times are the player's		*/
-/*	fastest lap and total race time, which feed the Hall of Fame.							*/
+/*	fastest lap and total race time, which feed the Hall of Fame.  marginTime is how far		*/
+/*	behind the loser was when the flag fell, in seconds, or 0 when there is no margin to		*/
+/*	show (a practise run, or a beating too heavy to estimate a time for).					*/
 void MenuScreensRaceFinished( bool playerWon, bool playerBestLap,
-							  double playerLapTime, double playerRaceTime );
+							  double playerLapTime, double playerRaceTime,
+							  double marginTime );
 
 /*	True if the race that is running (or about to) counts towards the season.				*/
 bool MenuScreensRaceIsLeague( void );

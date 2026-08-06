@@ -205,6 +205,9 @@ void LeagueRecordResult( bool playerWon, bool playerBestLap )
 
 	/*	The two CPU drivers in the division also race each other while you're racing one	*/
 	/*	of them, so the table stays consistent.  Higher up the ladder wins more often.	*/
+	/*	They meet twice a season, same as every other pair, so only pair them off on		*/
+	/*	the first race of each track - otherwise they'd finish the season on six races	*/
+	/*	to your four.																	*/
 	const int division = LeaguePlayerDivision();
 	const int first    = ((NUM_DIVISIONS - 1) - division) * DRIVERS_PER_DIVISION;
 
@@ -217,13 +220,15 @@ void LeagueRecordResult( bool playerWon, bool playerBestLap )
 			cpu[n++] = driver;
 		}
 
-	if (n == DRIVERS_PER_DIVISION - 1)
+	const int cpuMeeting = gLeagueRace / 2;			// one per opponent block
+
+	if ((n == DRIVERS_PER_DIVISION - 1) && ((gLeagueRace & 1) == 0)
+		&& (cpuMeeting < DRIVERS_PER_DIVISION - 1))
 		{
-		/*	cpu[0] sits above cpu[1] on the ladder, so give it the edge, alternating	*/
-		/*	enough that the runner-up still takes points off it.						*/
-		const bool firstWins = ((gLeagueRace % 3) != 2);
-		Score(cpu[0],  firstWins, (gLeagueRace & 1) == 0);
-		Score(cpu[1], !firstWins, (gLeagueRace & 1) != 0);
+		/*	cpu[0] sits above cpu[1] on the ladder, so give it the edge, but let the	*/
+		/*	runner-up take the fastest lap off it in the other meeting.				*/
+		Score(cpu[0], cpuMeeting == 0, cpuMeeting == 0);
+		Score(cpu[1], cpuMeeting != 0, cpuMeeting != 0);
 		}
 
 	gLeagueRace++;
